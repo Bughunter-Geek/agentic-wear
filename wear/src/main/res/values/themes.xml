@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.AgenticWear" parent="android:style/Theme.DeviceDefault">
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#090B12</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+</resources>

@@ -1,0 +1,63 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentic-wear-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PAIR_RELAY",
+        "class_name": "PairRelay"
+      },
+      {
+        "name": "PAIR_ADMISSION",
+        "class_name": "PairAdmission"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PairRelay"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PairAdmission"]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "PAIR_SOURCE_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 8,
+        "period": 60
+      }
+    },
+    {
+      "name": "PAIR_LOCATION_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ],
+  "vars": {
+    "PAIR_CODE_TTL_SECONDS": "600",
+    "INBOX_TTL_SECONDS": "86400",
+    "MAX_PENDING_PAIRS": "500",
+    "MAX_PAIR_ATTEMPTS_PER_MINUTE": "120"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  }
+}

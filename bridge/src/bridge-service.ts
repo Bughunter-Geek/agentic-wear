@@ -1,0 +1,196 @@
+import type { BridgeConfig } from "./config.js";
+import { writeConfig } from "./config.js";
+import { CryptoBox } from "./crypto-box.js";
+import {
+  AppServerClient,
+  type ApprovalEvent,
+  type SessionView,
+  type TerminalEvent,
+} from "./app-server-client.js";
+import { RelayClient } from "./relay-client.js";
+import { ReplayGuard } from "./replay-guard.js";
+import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
+import { type WatchPayload, type WireEnvelope } from "./schemas.js";
+import type { Transcriber } from "./transcriber.js";
+
+type SendablePayload = Record<string, unknown> & { version: 1; kind: string };
+
+export class BridgeService {
+  private readonly ownedThreads: Set<string>;
+  private readonly crypto: CryptoBox;
+  private readonly appServer: AppServerClient;
+  private readonly controller = new AbortController();
+  private persistTask: Promise<void> = Promise.resolve();
+  private fatalError: Error | null = null;
+
+  constructor(
+    private readonly config: BridgeConfig,
+    private readonly relay: RelayClient,
+    private readonly privateKey: string,
+    private readonly transcriber: Transcriber,
+    private readonly replayGuard = new ReplayGuard(),
+  ) {
+    this.ownedThreads = new Set(config.watchOwnedThreadIds);
+    this.crypto = new CryptoBox(config.pairId, privateKey, config.bridgePublicKey, config.watchPublicKey);
+    this.appServer = new AppServerClient(
+      this.ownedThreads,
+      (event) => this.onTerminal(event),
+      (event) => this.onApproval(event),
+      (error) => {
+        this.fatalError = error;
+        this.controller.abort(error);
+      },
+    );
+  }
+
+  async run(): Promise<void> {
+    const status = await this.relay.status();
+    if (!status.paired || !status.watchPublicKey) throw new Error("The watch has not completed authenticated pairing");
+    this.assertWatchPublicKey(status.watchPublicKey);
+
+    const socketTask = this.relay.runSocket(
+      this.controller.signal,
+      (envelope) => this.onEnvelope(envelope),
+      (publicKey) => Promise.resolve(this.assertWatchPublicKey(publicKey)),
+    );
+    try {
+      if (this.controller.signal.aborted) throw abortError(this.controller.signal);
+      await this.appServer.connect("daemon");
+      await this.sendSessions();
+      const monitorTask = this.appServer.monitorTerminals(this.controller.signal).catch((error: unknown) => {
+        this.fatalError = error instanceof Error ? error : new Error("Terminal monitor stopped");
+        this.controller.abort(this.fatalError);
+      });
+      await socketTask;
+      await monitorTask;
+      if (this.fatalError) throw this.fatalError;
+    } finally {
+      this.appServer.close();
+      this.controller.abort();
+      await socketTask.catch(() => undefined);
+    }
+  }
+
+  stop(): void {
+    this.controller.abort(new Error("Bridge stopped"));
+  }
+
+  private assertWatchPublicKey(publicKey: string): void {
+    if (!this.config.watchPublicKey || this.config.watchPublicKey !== publicKey) {
+      throw new Error("Relay presented a watch key that does not match the authenticated pairing");
+    }
+  }
+
+  private async onEnvelope(envelope: WireEnvelope): Promise<void> {
+    await processAuthenticatedEnvelope(
+      envelope,
+      this.crypto,
+      this.replayGuard,
+      (payload) => this.handleWatchPayload(payload),
+    );
+  }
+
+  private async handleWatchPayload(payload: WatchPayload): Promise<void> {
+    try {
+      switch (payload.kind) {
+        case "session.sync":
+          await this.sendSessions();
+          return;
+        case "transcription.create":
+          await this.createTranscription(payload);
+          return;
+        case "turn.submit": {
+          const result = await this.appServer.submitTurn(payload.threadId, payload.text, this.config.defaultCwd);
+          if (result.created) await this.persistOwnedThreads();
+          await this.send({
+            version: 1,
+            kind: "turn.accepted",
+            requestId: payload.requestId,
+            threadId: result.threadId,
+          });
+          await this.sendSessions();
+          return;
+        }
+        case "approval.respond":
+          this.appServer.respondToApproval(payload.approvalId, payload.decision);
+          await this.send({
+            version: 1,
+            kind: "approval.accepted",
+            requestId: payload.requestId,
+            approvalId: payload.approvalId,
+          });
+          return;
+      }
+    } catch (error) {
+      const kind = payload.kind === "transcription.create"
+        ? "transcription.error"
+        : payload.kind === "approval.respond"
+          ? "approval.error"
+          : "turn.error";
+      await this.send({
+        version: 1,
+        kind,
+        requestId: payload.requestId,
+        message: publicError(error),
+      });
+    }
+  }
+
+  private async createTranscription(payload: Extract<WatchPayload, { kind: "transcription.create" }>): Promise<void> {
+    const audio = Buffer.from(payload.audioBase64, "base64");
+    try {
+      if (audio.byteLength < 1_024 || audio.byteLength > 512 * 1_024) {
+        throw new Error("Voice recordings must be between 1 KiB and 512 KiB");
+      }
+      const text = await this.transcriber.transcribe(audio, payload.mimeType);
+      await this.send({
+        version: 1,
+        kind: "transcription.ready",
+        requestId: payload.requestId,
+        threadId: payload.threadId,
+        text,
+      });
+    } finally {
+      audio.fill(0);
+    }
+  }
+
+  private async onTerminal(event: TerminalEvent): Promise<void> {
+    await this.send({ version: 1, ...event });
+    await this.sendSessions().catch((error: unknown) => {
+      console.error(JSON.stringify({ level: "error", message: "Could not refresh sessions", error: publicError(error) }));
+    });
+  }
+
+  private async onApproval(event: ApprovalEvent): Promise<void> {
+    await this.send({ version: 1, ...event });
+  }
+
+  private async sendSessions(): Promise<void> {
+    const sessions: SessionView[] = await this.appServer.listSessions();
+    await this.send({ version: 1, kind: "sessions.snapshot", sessions });
+  }
+
+  private async send(payload: SendablePayload): Promise<void> {
+    await this.relay.sendToWatch(await this.crypto.encrypt(payload));
+  }
+
+  private async persistOwnedThreads(): Promise<void> {
+    this.config.watchOwnedThreadIds = [...this.ownedThreads].slice(-200);
+    await this.persistConfig();
+  }
+
+  private async persistConfig(): Promise<void> {
+    this.persistTask = this.persistTask.catch(() => undefined).then(() => writeConfig(this.config));
+    await this.persistTask;
+  }
+}
+
+function publicError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "The request could not be completed";
+  return message.trim().replace(/\s+/gu, " ").slice(0, 260) || "The request could not be completed";
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Bridge stopped");
+}

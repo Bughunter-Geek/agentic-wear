@@ -1,0 +1,112 @@
+import { z } from "zod";
+
+const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
+const base64 = z.string().min(16).max(1_048_576).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
+
+export const wireEnvelopeSchema = z.object({
+  version: z.literal(1),
+  messageId: safeId,
+  sender: z.enum(["bridge", "watch"]),
+  recipient: z.enum(["bridge", "watch"]),
+  sentAt: z.number().int().positive(),
+  nonce: base64.max(32),
+  ciphertext: base64,
+}).strict();
+
+export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;
+
+export const watchPayloadSchema = z.discriminatedUnion("kind", [
+  z.object({ version: z.literal(1), kind: z.literal("session.sync"), requestId: safeId }).strict(),
+  z.object({
+    version: z.literal(1),
+    kind: z.literal("transcription.create"),
+    requestId: safeId,
+    audioBase64: base64.max(700_000),
+    mimeType: z.literal("audio/mp4"),
+    threadId: safeId.nullable(),
+  }).strict(),
+  z.object({
+    version: z.literal(1),
+    kind: z.literal("turn.submit"),
+    requestId: safeId,
+    threadId: safeId.nullable(),
+    text: z.string().trim().min(1).max(4_000),
+  }).strict(),
+  z.object({
+    version: z.literal(1),
+    kind: z.literal("approval.respond"),
+    requestId: safeId,
+    approvalId: safeId,
+    decision: z.enum(["accept", "decline"]),
+  }).strict(),
+]);
+
+export type WatchPayload = z.infer<typeof watchPayloadSchema>;
+
+export const relaySocketMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("envelope"), envelope: wireEnvelopeSchema }).strict(),
+  z.object({
+    type: z.literal("pair.status"),
+    paired: z.boolean(),
+    watchPublicKey: base64.max(1_024).nullable(),
+    watchProof: z.string().length(43).nullable(),
+  }).strict(),
+  z.object({
+    type: z.literal("pair.challenge"),
+    watchPublicKey: base64.max(1_024),
+    watchProof: z.string().length(43),
+  }).strict(),
+  z.object({ type: z.literal("pong"), at: z.number().int().positive() }).strict(),
+]);
+
+export const threadSchema = z.object({
+  id: safeId,
+  preview: z.string().default(""),
+  name: z.string().nullable().optional(),
+  parentThreadId: safeId.nullable().optional(),
+  agentRole: z.string().min(1).max(100).nullable().optional(),
+  updatedAt: z.number().int().nonnegative(),
+  status: z.object({ type: z.enum(["notLoaded", "idle", "systemError", "active"]) }).passthrough(),
+  canAcceptDirectInput: z.boolean().nullable().optional(),
+}).passthrough();
+
+export type CodexThread = z.infer<typeof threadSchema>;
+
+export const threadListResponseSchema = z.object({
+  data: z.array(threadSchema),
+  nextCursor: z.string().nullable(),
+}).passthrough();
+
+export const turnCompletedSchema = z.object({
+  threadId: safeId,
+  turn: z.object({
+    id: safeId,
+    status: z.enum(["completed", "interrupted", "failed"]),
+    completedAt: z.number().nullable().optional(),
+    error: z.object({ message: z.string() }).passthrough().nullable().optional(),
+  }).passthrough(),
+}).strict();
+
+export const turnStartedSchema = z.object({
+  threadId: safeId.optional(),
+  turn: z.object({ id: safeId }).passthrough(),
+}).passthrough();
+
+export const turnListResponseSchema = z.object({
+  data: z.array(z.object({
+    id: safeId,
+    status: z.enum(["completed", "interrupted", "failed", "inProgress"]),
+    completedAt: z.number().nullable().optional(),
+    error: z.object({ message: z.string() }).passthrough().nullable().optional(),
+  }).passthrough()),
+  nextCursor: z.string().nullable(),
+  backwardsCursor: z.string().nullable(),
+}).passthrough();
+
+export const jsonRpcMessageSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  method: z.string().optional(),
+  params: z.unknown().optional(),
+  result: z.unknown().optional(),
+  error: z.object({ code: z.number(), message: z.string() }).passthrough().optional(),
+}).passthrough();

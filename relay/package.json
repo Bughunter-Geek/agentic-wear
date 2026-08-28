@@ -1,0 +1,26 @@
+{
+  "name": "@agentic-wear/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit && oxlint --deny typescript/no-floating-promises src test",
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.1",
+    "@types/node": "26.4.0",
+    "oxlint": "1.80.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.127.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
