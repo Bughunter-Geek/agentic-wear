@@ -78,7 +78,13 @@ class MainActivity : ComponentActivity() {
     private fun observeActiveVoiceSession() {
         lifecycleScope.launch {
             viewModel.state
-                .map { state -> keepScreenOnForVoiceSession(state.recording, state.transcribing) }
+                .map { state ->
+                    keepScreenOnForVoiceSession(
+                        recording = state.recording,
+                        transcribing = state.transcribing,
+                        transcriptionElapsedMillis = state.transcriptionElapsedMillis,
+                    )
+                }
                 .distinctUntilChanged()
                 .collect(::setKeepScreenOn)
         }
@@ -131,5 +137,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-internal fun keepScreenOnForVoiceSession(recording: Boolean, transcribing: Boolean): Boolean =
-    recording || transcribing
+internal const val TRANSCRIBING_SCREEN_AWAKE_LIMIT_MS = 30_000L
+
+internal fun keepScreenOnForVoiceSession(
+    recording: Boolean,
+    transcribing: Boolean,
+    transcriptionElapsedMillis: Long?,
+): Boolean = recording || (
+    transcribing && (transcriptionElapsedMillis ?: 0L) < TRANSCRIBING_SCREEN_AWAKE_LIMIT_MS
+)
