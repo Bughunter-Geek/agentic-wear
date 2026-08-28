@@ -31,7 +31,7 @@ The watch sends a bounded encrypted AAC recording only to its paired bridge. The
 
 There is no shared transcription backend: every deployment owner runs their own bridge and model. The public relay routes opaque envelopes by pair identity and cannot enroll an unrelated watch into another owner's authenticated pair.
 
-The polling fallback examines only `completed`, `failed`, or `interrupted` turn records. It cannot turn reasoning, tool progress, item completion, or partial assistant text into an alert.
+The polling fallback examines only `completed`, `failed`, or `interrupted` turn records whose completion time is newer than its preceding observation. It cannot replay an old interrupted turn after an unrelated thread update or turn reasoning, tool progress, item completion, or partial assistant text into an alert.
 
 ## iPhone boundary
 

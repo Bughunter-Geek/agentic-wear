@@ -10,7 +10,7 @@ npm --prefix relay test
 ./gradlew :wear:lintDebug :wear:assembleDebug
 ```
 
-The bridge suite includes cross-endpoint crypto interoperability, shared bridge/watch pairing vectors, persistent and concurrent replay rejection, timestamp bounds, and a negative matrix proving that reasoning/item/raw-response notifications cannot be classified as a finished turn. Relay tests cover mutual endpoint proof state, substitution rejection, pre-allocation admission, source rate limiting, bounded pending state, idempotent ciphertext queues, acknowledgement, refusal to persist offline watch audio, and suppression of duplicate Firebase wakes. Watch tests verify atomic alert claiming, one continuous one-second vibration policy, and silence-gated voice activity mapping.
+The bridge suite includes cross-endpoint crypto interoperability, shared bridge/watch pairing vectors, persistent and concurrent replay rejection, timestamp bounds, stale-terminal replay rejection, and a negative matrix proving that reasoning/item/raw-response notifications cannot be classified as a finished turn. Relay tests cover mutual endpoint proof state, substitution rejection, pre-allocation admission, source rate limiting, bounded pending state, idempotent ciphertext queues, acknowledgement, refusal to persist offline watch audio, and suppression of duplicate Firebase wakes. Watch tests verify atomic alert claiming, one continuous one-second vibration policy, and silence-gated voice activity mapping.
 
 ## Emulator visual QA
 
