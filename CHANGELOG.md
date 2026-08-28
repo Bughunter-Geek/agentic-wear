@@ -2,6 +2,14 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.6-alpha — 2026-08-29
+
+### Refined
+
+- Rebuilds the model and reasoning selector around the round Wear OS canvas with a calmer edge-to-edge overlay, clearer hierarchy, and a reference-led segmented effort rail.
+- Replaces improvised glyphs with native Material icons, improves touch targets and haptic feedback, and keeps the selected model centered with round-safe neighboring previews.
+- Hides obscured transcript controls from accessibility while the selector is open and exposes labeled range and selection semantics.
+
 ## 0.4.5-alpha — 2026-08-29
 
 ### Added

@@ -163,6 +163,7 @@ dependencies {
 
     implementation(composeBom)
     implementation(firebaseBom)
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.fragment:fragment:1.9.0")

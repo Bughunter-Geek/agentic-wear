@@ -24,6 +24,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -36,7 +37,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,8 +50,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,14 +87,21 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -110,6 +123,7 @@ import io.github.sirbughunter.agenticwear.update.UpdateUiState
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
+import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.Text
 import kotlinx.coroutines.launch
 
@@ -699,6 +713,9 @@ private fun TranscriptScreen(
         Column(
             Modifier
                 .fillMaxSize()
+                .semantics {
+                    if (selectorOpen) hideFromAccessibility()
+                }
                 .requestFocusOnHierarchyActive()
                 .rotaryScrollable(
                     behavior = RotaryScrollableDefaults.behavior(scrollState),
@@ -799,10 +816,8 @@ private fun TranscriptScreen(
         }
         AnimatedVisibility(
             visible = selectorOpen,
-            enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
-                scaleIn(tween(200, easing = AgenticEaseOut), initialScale = 0.94f),
-            exit = fadeOut(tween(130, easing = AgenticEaseOut)) +
-                scaleOut(tween(130, easing = AgenticEaseOut), targetScale = 0.97f),
+            enter = fadeIn(tween(180, easing = AgenticEaseOut)),
+            exit = fadeOut(tween(140, easing = AgenticEaseOut)),
         ) {
             ModelEffortOverlay(
                 state = state,
@@ -822,22 +837,49 @@ private fun ReasoningControl(
     modifier: Modifier = Modifier,
 ) {
     val effortLabel = ReasoningEffortPolicy.label(effort)
-    TactileCard(
-        onClick = onClick,
-        modifier = modifier.semantics {
-            contentDescription = "$effortLabel reasoning effort. $modelLabel model. Open model and effort controls"
-        },
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "reasoning control press",
+    )
+    Row(
+        modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(CircleShape)
+            .background(Color(0xFF17171E).copy(alpha = 0.96f))
+            .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape)
+            .semantics {
+                contentDescription = "$effortLabel reasoning effort. $modelLabel model. Open model and effort controls"
+            }
+            .clickable(
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                onClick()
+            }
+            .padding(start = 9.dp, end = 5.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ReasoningGlyph(Modifier.size(17.dp), accent = Violet)
-            Spacer(Modifier.width(7.dp))
-            Text(effortLabel, color = Frost, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(5.dp))
-            Text("⌄", color = Violet, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-        }
+        Icon(
+            imageVector = Icons.Rounded.GraphicEq,
+            contentDescription = null,
+            tint = Violet,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(effortLabel, color = Frost, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(1.dp))
+        Icon(
+            imageVector = Icons.Rounded.KeyboardArrowDown,
+            contentDescription = null,
+            tint = Muted,
+            modifier = Modifier.size(15.dp),
+        )
     }
 }
 
@@ -848,107 +890,168 @@ private fun ModelEffortOverlay(
     onModel: (String?) -> Unit,
     onEffort: (String) -> Unit,
 ) {
-    val blockerInteractions = remember { MutableInteractionSource() }
     val selectedModel = state.models.firstOrNull { it.model == state.selectedModel }
     val effortOptions = ReasoningEffortPolicy.options(selectedModel)
     val selectedEffortIndex = effortOptions.indexOf(ReasoningEffortPolicy.normalize(state.reasoningEffort))
         .coerceIn(0, effortOptions.lastIndex)
     val modelOptions = listOf<ModelOption?>(null) + state.models
-    val horizontalPadding = roundAwareHorizontalPadding(round = 25.dp, square = 16.dp)
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.78f))
-            .clickable(
-                interactionSource = blockerInteractions,
-                indication = null,
-                role = Role.Button,
-                onClick = onDismiss,
-            )
-            .padding(horizontal = horizontalPadding),
-        contentAlignment = Alignment.Center,
-    ) {
+    val selectedModelIndex = modelOptions.indexOfFirst { option ->
+        option?.model == state.selectedModel || option == null && state.selectedModel == null
+    }.coerceAtLeast(0)
+    val modelListState = rememberLazyListState(initialFirstVisibleItemIndex = selectedModelIndex)
+    val scope = rememberCoroutineScope()
+    val horizontalPadding = roundAwareHorizontalPadding(round = 28.dp, square = 18.dp)
+    val effortLabel = ReasoningEffortPolicy.label(state.reasoningEffort)
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = 0.9f),
+                            Color(0xFF07070A).copy(alpha = 0.97f),
+                        ),
+                    ),
+                )
+                .pointerInput(onDismiss) {
+                    detectTapGestures(onTap = { onDismiss() })
+                },
+        )
         Column(
             Modifier
-                .fillMaxWidth()
-                .clip(SurfaceShape)
-                .background(Brush.linearGradient(listOf(PanelRaised, Panel)))
-                .border(1.dp, Violet.copy(alpha = 0.74f), SurfaceShape)
-                .clickable(role = Role.Button, onClick = {})
-                .heightIn(max = 414.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 14.dp),
+                .fillMaxSize()
+                .padding(top = 8.dp, bottom = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ReasoningGlyph(Modifier.size(22.dp), accent = Violet)
-                Spacer(Modifier.width(8.dp))
+            Box(Modifier.fillMaxWidth().height(44.dp)) {
                 Text(
-                    "${ReasoningEffortPolicy.label(state.reasoningEffort)} effort",
-                    color = Frost,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "×",
-                    color = Muted,
-                    fontSize = 20.sp,
+                    text = buildAnnotatedString {
+                        withStyle(SpanStyle(color = Violet, fontWeight = FontWeight.Bold)) {
+                            append(effortLabel)
+                        }
+                        withStyle(SpanStyle(color = Frost, fontWeight = FontWeight.SemiBold)) {
+                            append(" effort")
+                        }
+                    },
+                    fontSize = 18.sp,
+                    letterSpacing = (-0.25).sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 62.dp)
+                        .align(Alignment.Center),
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = horizontalPadding - 4.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .clickable(role = Role.Button, onClick = onDismiss)
-                        .padding(horizontal = 7.dp, vertical = 1.dp)
                         .semantics { contentDescription = "Close model and effort controls" },
-                )
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.07f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = null,
+                            tint = Frost.copy(alpha = 0.78f),
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                }
             }
-            Spacer(Modifier.height(3.dp))
             Text(
-                "Drag left or right for the next turn",
-                color = Muted,
+                "Drag to tune the next turn",
+                color = Muted.copy(alpha = 0.86f),
                 fontSize = 9.sp,
+                lineHeight = 12.sp,
                 textAlign = TextAlign.Center,
             )
-            Spacer(Modifier.height(7.dp))
+            Spacer(Modifier.height(6.dp))
             ReasoningTrack(
                 value = selectedEffortIndex,
                 valueCount = effortOptions.size,
                 onValueChange = { value -> onEffort(effortOptions[value.coerceIn(0, effortOptions.lastIndex)]) },
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding)
                     .semantics {
-                        contentDescription = "Reasoning effort slider, ${ReasoningEffortPolicy.label(state.reasoningEffort)}"
+                        contentDescription = "Reasoning effort slider"
+                        stateDescription = effortLabel
                     },
             )
-            Row(Modifier.fillMaxWidth().padding(horizontal = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(ReasoningEffortPolicy.label(effortOptions.first()), color = Muted, fontSize = 8.sp)
-                Text(ReasoningEffortPolicy.label(effortOptions.last()), color = Muted, fontSize = 8.sp)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = horizontalPadding + 7.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    ReasoningEffortPolicy.label(effortOptions.first()),
+                    color = Muted.copy(alpha = 0.7f),
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                )
+                Text(
+                    ReasoningEffortPolicy.label(effortOptions.last()),
+                    color = Muted.copy(alpha = 0.7f),
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                )
             }
-            Spacer(Modifier.height(9.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("MODEL", color = Violet, fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp)
-                Spacer(Modifier.width(7.dp))
-                Box(Modifier.height(1.dp).weight(1f).background(Color(0xFF3A3D55)))
-                Spacer(Modifier.width(7.dp))
-                Text("next turn", color = Muted, fontSize = 8.sp)
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = horizontalPadding + 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "MODEL",
+                    color = Violet.copy(alpha = 0.94f),
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.2.sp,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Next turn",
+                    color = Muted.copy(alpha = 0.72f),
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                )
             }
             Spacer(Modifier.height(5.dp))
-            Box(Modifier.fillMaxWidth().height(58.dp)) {
+            BoxWithConstraints(Modifier.fillMaxWidth().height(54.dp)) {
+                val choiceWidth = 112.dp
+                val carouselPadding = ((maxWidth - choiceWidth) / 2).coerceAtLeast(0.dp)
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    state = modelListState,
+                    contentPadding = PaddingValues(horizontal = carouselPadding),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(modelOptions, key = { it?.model ?: "auto" }) { option ->
+                    items(modelOptions.size, key = { index -> modelOptions[index]?.model ?: "auto" }) { index ->
+                        val option = modelOptions[index]
                         val selected = option?.model == state.selectedModel || option == null && state.selectedModel == null
                         ModelChoice(
                             option = option,
                             selected = selected,
-                            modifier = Modifier.width(78.dp),
+                            modifier = Modifier.width(choiceWidth).height(52.dp),
                             onClick = {
                                 onModel(option?.model)
                                 val available = ReasoningEffortPolicy.options(option)
                                 if (ReasoningEffortPolicy.normalize(state.reasoningEffort) !in available) {
                                     onEffort(option?.defaultReasoningEffort ?: available.first())
                                 }
+                                scope.launch { modelListState.animateScrollToItem(index) }
                             },
                         )
                     }
@@ -968,76 +1071,109 @@ private fun ReasoningTrack(
     val safeCount = valueCount.coerceAtLeast(1)
     val selectedValue = value.coerceIn(0, safeCount - 1)
     val latestValue by rememberUpdatedState(selectedValue)
-    var trackWidthPx by remember { mutableStateOf(1f) }
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
+    val haptics = LocalHapticFeedback.current
+    var trackWidthPx by remember { mutableFloatStateOf(1f) }
     val latestTrackWidth by rememberUpdatedState(trackWidthPx)
     val valueRange = 0f..(safeCount - 1).toFloat()
+    val targetRatio = if (safeCount == 1) 0.5f else selectedValue.toFloat() / (safeCount - 1).toFloat()
+    val animatedRatio by animateFloatAsState(
+        targetValue = targetRatio,
+        animationSpec = tween(220, easing = AgenticEaseOut),
+        label = "reasoning effort position",
+    )
 
     Box(
         modifier
-            .height(52.dp)
+            .height(50.dp)
             .onSizeChanged { trackWidthPx = it.width.toFloat().coerceAtLeast(1f) }
             .semantics {
                 progressBarRangeInfo = ProgressBarRangeInfo(selectedValue.toFloat(), valueRange)
+                setProgress { requestedValue ->
+                    val nextValue = requestedValue.roundToInt().coerceIn(0, safeCount - 1)
+                    if (nextValue != selectedValue) {
+                        haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                        onValueChange(nextValue)
+                    }
+                    true
+                }
             }
             .pointerInput(safeCount) {
+                fun updateFromPosition(positionX: Float) {
+                    val edgeInset = 8.dp.toPx()
+                    val usableWidth = (latestTrackWidth - edgeInset * 2f).coerceAtLeast(1f)
+                    val ratio = ((positionX - edgeInset) / usableWidth).coerceIn(0f, 1f)
+                    val nextValue = (ratio * (safeCount - 1)).roundToInt()
+                    if (nextValue != latestValue) {
+                        haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                        latestOnValueChange(nextValue)
+                    }
+                }
                 detectHorizontalDragGestures(
+                    onDragStart = { offset -> updateFromPosition(offset.x) },
                     onHorizontalDrag = { change, _ ->
-                        val ratio = (change.position.x / latestTrackWidth).coerceIn(0f, 1f)
-                        val nextValue = (ratio * (safeCount - 1)).roundToInt()
-                        if (nextValue != latestValue) onValueChange(nextValue)
+                        change.consume()
+                        updateFromPosition(change.position.x)
                     },
                 )
             }
-            .clip(RoundedCornerShape(26.dp))
-            .background(Color(0xFF23252F))
-            .border(1.dp, Color(0xFF56596D), RoundedCornerShape(26.dp)),
+            .clip(RoundedCornerShape(25.dp))
+            .background(Color(0xFF15161B).copy(alpha = 0.98f))
+            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(25.dp)),
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.fillMaxSize()) {
-            val inset = 14.dp.toPx()
-            val barHeight = 13.dp.toPx()
-            val barTop = (size.height - barHeight) / 2f
-            val barWidth = (size.width - 2f * inset).coerceAtLeast(1f)
+            val inset = 8.dp.toPx()
+            val railHeight = 30.dp.toPx()
+            val railTop = (size.height - railHeight) / 2f
+            val railWidth = (size.width - 2f * inset).coerceAtLeast(railHeight)
+            val thumbTravel = (railWidth - railHeight).coerceAtLeast(0f)
             val centerY = size.height / 2f
-            val ratio = if (safeCount == 1) 0f else selectedValue.toFloat() / (safeCount - 1).toFloat()
-            val selectedWidth = barWidth * ratio
-            val barRadius = CornerRadius(barHeight / 2f)
+            val thumbX = inset + railHeight / 2f + thumbTravel * animatedRatio
+            val selectedWidth = thumbX - inset + railHeight / 2f
+            val railRadius = CornerRadius(railHeight / 2f)
 
             drawRoundRect(
-                color = Color(0xFF343747),
-                topLeft = Offset(inset, barTop),
-                size = Size(barWidth, barHeight),
-                cornerRadius = barRadius,
+                color = Color(0xFF303038),
+                topLeft = Offset(inset, railTop),
+                size = Size(railWidth, railHeight),
+                cornerRadius = railRadius,
             )
-            if (selectedWidth > 0f) {
-                drawRoundRect(
-                    brush = Brush.horizontalGradient(listOf(Violet.copy(alpha = 0.95f), Color(0xFFB991FF))),
-                    topLeft = Offset(inset, barTop),
-                    size = Size(selectedWidth, barHeight),
-                    cornerRadius = barRadius,
-                )
-            }
+            drawRoundRect(
+                color = Violet,
+                topLeft = Offset(inset, railTop),
+                size = Size(selectedWidth, railHeight),
+                cornerRadius = railRadius,
+            )
 
             val dotRadius = 4.dp.toPx()
             for (index in 0 until safeCount) {
-                val dotRatio = if (safeCount == 1) 0f else index.toFloat() / (safeCount - 1).toFloat()
+                val dotRatio = if (safeCount == 1) 0.5f else index.toFloat() / (safeCount - 1).toFloat()
                 drawCircle(
-                    color = if (index <= selectedValue) Color(0xFFD1B6FF) else Color(0xFF696C7D),
+                    color = if (index <= selectedValue) {
+                        Color.White.copy(alpha = 0.22f)
+                    } else {
+                        Color(0xFF74747B)
+                    },
                     radius = dotRadius,
-                    center = Offset(inset + barWidth * dotRatio, centerY),
+                    center = Offset(inset + railHeight / 2f + thumbTravel * dotRatio, centerY),
                 )
             }
 
-            val thumbX = inset + barWidth * ratio
             drawCircle(
-                color = Color.White.copy(alpha = 0.22f),
-                radius = 18.dp.toPx(),
+                color = Color.Black.copy(alpha = 0.42f),
+                radius = 17.dp.toPx(),
+                center = Offset(thumbX, centerY),
+            )
+            drawCircle(
+                color = Color.White.copy(alpha = 0.2f),
+                radius = 16.dp.toPx(),
                 center = Offset(thumbX, centerY),
                 style = Stroke(width = 1.dp.toPx()),
             )
             drawCircle(
-                color = Color.White,
-                radius = 15.dp.toPx(),
+                color = Frost,
+                radius = 14.dp.toPx(),
                 center = Offset(thumbX, centerY),
             )
         }
@@ -1052,25 +1188,82 @@ private fun ModelChoice(
     onClick: () -> Unit,
 ) {
     val title = option?.displayName ?: "Auto"
-    val subtitle = option?.let { "Bridge default · ${ReasoningEffortPolicy.label(it.defaultReasoningEffort)}" }
-        ?: "Use Codex's current model"
-    TactileCard(onClick = onClick, modifier = modifier) {
+    val subtitle = option?.let { "Default · ${ReasoningEffortPolicy.label(it.defaultReasoningEffort)}" }
+        ?: "Current Codex model"
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "model choice press",
+    )
+    Box(
+        modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) Color(0xFF292236) else Color(0xFF17181D))
+            .border(
+                width = 1.dp,
+                color = if (selected) Violet.copy(alpha = 0.86f) else Color.White.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(18.dp),
+            )
+            .semantics {
+                this.selected = selected
+                contentDescription = buildString {
+                    append(title)
+                    append(" model. ")
+                    append(subtitle)
+                    if (selected) append(". Selected")
+                }
+            }
+            .clickable(
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+                onClick()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(title, color = Frost, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(subtitle, color = Muted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    title,
+                    color = Frost,
+                    fontSize = 10.sp,
+                    lineHeight = 12.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    subtitle,
+                    color = Muted.copy(alpha = if (selected) 0.9f else 0.72f),
+                    fontSize = 8.sp,
+                    lineHeight = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            Spacer(Modifier.width(8.dp))
-            Box(
-                Modifier.size(17.dp).clip(CircleShape)
-                    .background(if (selected) Violet else Color.Transparent)
-                    .border(1.5.dp, if (selected) Violet else Muted, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (selected) Box(Modifier.size(5.dp).clip(CircleShape).background(Ink))
+            if (selected) {
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier.size(18.dp).clip(CircleShape).background(Violet),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = null,
+                        tint = Ink,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
             }
         }
     }
@@ -1548,36 +1741,6 @@ private fun SettingsGlyph() {
         drawTrack(size.height * 0.24f, size.width * 0.36f)
         drawTrack(size.height * 0.5f, size.width * 0.68f)
         drawTrack(size.height * 0.76f, size.width * 0.45f)
-    }
-}
-
-@Composable
-private fun ReasoningGlyph(modifier: Modifier = Modifier, accent: Color = Violet) {
-    Canvas(modifier) {
-        val stroke = size.minDimension * 0.13f
-        val baseline = size.height * 0.78f
-        val barWidth = size.width * 0.13f
-        val gap = size.width * 0.19f
-        val heights = listOf(0.40f, 0.74f, 0.56f, 0.90f)
-        heights.forEachIndexed { index, height ->
-            val x = size.width * 0.12f + gap * index
-            drawLine(
-                color = if (index == heights.lastIndex) accent else accent.copy(alpha = 0.66f),
-                start = Offset(x, baseline),
-                end = Offset(x, baseline - size.height * height),
-                strokeWidth = barWidth.coerceAtLeast(stroke),
-                cap = StrokeCap.Round,
-            )
-        }
-        drawArc(
-            color = accent.copy(alpha = 0.32f),
-            startAngle = 202f,
-            sweepAngle = 136f,
-            useCenter = false,
-            topLeft = Offset(size.width * 0.08f, size.height * 0.08f),
-            size = androidx.compose.ui.geometry.Size(size.width * 0.84f, size.height * 0.84f),
-            style = Stroke(stroke * 0.58f, cap = StrokeCap.Round),
-        )
     }
 }
 
