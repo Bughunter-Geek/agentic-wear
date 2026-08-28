@@ -8,6 +8,8 @@ import io.github.sirbughunter.agenticwear.model.ChatParagraph
 import io.github.sirbughunter.agenticwear.model.ChatPhase
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
+import io.github.sirbughunter.agenticwear.model.ModelOption
+import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
 import org.json.JSONArray
@@ -35,6 +37,8 @@ object PayloadCodec {
             .put("requestId", payload.requestId)
             .put("threadId", payload.threadId)
             .put("text", payload.text)
+            .put("effort", ReasoningEffortPolicy.normalize(payload.effort))
+            .apply { payload.model?.takeIf(::isSafeModelValue)?.let { put("model", it) } }
             .toString()
         is BridgePayload.ApprovalResponse -> JSONObject()
             .put("version", 1)
@@ -83,6 +87,37 @@ object PayloadCodec {
                 )
             }
         }
+    }
+
+    fun decodeModels(json: JSONObject): List<ModelOption> {
+        if (json.optInt("version") != 1 || json.optString("kind") != "sessions.snapshot") return emptyList()
+        val data = json.optJSONArray("models") ?: return emptyList()
+        return buildList {
+            for (index in 0 until minOf(data.length(), 50)) {
+                val value = data.optJSONObject(index) ?: continue
+                val model = value.optString("model").takeIf(::isSafeModelValue) ?: continue
+                val id = value.optString("id").takeIf(::isSafeModelValue) ?: model
+                val displayName = clean(value.optString("displayName"), 80).ifEmpty { model }
+                val efforts = value.optJSONArray("supportedReasoningEfforts")
+                    ?.let { effortArray ->
+                        buildList {
+                            for (effortIndex in 0 until minOf(effortArray.length(), 8)) {
+                                val effort = effortArray.optString(effortIndex)
+                                    .takeIf(ReasoningEffortPolicy::isSafeValue)
+                                    ?: continue
+                                add(ReasoningEffortPolicy.normalize(effort))
+                            }
+                        }
+                    }
+                    ?.distinct()
+                    .orEmpty()
+                val supportedEfforts = if (efforts.isEmpty()) ReasoningEffortPolicy.FALLBACK_OPTIONS else efforts
+                val defaultEffort = ReasoningEffortPolicy.normalize(value.optString("defaultReasoningEffort"))
+                    .takeIf(supportedEfforts::contains)
+                    ?: supportedEfforts.first()
+                add(ModelOption(id, displayName, model, defaultEffort, supportedEfforts))
+            }
+        }.distinctBy { it.model }
     }
 
     fun decodeAlert(json: JSONObject): AgentAlert? {
@@ -252,6 +287,48 @@ object PayloadCodec {
         }
     }.toString()
 
+    fun modelsToJson(models: List<ModelOption>): String = JSONArray().apply {
+        models.take(50).forEach { model ->
+            put(
+                JSONObject()
+                    .put("id", model.id)
+                    .put("displayName", model.displayName)
+                    .put("model", model.model)
+                    .put("defaultReasoningEffort", model.defaultReasoningEffort)
+                    .put("supportedReasoningEfforts", JSONArray(model.supportedReasoningEfforts.take(8))),
+            )
+        }
+    }.toString()
+
+    fun modelsFromJson(value: String): List<ModelOption> = runCatching {
+        val data = JSONArray(value)
+        buildList {
+            for (index in 0 until minOf(data.length(), 50)) {
+                val item = data.optJSONObject(index) ?: continue
+                val model = item.optString("model").takeIf(::isSafeModelValue) ?: continue
+                val id = item.optString("id").takeIf(::isSafeModelValue) ?: model
+                val displayName = clean(item.optString("displayName"), 80).ifEmpty { model }
+                val efforts = item.optJSONArray("supportedReasoningEfforts")
+                    ?.let { effortArray ->
+                        buildList {
+                            for (effortIndex in 0 until minOf(effortArray.length(), 8)) {
+                                effortArray.optString(effortIndex)
+                                    .takeIf(ReasoningEffortPolicy::isSafeValue)
+                                    ?.let { add(ReasoningEffortPolicy.normalize(it)) }
+                            }
+                        }
+                    }
+                    ?.distinct()
+                    .orEmpty()
+                val supportedEfforts = if (efforts.isEmpty()) ReasoningEffortPolicy.FALLBACK_OPTIONS else efforts
+                val defaultEffort = ReasoningEffortPolicy.normalize(item.optString("defaultReasoningEffort"))
+                    .takeIf(supportedEfforts::contains)
+                    ?: supportedEfforts.first()
+                add(ModelOption(id, displayName, model, defaultEffort, supportedEfforts))
+            }
+        }.distinctBy { it.model }
+    }.getOrDefault(emptyList())
+
     fun sessionsFromJson(value: String): List<AgentSession> = runCatching {
         val data = JSONArray(value)
         buildList {
@@ -315,6 +392,9 @@ object PayloadCodec {
 
     private fun isSafeId(value: String): Boolean = value.length in 1..128 &&
         value.all { it.isLetterOrDigit() || it in "-_.:" }
+
+    private fun isSafeModelValue(value: String): Boolean = value.length in 1..128 &&
+        value.all { it.isLetterOrDigit() || it in "-_.:/" }
 }
 
 internal fun acceptsAlertEnvelope(kind: String, turnScope: String): Boolean = when (kind) {

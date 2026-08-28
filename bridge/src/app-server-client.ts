@@ -10,6 +10,7 @@ import {
   chatTurnListResponseSchema,
   itemCompletedSchema,
   jsonRpcMessageSchema,
+  modelListResponseSchema,
   threadListResponseSchema,
   threadSchema,
   turnCompletedSchema,
@@ -25,6 +26,14 @@ export type SessionView = {
   status: "active" | "idle" | "error" | "notLoaded";
   ownedByWear: boolean;
   canAcceptDirectInput: boolean;
+};
+
+export type ModelView = {
+  id: string;
+  displayName: string;
+  model: string;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: string[];
 };
 
 export type TerminalEvent = {
@@ -121,6 +130,7 @@ export class AppServerClient {
   private readonly deliveredTerminalEvents = new Set<string>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
+  private modelCache: ModelView[] | null = null;
   private stopping = false;
 
   constructor(
@@ -249,7 +259,41 @@ export class AppServerClient {
     return response.data.filter(isTopLevelUserThread).map((thread) => this.sessionView(thread));
   }
 
-  async submitTurn(threadId: string | null, text: string, defaultCwd: string): Promise<{ threadId: string; created: boolean }> {
+  async listModels(): Promise<ModelView[]> {
+    if (this.modelCache) return this.modelCache;
+    const models: ModelView[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 8; page += 1) {
+      const raw = await this.request("model/list", {
+        limit: 50,
+        includeHidden: false,
+        cursor,
+      }, 5_000);
+      const response = modelListResponseSchema.parse(raw);
+      for (const model of response.data) {
+        if (model.hidden) continue;
+        models.push({
+          id: model.id,
+          displayName: model.displayName,
+          model: model.model,
+          defaultReasoningEffort: model.defaultReasoningEffort,
+          supportedReasoningEfforts: [...new Set(model.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort))],
+        });
+      }
+      if (!response.nextCursor || response.data.length === 0) break;
+      cursor = response.nextCursor;
+    }
+    this.modelCache = models.filter((model, index, all) => all.findIndex((candidate) => candidate.model === model.model) === index);
+    return this.modelCache;
+  }
+
+  async submitTurn(
+    threadId: string | null,
+    text: string,
+    defaultCwd: string,
+    model: string | null = null,
+    effort = "medium",
+  ): Promise<{ threadId: string; created: boolean }> {
     let thread: CodexThread;
     let created = false;
     if (threadId === null) {
@@ -259,6 +303,7 @@ export class AppServerClient {
         approvalsReviewer: "user",
         serviceName: "Agentic Wear",
         ephemeral: false,
+        model,
       });
       thread = responseWithThreadSchema.parse(raw).thread;
       this.threadCache.set(thread.id, thread);
@@ -298,6 +343,8 @@ export class AppServerClient {
     await this.request("turn/start", {
       threadId: thread.id,
       input: [textInput(text)],
+      model,
+      effort,
       responsesapiClientMetadata: { source: "agentic-wear" },
     });
     return { threadId: thread.id, created };
@@ -724,13 +771,13 @@ export class AppServerClient {
     };
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  private request(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {
     const id = ++this.requestNumber;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(String(id));
         reject(new Error(`${method} timed out`));
-      }, 30_000);
+      }, timeoutMs);
       timeout.unref();
       this.pending.set(String(id), { resolve, reject, timeout });
       try {

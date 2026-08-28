@@ -6,6 +6,8 @@ import {
 } from "./limits.js";
 
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
+const safeModel = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_.:/-]+$/u);
+const reasoningEffort = z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9_.:-]+$/u);
 const base64 = z.string().min(16).max(1_048_576).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
 const audioBase64 = z.string().min(16).max(MAX_AUDIO_BASE64_CHARS).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
 const ciphertextBase64 = z.string()
@@ -42,6 +44,8 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     requestId: safeId,
     threadId: safeId.nullable(),
     text: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS),
+    model: safeModel.nullable().optional(),
+    effort: reasoningEffort.default("medium"),
   }).strict(),
   z.object({
     version: z.literal(1),
@@ -99,6 +103,25 @@ export const threadListResponseSchema = z.object({
   data: z.array(threadSchema),
   nextCursor: z.string().nullable(),
 }).passthrough();
+
+const modelListEntrySchema = z.object({
+  id: safeModel,
+  model: safeModel,
+  displayName: z.string().trim().min(1).max(100),
+  defaultReasoningEffort: reasoningEffort,
+  supportedReasoningEfforts: z.array(z.object({
+    reasoningEffort,
+    description: z.string().trim().max(240),
+  }).passthrough()).max(16),
+  hidden: z.boolean().optional(),
+}).passthrough();
+
+export const modelListResponseSchema = z.object({
+  data: z.array(modelListEntrySchema).max(100),
+  nextCursor: z.string().nullable().optional(),
+}).passthrough();
+
+export type CodexModel = z.infer<typeof modelListEntrySchema>;
 
 export const turnCompletedSchema = z.object({
   threadId: safeId,

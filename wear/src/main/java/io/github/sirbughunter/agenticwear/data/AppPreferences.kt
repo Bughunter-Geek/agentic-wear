@@ -7,6 +7,8 @@ import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
+import io.github.sirbughunter.agenticwear.model.ModelOption
+import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import org.json.JSONObject
@@ -30,9 +32,24 @@ class AppPreferences(context: Context) {
         get() = enumValue(prefs.getString(KEY_APPROVAL_MODE, null), ApprovalMode.ALERT_ONLY)
         set(value) = prefs.edit { putString(KEY_APPROVAL_MODE, value.name) }
 
+    /** Null means use the model selected by Codex on the bridge. */
+    var selectedModel: String?
+        get() = prefs.getString(KEY_MODEL, null)?.takeIf(::isSafeModel)
+        set(value) = prefs.edit {
+            if (value.isNullOrBlank()) remove(KEY_MODEL) else putString(KEY_MODEL, value.takeIf(::isSafeModel))
+        }
+
+    var reasoningEffort: String
+        get() = ReasoningEffortPolicy.normalize(prefs.getString(KEY_REASONING_EFFORT, null))
+        set(value) = prefs.edit { putString(KEY_REASONING_EFFORT, ReasoningEffortPolicy.normalize(value)) }
+
     var sessions: List<AgentSession>
         get() = PayloadCodec.sessionsFromJson(prefs.getString(KEY_SESSIONS, "[]").orEmpty())
         set(value) = prefs.edit { putString(KEY_SESSIONS, PayloadCodec.sessionsToJson(value)) }
+
+    var models: List<ModelOption>
+        get() = PayloadCodec.modelsFromJson(prefs.getString(KEY_MODELS, "[]").orEmpty())
+        set(value) = prefs.edit { putString(KEY_MODELS, PayloadCodec.modelsToJson(value)) }
 
     var latestAlert: AgentAlert?
         get() = alertHistory().lastOrNull() ?: prefs.getString(KEY_ALERT, null)?.let(PayloadCodec::alertFromJson)
@@ -117,7 +134,10 @@ class AppPreferences(context: Context) {
         private const val KEY_SELECTED_THREAD = "selected_thread"
         private const val KEY_ENGINE = "transcription_engine"
         private const val KEY_APPROVAL_MODE = "approval_mode"
+        private const val KEY_MODEL = "model"
+        private const val KEY_REASONING_EFFORT = "reasoning_effort"
         private const val KEY_SESSIONS = "sessions"
+        private const val KEY_MODELS = "models"
         private const val KEY_ALERT = "latest_alert"
         private const val KEY_ALERTS = "recent_alerts"
         private const val KEY_TRANSCRIPT = "transcript"
@@ -130,6 +150,9 @@ class AppPreferences(context: Context) {
         private const val KEY_HANDLED_IDS = "handled_ids"
     }
 }
+
+private fun isSafeModel(value: String): Boolean = value.length in 1..128 &&
+    value.all { it.isLetterOrDigit() || it in "-_.:/" }
 
 private val handledEventClaimLock = Any()
 

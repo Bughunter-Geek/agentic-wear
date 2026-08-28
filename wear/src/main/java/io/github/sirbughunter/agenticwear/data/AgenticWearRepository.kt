@@ -95,7 +95,7 @@ class AgenticWearRepository(private val context: Context) {
         }
     }
 
-    suspend fun submitTurn(threadId: String?, text: String): String {
+    suspend fun submitTurn(threadId: String?, text: String, model: String?, effort: String): String {
         require(text.isNotBlank()) { "Transcript is empty" }
         val requestId = UUID.randomUUID().toString()
         preferences.pending = true
@@ -103,7 +103,15 @@ class AgenticWearRepository(private val context: Context) {
         preferences.lastAcceptedThreadId = null
         preferences.lastError = null
         try {
-            send(BridgePayload.SubmitTurn(requestId, threadId, text.trim()))
+            send(
+                BridgePayload.SubmitTurn(
+                    requestId = requestId,
+                    threadId = threadId,
+                    text = text.trim(),
+                    model = model,
+                    effort = effort,
+                ),
+            )
             for (waitMillis in TURN_REPLY_DELAYS_MS) {
                 delay(waitMillis)
                 refreshInboxBatch(notify = true)
@@ -209,6 +217,7 @@ class AgenticWearRepository(private val context: Context) {
         pairingStore.clear()
         crypto.clearPairingKey()
         preferences.sessions = emptyList()
+        preferences.models = emptyList()
         preferences.latestAlert = null
         preferences.transcript = null
         preferences.revisionBase = null
@@ -236,6 +245,7 @@ class AgenticWearRepository(private val context: Context) {
         when (payload.optString("kind")) {
             "sessions.snapshot" -> {
                 preferences.sessions = PayloadCodec.decodeSessions(payload)
+                if (payload.has("models")) preferences.models = PayloadCodec.decodeModels(payload)
                 preferences.lastError = null
             }
             "transcription.ready" -> {

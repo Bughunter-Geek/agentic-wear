@@ -2,6 +2,18 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.5-alpha — 2026-08-29
+
+### Added
+
+- Adds a compact reasoning-effort control to transcript review, with a floating segmented slider that supports direct left/right dragging.
+- Adds a horizontally scrollable model picker populated from the paired Codex bridge's live model catalog.
+- Persists the selected model and effort on the watch and applies them to the next compatible Codex turn.
+
+### Notes
+
+- Model and effort overrides apply to new or idle watch-owned turns. Prompts queued into sessions owned by another Codex client continue to use that client's active model settings.
+
 ## 0.4.4-alpha — 2026-08-28
 
 ### OTA path test

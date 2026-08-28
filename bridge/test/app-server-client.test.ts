@@ -73,6 +73,60 @@ describe("AppServerClient session delivery", () => {
     expect(methods).toEqual(["thread/read", "thread/resume", "turn/start"]);
   });
 
+  it("forwards the selected model and reasoning effort when starting a turn", async () => {
+    const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
+    const internals = target as unknown as ClientInternals;
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      requests.push({ method, params: params as Record<string, unknown> });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Use the selected settings.", "/tmp", "gpt-5.6-terra", "xhigh"))
+      .resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(requests.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: {
+        threadId: "thread-1",
+        model: "gpt-5.6-terra",
+        effort: "xhigh",
+      },
+    });
+  });
+
+  it("normalizes the model catalog into watch-safe picker entries", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      expect(method).toBe("model/list");
+      return Promise.resolve({
+        data: [{
+          id: "gpt-5.6-terra",
+          model: "gpt-5.6-terra",
+          displayName: "GPT-5.6-Terra",
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Fast" },
+            { reasoningEffort: "xhigh", description: "Deep" },
+          ],
+          hidden: false,
+        }],
+        nextCursor: null,
+      });
+    });
+
+    await expect(target.listModels()).resolves.toEqual([{
+      id: "gpt-5.6-terra",
+      model: "gpt-5.6-terra",
+      displayName: "GPT-5.6-Terra",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "xhigh"],
+    }]);
+  });
+
   it("queues input for a session owned by another Codex client without competing for its writer", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;

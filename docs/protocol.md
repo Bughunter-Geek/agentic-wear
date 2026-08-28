@@ -48,7 +48,7 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 |---|---|
 | `session.sync` | Request the recent session snapshot. |
 | `transcription.create` | Send one bounded AAC/M4A recording of up to four minutes, plus an optional bounded previous draft for an explicit semantic revision. |
-| `turn.submit` | Send up to 12,000 characters of reviewed text to a new or selected session. |
+| `turn.submit` | Send up to 12,000 characters of reviewed text to a new or selected session, with an optional bridge-advertised model and reasoning effort. |
 | `approval.respond` | Accept or decline a controllable watch-owned approval. |
 | `chat.watch` / `.unwatch` | Start or stop a 90-second renewable live-view subscription for one selected session. |
 
@@ -56,7 +56,7 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 
 | Kind | Purpose |
 |---|---|
-| `sessions.snapshot` | Recent session title, time, status, and ownership. |
+| `sessions.snapshot` | Recent session title, time, status, ownership, and the current bridge model catalog. |
 | `transcription.ready` / `.error` | Return transcript or safe failure. |
 | `turn.accepted` / `.error` | Confirm prompt handoff or failure. |
 | `chat.snapshot` / `.error` | Return at most five assistant paragraphs or an actionable live-view failure. |

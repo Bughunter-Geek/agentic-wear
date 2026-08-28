@@ -18,6 +18,8 @@ import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
+import io.github.sirbughunter.agenticwear.model.ModelOption
+import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
@@ -47,6 +49,7 @@ data class WearUiState(
     val screen: WearScreen = WearScreen.HOME,
     val isPaired: Boolean = false,
     val sessions: List<AgentSession> = emptyList(),
+    val models: List<ModelOption> = emptyList(),
     val selectedThreadId: String? = null,
     val latestAlert: AgentAlert? = null,
     val transcript: Transcript? = null,
@@ -59,6 +62,8 @@ data class WearUiState(
     val error: String? = null,
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
+    val selectedModel: String? = null,
+    val reasoningEffort: String = ReasoningEffortPolicy.DEFAULT,
     val relayUrl: String = "",
     val appUpdate: UpdateUiState = UpdateUiState(),
     val showInstallPermissionPrompt: Boolean = false,
@@ -155,6 +160,39 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         reload()
     }
 
+    fun setModel(model: String?) {
+        val selected = model?.trim()?.takeIf { it.isNotEmpty() }
+        preferences.selectedModel = selected
+        val modelOption = _state.value.models.firstOrNull { it.model == selected }
+        val availableEfforts = ReasoningEffortPolicy.options(modelOption)
+        if (_state.value.reasoningEffort !in availableEfforts) {
+            preferences.reasoningEffort = modelOption?.defaultReasoningEffort ?: ReasoningEffortPolicy.DEFAULT
+        }
+        if (_state.value.demo) {
+            _state.update { current ->
+                current.copy(
+                    selectedModel = selected,
+                    reasoningEffort = if (current.reasoningEffort in availableEfforts) {
+                        current.reasoningEffort
+                    } else {
+                        modelOption?.defaultReasoningEffort ?: ReasoningEffortPolicy.DEFAULT
+                    },
+                )
+            }
+        } else {
+            reload()
+        }
+    }
+
+    fun setReasoningEffort(effort: String) {
+        val modelOption = _state.value.models.firstOrNull { it.model == _state.value.selectedModel }
+        val normalized = ReasoningEffortPolicy.normalize(effort)
+        if (normalized in ReasoningEffortPolicy.options(modelOption)) {
+            preferences.reasoningEffort = normalized
+            if (_state.value.demo) _state.update { current -> current.copy(reasoningEffort = normalized) } else reload()
+        }
+    }
+
     fun beginPushToTalk() {
         if (_state.value.recording || _state.value.pending) return
         cancelTranscriptionTimerJob()
@@ -242,7 +280,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun submitTranscript() {
         val transcript = _state.value.transcript ?: return
         launchTask {
-            val threadId = repository.submitTurn(transcript.threadId ?: _state.value.selectedSession?.id, transcript.text)
+            val current = _state.value
+            val threadId = repository.submitTurn(
+                threadId = transcript.threadId ?: current.selectedSession?.id,
+                text = transcript.text,
+                model = current.selectedModel,
+                effort = current.reasoningEffort,
+            )
             preferences.selectedThreadId = threadId
             repository.watchChat(threadId)
             reload(WearScreen.CHAT)
@@ -346,6 +390,22 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             AgentSession("demo-qa", "Review watch interface", now - 318_000, SessionStatus.IDLE, false, true),
             AgentSession("demo-docs", "Prepare open-source launch", now - 1_460_000, SessionStatus.ERROR, false, false),
         )
+        val models = listOf(
+            ModelOption(
+                id = "gpt-5.6-sol",
+                displayName = "GPT-5.6-Sol",
+                model = "gpt-5.6-sol",
+                defaultReasoningEffort = "low",
+                supportedReasoningEfforts = listOf("low", "medium", "high", "xhigh", "max"),
+            ),
+            ModelOption(
+                id = "gpt-5.6-terra",
+                displayName = "GPT-5.6-Terra",
+                model = "gpt-5.6-terra",
+                defaultReasoningEffort = "medium",
+                supportedReasoningEfforts = ReasoningEffortPolicy.FALLBACK_OPTIONS,
+            ),
+        )
         val normalized = stateName.lowercase()
         val updatePermissionDemo = normalized == "update-permission"
         val homeErrorDemo = normalized == "home-error"
@@ -371,6 +431,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             },
             isPaired = normalized != "pair",
             sessions = sessions,
+            models = models,
             selectedThreadId = "demo-build",
             latestAlert = alert,
             transcript = transcript,
@@ -404,6 +465,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             },
             voiceLevel = if (normalized == "home-speaking") 0.72f else 0f,
             approvalMode = if (normalized == "approval") ApprovalMode.ALLOW_CONTROLS else ApprovalMode.ALERT_ONLY,
+            selectedModel = if (normalized == "transcript") models.first().model else null,
+            reasoningEffort = if (normalized == "transcript") "high" else ReasoningEffortPolicy.DEFAULT,
             relayUrl = "https://relay.example.workers.dev",
             appUpdate = if (updatePermissionDemo) {
                 UpdateUiState(
@@ -779,6 +842,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             screen = destination,
             isPaired = paired,
             sessions = preferences.sessions,
+            models = preferences.models,
             selectedThreadId = preferences.selectedThreadId,
             latestAlert = preferences.latestAlert,
             transcript = transcript,
@@ -787,6 +851,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             error = preferences.lastError,
             transcriptionEngine = preferences.transcriptionEngine,
             approvalMode = preferences.approvalMode,
+            selectedModel = preferences.selectedModel,
+            reasoningEffort = preferences.reasoningEffort,
             relayUrl = preferences.relayUrl,
             appUpdate = UpdateUiState(enabled = updateManager.enabled),
         )

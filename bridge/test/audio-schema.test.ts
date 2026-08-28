@@ -46,6 +46,30 @@ describe("watch transcription audio formats", () => {
     expect(watchPayloadSchema.safeParse({ ...prompt, text: "x".repeat(MAX_TRANSCRIPT_CHARS + 1) }).success).toBe(false);
   });
 
+  it("accepts a bridge-advertised model and reasoning effort", () => {
+    const payload = {
+      version: 1,
+      kind: "turn.submit",
+      requestId: "request-3",
+      threadId: null,
+      text: "Use the selected settings.",
+      model: "gpt-5.6-terra",
+      effort: "xhigh",
+    };
+    expect(watchPayloadSchema.parse(payload)).toMatchObject({ model: "gpt-5.6-terra", effort: "xhigh" });
+  });
+
+  it("defaults effort for older watch payloads", () => {
+    const payload = {
+      version: 1,
+      kind: "turn.submit",
+      requestId: "request-4",
+      threadId: null,
+      text: "Keep the legacy wire shape working.",
+    };
+    expect(watchPayloadSchema.parse(payload)).toMatchObject({ effort: "medium" });
+  });
+
   it("bounds the previous draft used for semantic revision", () => {
     const payload = { ...transcription, mimeType: "audio/aac" };
     expect(watchPayloadSchema.safeParse({ ...payload, previousText: "Keep the cyan border" }).success).toBe(true);

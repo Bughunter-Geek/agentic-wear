@@ -3,6 +3,7 @@ import { writeConfig } from "./config.js";
 import { CryptoBox } from "./crypto-box.js";
 import {
   AppServerClient,
+  type ModelView,
   type ApprovalEvent,
   type SessionView,
   type TerminalEvent,
@@ -108,7 +109,13 @@ export class BridgeService {
           await this.createTranscription(payload);
           return;
         case "turn.submit": {
-          const result = await this.appServer.submitTurn(payload.threadId, payload.text, this.config.defaultCwd);
+          const result = await this.appServer.submitTurn(
+            payload.threadId,
+            payload.text,
+            this.config.defaultCwd,
+            payload.model ?? null,
+            payload.effort,
+          );
           if (result.created) await this.persistOwnedThreads();
           await this.send({
             version: 1,
@@ -195,7 +202,19 @@ export class BridgeService {
 
   private async sendSessions(): Promise<void> {
     const sessions: SessionView[] = await this.appServer.listSessions();
-    await this.send({ version: 1, kind: "sessions.snapshot", sessions });
+    let models: ModelView[] = [];
+    try {
+      models = await this.appServer.listModels();
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: "warn",
+        message: "Codex model catalog unavailable; using bridge defaults on the watch",
+        error: publicError(error),
+      }));
+    }
+    const snapshot: SendablePayload = { version: 1, kind: "sessions.snapshot", sessions };
+    if (models.length > 0) snapshot.models = models;
+    await this.send(snapshot);
   }
 
   private async sendChatSnapshot(threadId: string, requestId?: string): Promise<void> {
