@@ -171,6 +171,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.wear.compose:compose-foundation:1.6.2")
     implementation("androidx.wear.compose:compose-material3:1.6.2")
+    implementation("androidx.wear:wear-ongoing:1.1.0")
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.google.firebase:firebase-messaging")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")

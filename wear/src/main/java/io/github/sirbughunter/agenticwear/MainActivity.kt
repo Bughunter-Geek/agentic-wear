@@ -66,7 +66,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        if (!isChangingConfigurations && !requestingMicrophonePermission) viewModel.cancelRecording()
+        if (!isChangingConfigurations && !requestingMicrophonePermission) viewModel.onActivityStopped()
         super.onStop()
     }
 
