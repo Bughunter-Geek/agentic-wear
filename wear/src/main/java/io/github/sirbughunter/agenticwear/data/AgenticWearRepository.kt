@@ -52,11 +52,15 @@ class AgenticWearRepository(private val context: Context) {
 
     suspend fun syncSessions() = send(BridgePayload.SessionSync(UUID.randomUUID().toString()))
 
-    suspend fun transcribe(audioFile: File, threadId: String?, notifyAfterMillis: Long? = null): String {
+    suspend fun transcribe(
+        audioFile: File,
+        threadId: String?,
+        notifyAfterMillis: Long? = null,
+    ): String {
         val requestId = UUID.randomUUID().toString()
         val bytes = audioFile.readBytes()
         try {
-            require(bytes.size <= 512 * 1_024) { "Recording is too large; keep it under one minute" }
+            require(bytes.size <= MAX_RECORDING_BYTES) { "Recording is too large; keep it under four minutes" }
             preferences.pending = true
             preferences.transcript = null
             preferences.lastError = null
@@ -224,6 +228,7 @@ class AgenticWearRepository(private val context: Context) {
 
     companion object {
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
+        private const val MAX_RECORDING_BYTES = 1_300_000
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
         private val inboxRefreshMutex = Mutex()
     }

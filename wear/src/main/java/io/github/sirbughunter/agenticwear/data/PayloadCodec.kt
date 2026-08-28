@@ -4,6 +4,7 @@ import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.BridgePayload
+import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
 import org.json.JSONArray
@@ -130,7 +131,7 @@ object PayloadCodec {
     fun decodeTranscript(json: JSONObject): Transcript? {
         if (json.optInt("version") != 1 || json.optString("kind") != "transcription.ready") return null
         val requestId = json.optString("requestId").takeIf(::isSafeId) ?: return null
-        val text = clean(json.optString("text"), 4_000)
+        val text = clean(json.optString("text"), MAX_TRANSCRIPT_CHARS)
         if (text.isEmpty()) return null
         return Transcript(requestId, text, json.optString("threadId").takeIf(::isSafeId))
     }

@@ -12,6 +12,7 @@ import { ReplayGuard } from "./replay-guard.js";
 import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
 import { type WatchPayload, type WireEnvelope } from "./schemas.js";
 import type { Transcriber } from "./transcriber.js";
+import { MAX_AUDIO_BYTES } from "./limits.js";
 
 type SendablePayload = Record<string, unknown> & { version: 1; kind: string };
 
@@ -142,8 +143,8 @@ export class BridgeService {
   private async createTranscription(payload: Extract<WatchPayload, { kind: "transcription.create" }>): Promise<void> {
     const audio = Buffer.from(payload.audioBase64, "base64");
     try {
-      if (audio.byteLength < 1_024 || audio.byteLength > 512 * 1_024) {
-        throw new Error("Voice recordings must be between 1 KiB and 512 KiB");
+      if (audio.byteLength < 1_024 || audio.byteLength > MAX_AUDIO_BYTES) {
+        throw new Error("Voice recordings must be between 1 KiB and the four-minute limit");
       }
       const text = await this.transcriber.transcribe(audio, payload.mimeType);
       await this.send({

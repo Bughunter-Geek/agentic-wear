@@ -16,6 +16,7 @@ import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
+import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
@@ -211,7 +212,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun updateTranscript(text: String) {
         val transcript = _state.value.transcript ?: return
-        _state.update { it.copy(transcript = transcript.copy(text = text.take(4_000))) }
+        val updated = transcript.copy(text = text.take(MAX_TRANSCRIPT_CHARS))
+        preferences.transcript = updated
+        _state.update { it.copy(transcript = updated) }
     }
 
     fun submitTranscript() {
@@ -350,6 +353,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         stopVoiceMonitoring()
         val elapsedMillis = freezeTranscriptionTimer()
         val transcript = Transcript(UUID.randomUUID().toString(), text, _state.value.selectedSession?.id)
+        preferences.transcript = transcript
+        preferences.pending = false
+        preferences.lastError = null
         _state.update {
             it.copy(
                 recording = false,
@@ -663,7 +669,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     companion object {
         private const val VOICE_LEVEL_INTERVAL_MS = 80L
         private const val TRANSCRIPTION_TIMER_INTERVAL_MS = 100L
-        private const val MAX_RECORDING_DURATION_MS = 55_000L
+        private const val MAX_RECORDING_DURATION_MS = 4L * 60L * 1_000L
     }
 }
 

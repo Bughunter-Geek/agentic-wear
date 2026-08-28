@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { MAX_RELAY_MESSAGE_BYTES } from "./limits.js";
 import { z } from "zod";
 import { relaySocketMessageSchema, wireEnvelopeSchema, type WireEnvelope } from "./schemas.js";
 
@@ -125,7 +126,7 @@ export class RelayClient {
       });
       socket.on("message", (raw, binary) => {
         chain = chain.then(async () => {
-          if (binary || rawLength(raw) > 800 * 1_024) throw new Error("Relay sent an invalid message");
+          if (binary || rawLength(raw) > MAX_RELAY_MESSAGE_BYTES) throw new Error("Relay sent an invalid message");
           const parsed = relaySocketMessageSchema.parse(JSON.parse(raw.toString("utf8")));
           if (parsed.type === "envelope") await onEnvelope(parsed.envelope);
           else if ((parsed.type === "pair.challenge" || parsed.type === "pair.status") && parsed.watchPublicKey) {

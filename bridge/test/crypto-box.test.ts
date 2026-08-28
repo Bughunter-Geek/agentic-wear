@@ -1,7 +1,12 @@
 import { webcrypto } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { CryptoBox, generateBridgeKeyPair } from "../src/crypto-box.js";
-import type { WireEnvelope } from "../src/schemas.js";
+import {
+  MAX_AUDIO_BASE64_CHARS,
+  MAX_INBOUND_CIPHERTEXT_BYTES,
+  MAX_RELAY_MESSAGE_BYTES,
+} from "../src/limits.js";
+import { wireEnvelopeSchema, type WireEnvelope } from "../src/schemas.js";
 
 const cryptoApi = webcrypto as Crypto;
 const encoder = new TextEncoder();
@@ -55,6 +60,54 @@ describe("CryptoBox", () => {
       Date.now() + 5 * 60 * 1_000 + 1_000,
     );
     await expect(box.decrypt(future)).rejects.toThrow("timestamp is outside");
+  });
+
+  it("decrypts a maximum bounded four-minute transcription request", async () => {
+    const bridge = await generateBridgeKeyPair();
+    const watch = await generateTestKeyPair();
+    const pairId = "pair-id-for-four-minute-audio-test-0000000";
+    const box = new CryptoBox(pairId, bridge.privateKeyMaterial, bridge.publicKeyBase64, watch.publicKeyBase64);
+    const envelope = await encryptAsWatch(
+      pairId,
+      watch.privateKeyBase64,
+      bridge.publicKeyBase64,
+      {
+        version: 1,
+        kind: "transcription.create",
+        requestId: "four-minute-request",
+        audioBase64: "A".repeat(MAX_AUDIO_BASE64_CHARS),
+        mimeType: "audio/aac",
+        threadId: null,
+      },
+    );
+
+    expect(wireEnvelopeSchema.safeParse(envelope).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify({ type: "envelope", envelope }), "utf8"))
+      .toBeLessThanOrEqual(MAX_RELAY_MESSAGE_BYTES);
+    const decoded = await box.decrypt(envelope) as { audioBase64: string };
+    expect(decoded.audioBase64).toHaveLength(MAX_AUDIO_BASE64_CHARS);
+  });
+
+  it("rejects ciphertext larger than the explicit inbound bound", async () => {
+    const bridge = await generateBridgeKeyPair();
+    const watch = await generateTestKeyPair();
+    const box = new CryptoBox(
+      "pair-id-for-envelope-limit-test-000000000",
+      bridge.privateKeyMaterial,
+      bridge.publicKeyBase64,
+      watch.publicKeyBase64,
+    );
+    const envelope: WireEnvelope = {
+      version: 1,
+      messageId: "oversized-watch-message",
+      sender: "watch",
+      recipient: "bridge",
+      sentAt: Date.now(),
+      nonce: Buffer.alloc(12).toString("base64"),
+      ciphertext: Buffer.alloc(MAX_INBOUND_CIPHERTEXT_BYTES + 1).toString("base64"),
+    };
+
+    await expect(box.decrypt(envelope)).rejects.toThrow("Envelope is too large");
   });
 });
 

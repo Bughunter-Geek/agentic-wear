@@ -17,6 +17,13 @@ must be dependable before it becomes broad.
 - Queue a follow-up for the next turn or steer the active run when the supported Codex API exposes that distinction.
 - Keep completion, permission, interruption, and failure alerts deduplicated across the live view and background delivery.
 
+## Alpha 0.4 — semantic voice revisions
+
+- Let a user revise the same unsent prompt with another dictation from transcript review.
+- Treat newer speech as corrections: replace conflicting older facts or requirements while preserving unrelated instructions.
+- Return one editable reconciled draft instead of appending contradictory text.
+- Preserve the previous draft intact if semantic reconciliation is unavailable or fails.
+
 ## Later
 
 - A compact conversation view with the latest user and agent messages.

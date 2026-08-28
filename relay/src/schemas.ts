@@ -1,7 +1,12 @@
 import { z } from "zod";
+import { MAX_CIPHERTEXT_BASE64_CHARS } from "./limits";
 
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/);
 const base64 = z.string().min(16).max(1_048_576).regex(/^[A-Za-z0-9+/]*={0,2}$/);
+const ciphertextBase64 = z.string()
+  .min(16)
+  .max(MAX_CIPHERTEXT_BASE64_CHARS)
+  .regex(/^[A-Za-z0-9+/]*={0,2}$/);
 const pairId = z.string().length(43).regex(/^[A-Za-z0-9_-]{43}$/);
 const pairingProof = z.string().length(43).regex(/^[A-Za-z0-9_-]{43}$/);
 
@@ -12,7 +17,7 @@ export const wireEnvelopeSchema = z.object({
   recipient: z.enum(["bridge", "watch"]),
   sentAt: z.number().int().positive(),
   nonce: base64.max(32),
-  ciphertext: base64,
+  ciphertext: ciphertextBase64,
 }).strict().refine((value) => value.sender !== value.recipient, "Sender and recipient must differ");
 
 export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;

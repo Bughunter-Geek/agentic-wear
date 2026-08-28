@@ -1,7 +1,17 @@
 import { z } from "zod";
+import {
+  MAX_AUDIO_BASE64_CHARS,
+  MAX_INBOUND_CIPHERTEXT_BASE64_CHARS,
+  MAX_TRANSCRIPT_CHARS,
+} from "./limits.js";
 
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
 const base64 = z.string().min(16).max(1_048_576).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
+const audioBase64 = z.string().min(16).max(MAX_AUDIO_BASE64_CHARS).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
+const ciphertextBase64 = z.string()
+  .min(16)
+  .max(MAX_INBOUND_CIPHERTEXT_BASE64_CHARS)
+  .regex(/^[A-Za-z0-9+/]*={0,2}$/u);
 
 export const wireEnvelopeSchema = z.object({
   version: z.literal(1),
@@ -10,7 +20,7 @@ export const wireEnvelopeSchema = z.object({
   recipient: z.enum(["bridge", "watch"]),
   sentAt: z.number().int().positive(),
   nonce: base64.max(32),
-  ciphertext: base64,
+  ciphertext: ciphertextBase64,
 }).strict();
 
 export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;
@@ -21,7 +31,7 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     version: z.literal(1),
     kind: z.literal("transcription.create"),
     requestId: safeId,
-    audioBase64: base64.max(700_000),
+    audioBase64,
     mimeType: z.enum(["audio/mp4", "audio/aac"]),
     threadId: safeId.nullable(),
   }).strict(),
@@ -30,7 +40,7 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     kind: z.literal("turn.submit"),
     requestId: safeId,
     threadId: safeId.nullable(),
-    text: z.string().trim().min(1).max(4_000),
+    text: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS),
   }).strict(),
   z.object({
     version: z.literal(1),

@@ -1,5 +1,6 @@
 import { randomUUID, webcrypto } from "node:crypto";
 import type { WireEnvelope } from "./schemas.js";
+import { MAX_INBOUND_CIPHERTEXT_BYTES } from "./limits.js";
 
 const cryptoApi = webcrypto as Crypto;
 const encoder = new TextEncoder();
@@ -81,7 +82,7 @@ export class CryptoBox {
     const nonce = Buffer.from(envelope.nonce, "base64");
     if (nonce.byteLength !== 12) throw new Error("Invalid envelope nonce");
     const ciphertext = Buffer.from(envelope.ciphertext, "base64");
-    if (ciphertext.byteLength > 768 * 1_024) throw new Error("Envelope is too large");
+    if (ciphertext.byteLength > MAX_INBOUND_CIPHERTEXT_BYTES) throw new Error("Envelope is too large");
     const plaintext = await cryptoApi.subtle.decrypt(
       {
         name: "AES-GCM",

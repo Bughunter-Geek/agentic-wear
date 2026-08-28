@@ -47,8 +47,8 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 | Kind | Purpose |
 |---|---|
 | `session.sync` | Request the recent session snapshot. |
-| `transcription.create` | Send one bounded AAC/M4A recording for transcription. |
-| `turn.submit` | Send reviewed text to a new or selected session. |
+| `transcription.create` | Send one bounded AAC/M4A recording of up to four minutes for transcription. |
+| `turn.submit` | Send up to 12,000 characters of reviewed text to a new or selected session. |
 | `approval.respond` | Accept or decline a controllable watch-owned approval. |
 
 ## Bridge to watch
@@ -67,6 +67,8 @@ Terminal failures and request-level `.error` payloads produce red alerts. Each
 alert is deduplicated by its authenticated envelope or terminal event ID.
 
 Message IDs and terminal event IDs are idempotency keys. The watch acknowledges inbox envelopes only after successful decryption and handling.
+
+The watch caps compressed recording files below 1.3 MB. The encrypted transport independently caps audio, ciphertext, WebSocket messages, and HTTP request bodies at each hop. Watch-to-bridge audio remains live-only and is never stored in the relay inbox.
 
 Only the App Server's `turn/completed` notification for a top-level user thread
 may produce a terminal alert. Item completion, raw response completion,

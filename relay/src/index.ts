@@ -3,6 +3,7 @@ import { deriveCredential, secureEqual, sha256Hex } from "./crypto";
 import { wakeTargetForNewEnvelope, wakeWatch } from "./fcm";
 import { PairAdmissionError } from "./pair-admission";
 import { PairRelayError } from "./pair-relay";
+import { MAX_ENVELOPE_BODY_BYTES } from "./limits";
 import {
   ackSchema,
   bridgePairingProofSchema,
@@ -15,8 +16,6 @@ import {
 
 export { PairAdmission } from "./pair-admission";
 export { PairRelay } from "./pair-relay";
-
-const JSON_LIMIT = 800 * 1_024;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -131,7 +130,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return Response.json({ paired: true });
   }
   if (request.method === "POST" && action === "to-watch") {
-    const envelope = wireEnvelopeSchema.parse(await readJson(request, JSON_LIMIT));
+    const envelope = wireEnvelopeSchema.parse(await readJson(request, MAX_ENVELOPE_BODY_BYTES));
     if (envelope.sender !== "bridge" || envelope.recipient !== "watch") throw new HttpError(400, "Envelope direction is invalid");
     const result = await stub.enqueueToWatch(credential, envelope);
     const wakeTarget = wakeTargetForNewEnvelope(result.fcmInstallationId, result.inserted);
@@ -139,7 +138,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return Response.json({ accepted: true, inserted: result.inserted }, { status: 202 });
   }
   if (request.method === "POST" && action === "to-bridge") {
-    const envelope = wireEnvelopeSchema.parse(await readJson(request, JSON_LIMIT));
+    const envelope = wireEnvelopeSchema.parse(await readJson(request, MAX_ENVELOPE_BODY_BYTES));
     if (envelope.sender !== "watch" || envelope.recipient !== "bridge") throw new HttpError(400, "Envelope direction is invalid");
     const delivered = await stub.sendToBridge(credential, envelope);
     if (!delivered) throw new HttpError(503, "The bridge is offline");

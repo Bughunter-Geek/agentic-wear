@@ -28,6 +28,8 @@ enum class TranscriptionEngine { BRIDGE_WHISPER, DEVICE_SPEECH }
 
 enum class ApprovalMode { ALERT_ONLY, ALLOW_CONTROLS }
 
+const val MAX_TRANSCRIPT_CHARS = 12_000
+
 data class Transcript(
     val requestId: String,
     val text: String,

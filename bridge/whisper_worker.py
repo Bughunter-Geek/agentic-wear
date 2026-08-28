@@ -13,8 +13,8 @@ import subprocess
 import sys
 from typing import Any
 
-MAX_AUDIO_BYTES = 512 * 1024
-MAX_TEXT_LENGTH = 4000
+MAX_AUDIO_BYTES = 1_300_000
+MAX_TEXT_LENGTH = 12_000
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -30,7 +30,7 @@ def decode_audio(encoded: str, mime_type: str, ffmpeg_path: str):
     except (binascii.Error, ValueError) as error:
         raise ValueError("The watch sent invalid audio") from error
     if not 1024 <= len(compressed) <= MAX_AUDIO_BYTES:
-        raise ValueError("Voice recordings must be between 1 KiB and 512 KiB")
+        raise ValueError("Voice recordings must be between 1 KiB and the four-minute limit")
 
     input_options = ["-f", "aac"] if mime_type == "audio/aac" else []
     result = subprocess.run(

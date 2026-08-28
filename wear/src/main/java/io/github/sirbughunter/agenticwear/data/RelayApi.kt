@@ -156,7 +156,7 @@ class RelayApi {
     }
 
     companion object {
-        private const val MAX_REQUEST_BYTES = 768 * 1_024
+        private const val MAX_REQUEST_BYTES = 2_500_000
         private const val MAX_RESPONSE_BYTES = 768 * 1_024
         private const val PAIR_CONFIRMATION_TIMEOUT_MS = 30_000L
     }

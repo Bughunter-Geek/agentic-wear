@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { AudioMimeType, Transcriber } from "./transcriber.js";
+import { MAX_AUDIO_BYTES, MAX_TRANSCRIPT_CHARS } from "./limits.js";
 
 const defaultModel = "mlx-community/whisper-turbo";
 const installDirectory = join(homedir(), ".agentic-wear", "transcription");
@@ -35,8 +36,8 @@ export class LocalWhisperTranscriber implements Transcriber {
   }
 
   async transcribe(audio: Uint8Array, mimeType: AudioMimeType): Promise<string> {
-    if (!isSupportedAudioMimeType(mimeType) || audio.byteLength < 1_024 || audio.byteLength > 512 * 1_024) {
-      throw new Error("Voice recordings must be between 1 KiB and 512 KiB");
+    if (!isSupportedAudioMimeType(mimeType) || audio.byteLength < 1_024 || audio.byteLength > MAX_AUDIO_BYTES) {
+      throw new Error("Voice recordings must be between 1 KiB and the four-minute limit");
     }
     const worker = await this.ensureWorker();
     const id = randomUUID();
@@ -255,7 +256,9 @@ function parseWorkerMessage(line: string): WorkerMessage | null {
     if (typeof id !== "string" || !id) return null;
     if (type === "result") {
       const text = Reflect.get(value, "text");
-      return typeof text === "string" && text.trim() ? { type, id, text: text.trim().slice(0, 4_000) } : null;
+      return typeof text === "string" && text.trim()
+        ? { type, id, text: text.trim().slice(0, MAX_TRANSCRIPT_CHARS) }
+        : null;
     }
     if (type === "error") {
       const message = Reflect.get(value, "message");

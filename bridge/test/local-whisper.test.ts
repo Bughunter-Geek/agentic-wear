@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_AUDIO_BYTES } from "../src/limits.js";
 import { isSupportedAudioMimeType, LocalWhisperTranscriber, resolveTranscriptionProvider } from "../src/local-whisper.js";
 
 describe("local transcription policy", () => {
@@ -14,6 +15,12 @@ describe("local transcription policy", () => {
   it("rejects malformed audio before starting the local worker", async () => {
     const transcriber = new LocalWhisperTranscriber("/missing/python", "/missing/ffmpeg");
     await expect(transcriber.transcribe(new Uint8Array(12), "audio/mp4")).rejects.toThrow(/1 KiB/u);
+  });
+
+  it("rejects recordings beyond the bounded four-minute payload before starting the worker", async () => {
+    const transcriber = new LocalWhisperTranscriber("/missing/python", "/missing/ffmpeg");
+    await expect(transcriber.transcribe(new Uint8Array(MAX_AUDIO_BYTES + 1), "audio/aac"))
+      .rejects.toThrow(/four-minute/u);
   });
 
   it("accepts both legacy MP4 and frame-safe AAC recordings", () => {

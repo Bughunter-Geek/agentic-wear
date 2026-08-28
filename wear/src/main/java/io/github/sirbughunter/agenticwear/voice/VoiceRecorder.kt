@@ -25,7 +25,7 @@ class VoiceRecorder(private val context: Context) {
                 setAudioChannels(1)
                 setAudioSamplingRate(16_000)
                 setAudioEncodingBitRate(32_000)
-                setMaxDuration(MAX_DURATION_MS)
+                setMaxDuration(RECORDER_SAFETY_DURATION_MS)
                 setMaxFileSize(MAX_FILE_BYTES.toLong())
                 setOutputFile(file.absolutePath)
                 prepare()
@@ -69,8 +69,8 @@ class VoiceRecorder(private val context: Context) {
     }
 
     companion object {
-        private const val MAX_DURATION_MS = 60_000
-        private const val MAX_FILE_BYTES = 320 * 1_024
+        private const val RECORDER_SAFETY_DURATION_MS = 245_000
+        private const val MAX_FILE_BYTES = 1_250_000
         private const val MIN_FILE_BYTES = 1_024
     }
 }
