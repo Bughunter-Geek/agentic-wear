@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.github.sirbughunter.agenticwear.data.AgenticWearRepository
+import io.github.sirbughunter.agenticwear.data.FirebaseProvider
 import io.github.sirbughunter.agenticwear.data.RelayException
 
 class InboxSyncWorker(
@@ -17,6 +18,12 @@ class InboxSyncWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = try {
         val repository = AgenticWearRepository(applicationContext)
+        if (inputData.getBoolean(KEY_REFRESH_FCM_REGISTRATION, false)) {
+            if (repository.isPaired && FirebaseProvider.configured) {
+                repository.updateFcmRegistration(FirebaseProvider.installationId(applicationContext))
+            }
+            return Result.success()
+        }
         inputData.getString(KEY_FCM_INSTALLATION_ID)?.let { installationId ->
             repository.updateFcmRegistration(installationId)
             return Result.success()
@@ -33,6 +40,7 @@ class InboxSyncWorker(
         private const val UNIQUE_INBOX_WORK = "agentic-wear-inbox-sync"
         private const val UNIQUE_REGISTRATION_WORK = "agentic-wear-registration-sync"
         private const val KEY_FCM_INSTALLATION_ID = "fcm_installation_id"
+        private const val KEY_REFRESH_FCM_REGISTRATION = "refresh_fcm_registration"
 
         fun enqueue(context: Context) {
             val request = OneTimeWorkRequestBuilder<InboxSyncWorker>()
@@ -48,6 +56,17 @@ class InboxSyncWorker(
         fun enqueueRegistration(context: Context, installationId: String) {
             val request = OneTimeWorkRequestBuilder<InboxSyncWorker>()
                 .setInputData(workDataOf(KEY_FCM_INSTALLATION_ID to installationId.take(4_096)))
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_REGISTRATION_WORK,
+                ExistingWorkPolicy.REPLACE,
+                request,
+            )
+        }
+
+        fun enqueueRegistrationRefresh(context: Context) {
+            val request = OneTimeWorkRequestBuilder<InboxSyncWorker>()
+                .setInputData(workDataOf(KEY_REFRESH_FCM_REGISTRATION to true))
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
                 UNIQUE_REGISTRATION_WORK,

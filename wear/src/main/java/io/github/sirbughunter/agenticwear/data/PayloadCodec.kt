@@ -100,6 +100,33 @@ object PayloadCodec {
         )
     }
 
+    fun decodeRequestError(
+        json: JSONObject,
+        envelopeMessageId: String,
+        envelopeSentAt: Long,
+        fallbackThreadId: String?,
+        fallbackTitle: String?,
+    ): AgentAlert? {
+        if (json.optInt("version") != 1 || !isRequestErrorKind(json.optString("kind"))) return null
+        val eventId = envelopeMessageId.takeIf(::isSafeId) ?: return null
+        val threadId = json.optString("threadId").takeIf(::isSafeId)
+            ?: fallbackThreadId?.takeIf(::isSafeId)
+            ?: "agentic-wear"
+        val title = clean(json.optString("title"), 100).ifEmpty {
+            clean(fallbackTitle.orEmpty(), 100).ifEmpty { "Agentic Wear request" }
+        }
+        val detail = clean(json.optString("message"), 260)
+            .ifEmpty { "The request could not be completed." }
+        return AgentAlert(
+            eventId = eventId,
+            kind = AlertKind.ERROR,
+            threadId = threadId,
+            title = title,
+            detail = detail,
+            occurredAtMillis = envelopeSentAt.takeIf { it > 0L } ?: System.currentTimeMillis(),
+        )
+    }
+
     fun decodeTranscript(json: JSONObject): Transcript? {
         if (json.optInt("version") != 1 || json.optString("kind") != "transcription.ready") return null
         val requestId = json.optString("requestId").takeIf(::isSafeId) ?: return null
@@ -193,3 +220,10 @@ internal fun acceptsAlertEnvelope(kind: String, turnScope: String): Boolean = wh
     "approval.request" -> true
     else -> false
 }
+
+internal fun isRequestErrorKind(kind: String): Boolean = kind in setOf(
+    "transcription.error",
+    "turn.error",
+    "approval.error",
+    "bridge.error",
+)

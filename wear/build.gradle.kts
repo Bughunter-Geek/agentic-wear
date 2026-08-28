@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -18,6 +20,38 @@ fun configured(name: String): String = (
 fun quoted(value: String): String = "\"" + value
     .replace("\\", "\\\\")
     .replace("\"", "\\\"") + "\""
+
+fun firebaseConfig(path: String, packageName: String): Map<String, String> {
+    if (path.isBlank()) return emptyMap()
+    val file = File(path)
+    check(file.isFile) { "AGENTIC_WEAR_FIREBASE_CONFIG_FILE does not exist: $path" }
+    val root = JsonSlurper().parse(file) as? Map<*, *>
+        ?: error("Firebase config must contain a JSON object")
+    val project = root["project_info"] as? Map<*, *>
+        ?: error("Firebase config is missing project_info")
+    val client = (root["client"] as? List<*>)
+        ?.filterIsInstance<Map<*, *>>()
+        ?.firstOrNull { candidate ->
+            val info = candidate["client_info"] as? Map<*, *>
+            val android = info?.get("android_client_info") as? Map<*, *>
+            android?.get("package_name") == packageName
+        }
+        ?: error("Firebase config has no Android client for $packageName")
+    val clientInfo = client["client_info"] as? Map<*, *>
+        ?: error("Firebase client is missing client_info")
+    val apiKey = (client["api_key"] as? List<*>)
+        ?.filterIsInstance<Map<*, *>>()
+        ?.firstOrNull()
+        ?.get("current_key") as? String
+    return mapOf(
+        "applicationId" to (clientInfo["mobilesdk_app_id"] as? String).orEmpty(),
+        "projectId" to (project["project_id"] as? String).orEmpty(),
+        "apiKey" to apiKey.orEmpty(),
+        "senderId" to (project["project_number"] as? String).orEmpty(),
+    ).also { values ->
+        check(values.values.all(String::isNotBlank)) { "Firebase config is incomplete" }
+    }
+}
 
 val releaseStoreFile = configured("ANDROID_RELEASE_STORE_FILE")
 val releaseStorePassword = configured("ANDROID_RELEASE_STORE_PASSWORD")
@@ -46,6 +80,12 @@ val configuredUpdateManifestUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_URL")
 val publicUpdateManifestUrl = configuredUpdateManifestUrl.ifBlank {
     "https://github.com/Bughunter-Geek/agentic-wear/releases/latest/download/update.json"
 }
+val firebase = firebaseConfig(
+    configured("AGENTIC_WEAR_FIREBASE_CONFIG_FILE"),
+    "io.github.sirbughunter.agenticwear",
+)
+fun firebaseValue(property: String, fileKey: String): String =
+    configured(property).ifBlank { firebase[fileKey].orEmpty() }
 
 android {
     namespace = "io.github.sirbughunter.agenticwear"
@@ -60,10 +100,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "DEFAULT_RELAY_URL", quoted(defaultRelayUrl))
-        buildConfigField("String", "FIREBASE_APPLICATION_ID", quoted(configured("AGENTIC_WEAR_FIREBASE_APPLICATION_ID")))
-        buildConfigField("String", "FIREBASE_PROJECT_ID", quoted(configured("AGENTIC_WEAR_FIREBASE_PROJECT_ID")))
-        buildConfigField("String", "FIREBASE_API_KEY", quoted(configured("AGENTIC_WEAR_FIREBASE_API_KEY")))
-        buildConfigField("String", "FIREBASE_SENDER_ID", quoted(configured("AGENTIC_WEAR_FIREBASE_SENDER_ID")))
+        buildConfigField("String", "FIREBASE_APPLICATION_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_APPLICATION_ID", "applicationId")))
+        buildConfigField("String", "FIREBASE_PROJECT_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_PROJECT_ID", "projectId")))
+        buildConfigField("String", "FIREBASE_API_KEY", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_API_KEY", "apiKey")))
+        buildConfigField("String", "FIREBASE_SENDER_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_SENDER_ID", "senderId")))
         buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(configuredUpdateManifestUrl))
     }
 

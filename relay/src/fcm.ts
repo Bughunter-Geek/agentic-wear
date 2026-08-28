@@ -19,17 +19,21 @@ export async function wakeWatch(env: Env, installationId: string, pairId: string
         "Content-Type": "application/json",
         "User-Agent": downloaderUserAgent,
       },
-      body: JSON.stringify({
-        message: {
-          fid: installationId,
-          data: { kind: "inbox.ready", pairId },
-          android: { priority: "high", ttl: "60s" },
-        },
-      }),
+      body: JSON.stringify(buildWakeMessage(installationId, pairId)),
     },
   );
   if (!response.ok) throw new Error(`FCM wake failed with status ${response.status}`);
   await drainBounded(response, 16_384);
+}
+
+export function buildWakeMessage(installationId: string, pairId: string) {
+  return {
+    message: {
+      fid: installationId,
+      data: { kind: "inbox.ready", pairId },
+      android: { priority: "high", ttl: "60s" },
+    },
+  } as const;
 }
 
 async function createAccessToken(env: Env): Promise<string> {

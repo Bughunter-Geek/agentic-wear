@@ -30,7 +30,7 @@ The relay stores only encrypted bridge-to-watch envelopes for up to 24 hours. Wa
 
 The bridge connects to the managed Codex App Server over its local Unix WebSocket. This lets it observe sessions run through that same managed daemon, including Codex remote-control sessions from an iPhone. It is not a direct iPhone-to-watch connection, and it cannot observe unrelated ChatGPT conversations or a different Codex host.
 
-See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Privacy](PRIVACY.md), and [Security](SECURITY.md) before running a public deployment.
+See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Roadmap](ROADMAP.md), [Privacy](PRIVACY.md), and [Security](SECURITY.md) before running a public deployment.
 
 ## Prerequisites
 
@@ -42,7 +42,13 @@ See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Privacy
 
 ## 1. Configure Firebase
 
-Create a Firebase Android app with package name `io.github.sirbughunter.agenticwear`. Create a service-account key for the relay, then configure the Android build through uncommitted `local.properties` or environment variables:
+Create a Firebase Android app with package name `io.github.sirbughunter.agenticwear`. Create a service-account key for the relay, then keep the downloaded client config outside the repository and point the uncommitted `local.properties` file to it:
+
+```properties
+AGENTIC_WEAR_FIREBASE_CONFIG_FILE=/absolute/path/to/google-services.json
+```
+
+Alternatively, provide the four client values individually through uncommitted `local.properties`, Gradle properties, or environment variables:
 
 ```properties
 AGENTIC_WEAR_FIREBASE_APPLICATION_ID=1:123456789:android:example
@@ -52,7 +58,7 @@ AGENTIC_WEAR_FIREBASE_SENDER_ID=123456789
 AGENTIC_WEAR_RELAY_URL=https://agentic-wear-relay.example.workers.dev
 ```
 
-The app initializes Firebase programmatically, so no `google-services.json` is required or expected in this repository. Pairing still works when these values are absent, but background push alerts do not; the watch can only sync while the app is active until Firebase is configured.
+The app initializes Firebase programmatically, so `google-services.json` never needs to be copied into the repository. Pairing still works when these values are absent, but background push alerts do not; the watch can only sync while the app is active until Firebase is configured.
 
 Official builds default to `https://agentic-wear-relay.cleanuxlabs.workers.dev`, so watch users do not have to type a relay URL. Set `AGENTIC_WEAR_RELAY_URL` only when building against a different private deployment.
 
@@ -99,7 +105,7 @@ adb install -r wear/build/outputs/apk/debug/wear-debug.apk
 
 Wireless ADB is useful for the first install, but it is intentionally treated as temporary developer transport rather than permanent distribution infrastructure. Release builds include an opt-in updater in **Settings → App updates**. After one final ADB install, the watch can download a signed APK from GitHub Releases, verify its checksum, package name, version, and signing certificate, then open Wear OS's system installer. No Play Console account or future ADB pairing is required.
 
-Android still requires the watch owner to enable **Install unknown apps** for Agentic Wear once and confirm each update. Agentic Wear explains that handoff before opening the exact system settings page; it cannot and does not silently install software. The flow is verified on a 454 px round Wear OS 7 / Android 17 emulator. See [No-Play distribution](docs/distribution.md) for the exact workflow and security boundaries.
+Android still requires the watch owner to enable **Install unknown apps** for Agentic Wear once and confirm each update. Agentic Wear explains the handoff, then opens Android's package installer so the system can preserve the correct source-app context. If Android blocks the first install, use the installer's **Settings** action to enable Agentic Wear and return; Agentic Wear automatically resumes the verified installer. The app cannot and does not silently install software. The flow is verified on a 454 px round Wear OS 7 / Android 17 emulator. See [No-Play distribution](docs/distribution.md) for the exact workflow and security boundaries.
 
 For the local maintainer build, create a permanent release identity once. The keystore remains outside the repository and its generated password is stored in macOS Keychain:
 
@@ -145,3 +151,9 @@ Read [Contributing](CONTRIBUTING.md) and [Testing](docs/testing.md) before openi
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+Agentic Wear is independently implemented, with thanks to projects that helped
+establish this category. See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md), including
+our credit to [SmartCodex](https://github.com/Qualzz/SmartCodex).

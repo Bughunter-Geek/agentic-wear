@@ -182,41 +182,19 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun dismissInstallPermissionPrompt() {
+        awaitingInstallPermission = false
         _state.update { current -> current.copy(showInstallPermissionPrompt = false) }
     }
 
-    fun beginInstallPermissionRequest(): Intent {
+    fun continueInstallAfterWarning() {
         _state.update { current -> current.copy(showInstallPermissionPrompt = false) }
-        awaitingInstallPermission = true
-        return updateManager.installPermissionIntent()
+        launchDownloadedInstaller()
     }
 
-    fun installPermissionUnavailable() {
+    fun resumePendingInstallAfterPermission() {
+        if (!awaitingInstallPermission || !updateManager.canRequestInstalls()) return
         awaitingInstallPermission = false
-        _state.update { current ->
-            current.copy(
-                appUpdate = current.appUpdate.copy(
-                    stage = UpdateStage.ERROR,
-                    message = "Agentic Wear app settings are unavailable",
-                ),
-            )
-        }
-    }
-
-    fun resumePendingInstall() {
-        if (!awaitingInstallPermission) return
-        awaitingInstallPermission = false
-        if (updateManager.canRequestInstalls()) {
-            continueInstall()
-        } else {
-            _state.update { current ->
-                current.copy(
-                    appUpdate = current.appUpdate.copy(
-                        message = "Permission not enabled · tap to try again",
-                    ),
-                )
-            }
-        }
+        launchDownloadedInstaller()
     }
 
     fun disconnect() {
@@ -368,11 +346,33 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             }
             return
         }
+        launchDownloadedInstaller()
+    }
+
+    private fun launchDownloadedInstaller() {
+        val apk = downloadedUpdate
+        if (apk == null || !apk.isFile) {
+            _state.update { current ->
+                current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.ERROR, message = "Download the update again"))
+            }
+            return
+        }
+        val canRequestInstalls = updateManager.canRequestInstalls()
+        awaitingInstallPermission = !canRequestInstalls
         if (updateManager.launchInstaller(apk)) {
             _state.update { current ->
-                current.copy(appUpdate = current.appUpdate.copy(message = "Confirm the update on the system screen"))
+                current.copy(
+                    appUpdate = current.appUpdate.copy(
+                        message = if (canRequestInstalls) {
+                            "Confirm the update on the system screen"
+                        } else {
+                            "Allow Agentic Wear in Settings; the installer will resume automatically"
+                        },
+                    ),
+                )
             }
         } else {
+            awaitingInstallPermission = false
             _state.update { current ->
                 current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.ERROR, message = "System installer is unavailable"))
             }

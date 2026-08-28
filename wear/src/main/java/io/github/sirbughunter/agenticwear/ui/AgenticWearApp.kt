@@ -110,7 +110,6 @@ fun AgenticWearApp(
     viewModel: AgenticWearViewModel,
     onPushToTalkStart: () -> Unit,
     onPushToTalkEnd: () -> Unit,
-    onOpenInstallPermission: () -> Unit,
     pairingCodePrefill: String = "",
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -193,7 +192,7 @@ fun AgenticWearApp(
                 scaleOut(tween(130, easing = AgenticEaseOut), targetScale = 0.97f),
         ) {
             InstallPermissionPrompt(
-                onOpenSettings = onOpenInstallPermission,
+                onContinue = viewModel::continueInstallAfterWarning,
                 onDismiss = viewModel::dismissInstallPermissionPrompt,
             )
         }
@@ -202,7 +201,7 @@ fun AgenticWearApp(
 
 @Composable
 private fun InstallPermissionPrompt(
-    onOpenSettings: () -> Unit,
+    onContinue: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val blockerInteractions = remember { MutableInteractionSource() }
@@ -250,7 +249,7 @@ private fun InstallPermissionPrompt(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "Enable “Install unknown apps” in Agentic Wear’s settings, then return. Your data stays intact.",
+                "Continue to Android’s installer. If it blocks the update, tap Settings there and allow Agentic Wear. Your data stays intact.",
                 color = Muted,
                 fontSize = 10.sp,
                 lineHeight = 13.sp,
@@ -258,9 +257,9 @@ private fun InstallPermissionPrompt(
             )
             Spacer(Modifier.height(8.dp))
             ActionButton(
-                label = "Open settings",
+                label = "Continue",
                 primary = true,
-                onClick = onOpenSettings,
+                onClick = onContinue,
                 enabled = true,
                 modifier = Modifier.fillMaxWidth(),
             )

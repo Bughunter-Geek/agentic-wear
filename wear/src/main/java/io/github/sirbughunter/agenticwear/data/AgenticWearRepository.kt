@@ -115,9 +115,10 @@ class AgenticWearRepository(private val context: Context) {
         var receivedSessionSnapshot = false
         envelopes.forEach { envelope ->
             val messageId = envelope.optString("messageId")
+            val sentAt = envelope.optLong("sentAt")
             runCatching { crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope) }
                 .onSuccess { payload ->
-                    processPayload(payload, notify)
+                    processPayload(payload, notify, messageId, sentAt)
                     if (payload.optString("kind") == "sessions.snapshot") receivedSessionSnapshot = true
                     if (messageId.isNotBlank()) acknowledged += messageId
                     handled += 1
@@ -149,7 +150,12 @@ class AgenticWearRepository(private val context: Context) {
         relay.sendToBridge(pairing, crypto.encrypt(pairing.pairId, pairing.bridgePublicKey, plaintext))
     }
 
-    private fun processPayload(payload: JSONObject, notify: Boolean) {
+    private fun processPayload(
+        payload: JSONObject,
+        notify: Boolean,
+        envelopeMessageId: String,
+        envelopeSentAt: Long,
+    ) {
         when (payload.optString("kind")) {
             "sessions.snapshot" -> {
                 preferences.sessions = PayloadCodec.decodeSessions(payload)
@@ -164,13 +170,30 @@ class AgenticWearRepository(private val context: Context) {
             "approval.request" -> PayloadCodec.decodeAlert(payload)?.let { alert ->
                 preferences.latestAlert = alert
                 preferences.pending = false
+                preferences.lastError = null
                 if (notify && preferences.markEventHandled(alert.eventId)) {
                     io.github.sirbughunter.agenticwear.notification.AgentNotifier.post(context, alert)
                 }
             }
             "transcription.error", "turn.error", "approval.error", "bridge.error" -> {
                 preferences.pending = false
-                preferences.lastError = payload.optString("message", "The request could not be completed")
+                val selectedSession = preferences.sessions.firstOrNull { it.id == preferences.selectedThreadId }
+                    ?: preferences.sessions.firstOrNull()
+                val alert = PayloadCodec.decodeRequestError(
+                    json = payload,
+                    envelopeMessageId = envelopeMessageId,
+                    envelopeSentAt = envelopeSentAt,
+                    fallbackThreadId = selectedSession?.id,
+                    fallbackTitle = selectedSession?.title,
+                )
+                preferences.lastError = alert?.detail
+                    ?: payload.optString("message", "The request could not be completed")
+                if (alert != null) {
+                    preferences.latestAlert = alert
+                    if (notify && preferences.markEventHandled(alert.eventId)) {
+                        io.github.sirbughunter.agenticwear.notification.AgentNotifier.post(context, alert)
+                    }
+                }
             }
             "turn.accepted", "approval.accepted" -> {
                 preferences.pending = false

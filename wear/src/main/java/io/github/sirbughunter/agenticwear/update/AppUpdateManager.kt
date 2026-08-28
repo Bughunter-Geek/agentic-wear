@@ -4,9 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import androidx.core.content.FileProvider
 import io.github.sirbughunter.agenticwear.BuildConfig
 import java.io.ByteArrayOutputStream
@@ -115,12 +113,6 @@ class AppUpdateManager(private val context: Context) {
     }
 
     fun canRequestInstalls(): Boolean = context.packageManager.canRequestPackageInstalls()
-
-    fun installPermissionIntent(): Intent =
-        Intent(
-            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-            Uri.parse("package:${context.packageName}"),
-        )
 
     fun launchInstaller(apk: File): Boolean {
         if (!apk.isFile) return false

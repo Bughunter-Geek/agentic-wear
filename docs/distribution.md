@@ -5,7 +5,7 @@ Agentic Wear can update directly on a Wear OS watch without a Google Play develo
 1. Install one updater-enabled, release-signed APK over ADB.
 2. Publish every later APK with the same signing key as GitHub Release assets named `agentic-wear.apk` and `update.json`.
 3. On the watch, open **Settings → App updates** and tap the available version.
-4. The first time only, Agentic Wear explains the permission and opens its system settings page. Enable **Install unknown apps**, then return to Agentic Wear. Confirm each update in the Wear OS system installer.
+4. The first time only, Agentic Wear explains the permission and opens Android's package installer. If Android blocks the update, tap **Settings** in that installer, enable **Install unknown apps** for Agentic Wear, and return. Agentic Wear resumes the verified installer; confirm the update there.
 
 The default release manifest URL is:
 

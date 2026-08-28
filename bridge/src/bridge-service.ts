@@ -131,7 +131,9 @@ export class BridgeService {
         version: 1,
         kind,
         requestId: payload.requestId,
+        threadId: "threadId" in payload ? payload.threadId : undefined,
         message: publicError(error),
+        occurredAt: Date.now(),
       });
     }
   }

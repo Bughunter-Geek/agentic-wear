@@ -63,6 +63,9 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 | `terminal.completed` | Top-level user turn completed successfully; requires `turnScope: "topLevel"`. |
 | `terminal.failed` / `.interrupted` | Final unsuccessful top-level turn states; requires the same scope. |
 
+Terminal failures and request-level `.error` payloads produce red alerts. Each
+alert is deduplicated by its authenticated envelope or terminal event ID.
+
 Message IDs and terminal event IDs are idempotency keys. The watch acknowledges inbox envelopes only after successful decryption and handling.
 
 Only the App Server's `turn/completed` notification for a top-level user thread

@@ -16,4 +16,14 @@ class PayloadCodecPolicyTest {
     fun `permission alerts remain independent of turn completion scope`() {
         assertTrue(acceptsAlertEnvelope("approval.request", ""))
     }
+
+    @Test
+    fun `request failures are explicit red alert kinds`() {
+        assertTrue(isRequestErrorKind("transcription.error"))
+        assertTrue(isRequestErrorKind("turn.error"))
+        assertTrue(isRequestErrorKind("approval.error"))
+        assertTrue(isRequestErrorKind("bridge.error"))
+        assertFalse(isRequestErrorKind("turn.accepted"))
+        assertFalse(isRequestErrorKind("item.completed"))
+    }
 }
