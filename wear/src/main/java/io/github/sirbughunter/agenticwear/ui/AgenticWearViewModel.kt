@@ -185,19 +185,21 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         _state.update { current -> current.copy(showInstallPermissionPrompt = false) }
     }
 
-    fun openInstallPermission() {
+    fun beginInstallPermissionRequest(): Intent {
         _state.update { current -> current.copy(showInstallPermissionPrompt = false) }
         awaitingInstallPermission = true
-        if (!updateManager.openInstallPermission()) {
-            awaitingInstallPermission = false
-            _state.update { current ->
-                current.copy(
-                    appUpdate = current.appUpdate.copy(
-                        stage = UpdateStage.ERROR,
-                        message = "Install permission settings are unavailable",
-                    ),
-                )
-            }
+        return updateManager.installPermissionIntent()
+    }
+
+    fun installPermissionUnavailable() {
+        awaitingInstallPermission = false
+        _state.update { current ->
+            current.copy(
+                appUpdate = current.appUpdate.copy(
+                    stage = UpdateStage.ERROR,
+                    message = "Agentic Wear app settings are unavailable",
+                ),
+            )
         }
     }
 

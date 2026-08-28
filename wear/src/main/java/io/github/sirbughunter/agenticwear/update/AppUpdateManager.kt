@@ -116,13 +116,11 @@ class AppUpdateManager(private val context: Context) {
 
     fun canRequestInstalls(): Boolean = context.packageManager.canRequestPackageInstalls()
 
-    fun openInstallPermission(): Boolean {
-        val intent = Intent(
+    fun installPermissionIntent(): Intent =
+        Intent(
             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
             Uri.parse("package:${context.packageName}"),
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return launchIfResolvable(intent)
-    }
+        )
 
     fun launchInstaller(apk: File): Boolean {
         if (!apk.isFile) return false

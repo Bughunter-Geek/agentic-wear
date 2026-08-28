@@ -26,6 +26,9 @@ class MainActivity : ComponentActivity() {
         if (granted && pushToTalkHeld) viewModel.beginPushToTalk()
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private val installPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        viewModel.resumePendingInstall()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,6 +39,7 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     onPushToTalkStart = ::startPushToTalk,
                     onPushToTalkEnd = ::endPushToTalk,
+                    onOpenInstallPermission = ::openInstallPermission,
                     pairingCodePrefill = pairingCodePrefill,
                 )
             }
@@ -68,6 +72,16 @@ class MainActivity : ComponentActivity() {
     private fun endPushToTalk() {
         pushToTalkHeld = false
         viewModel.endPushToTalk()
+    }
+
+    private fun openInstallPermission() {
+        val intent = viewModel.beginInstallPermissionRequest()
+        if (intent.resolveActivity(packageManager) == null) {
+            viewModel.installPermissionUnavailable()
+            return
+        }
+        runCatching { installPermission.launch(intent) }
+            .onFailure { viewModel.installPermissionUnavailable() }
     }
 
     private fun requestNotificationPermission() {

@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -68,6 +70,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
@@ -83,6 +86,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.wear.compose.foundation.requestFocusOnHierarchyActive
+import androidx.wear.compose.foundation.rotary.RotaryScrollableDefaults
+import androidx.wear.compose.foundation.rotary.rotaryScrollable
 import io.github.sirbughunter.agenticwear.BuildConfig
 import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AlertKind
@@ -104,6 +110,7 @@ fun AgenticWearApp(
     viewModel: AgenticWearViewModel,
     onPushToTalkStart: () -> Unit,
     onPushToTalkEnd: () -> Unit,
+    onOpenInstallPermission: () -> Unit,
     pairingCodePrefill: String = "",
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -186,7 +193,7 @@ fun AgenticWearApp(
                 scaleOut(tween(130, easing = AgenticEaseOut), targetScale = 0.97f),
         ) {
             InstallPermissionPrompt(
-                onOpenSettings = viewModel::openInstallPermission,
+                onOpenSettings = onOpenInstallPermission,
                 onDismiss = viewModel::dismissInstallPermissionPrompt,
             )
         }
@@ -199,6 +206,7 @@ private fun InstallPermissionPrompt(
     onDismiss: () -> Unit,
 ) {
     val blockerInteractions = remember { MutableInteractionSource() }
+    val horizontalPadding = roundAwareHorizontalPadding(round = 30.dp, square = 20.dp)
     Box(
         Modifier
             .fillMaxSize()
@@ -209,7 +217,7 @@ private fun InstallPermissionPrompt(
                 role = Role.Button,
                 onClick = {},
             )
-            .padding(horizontal = 24.dp),
+            .padding(horizontal = horizontalPadding),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -242,7 +250,7 @@ private fun InstallPermissionPrompt(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "Enable “Install unknown apps” on the next screen, then return. Your data stays intact.",
+                "Enable “Install unknown apps” in Agentic Wear’s settings, then return. Your data stays intact.",
                 color = Muted,
                 fontSize = 10.sp,
                 lineHeight = 13.sp,
@@ -282,8 +290,12 @@ private fun HomeScreen(
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxHeight < 420.dp
         val orbSize = if (compact) 68.dp else 148.dp
+        val horizontalPadding = roundAwareHorizontalPadding(
+            round = if (compact) 24.dp else 30.dp,
+            square = if (compact) 16.dp else 20.dp,
+        )
         Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = if (compact) 22.dp else 28.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = horizontalPadding),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(if (compact) 8.dp else 22.dp))
@@ -465,11 +477,25 @@ private fun AgentGlyph(recording: Boolean, pending: Boolean, modifier: Modifier 
 
 @Composable
 private fun SessionsScreen(state: WearUiState, onBack: () -> Unit, onSelect: (String) -> Unit) {
+    val listState = rememberLazyListState()
+    val rotaryFocusRequester = remember { FocusRequester() }
+    val horizontalPadding = roundAwareHorizontalPadding()
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Sessions", onBack)
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 28.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .requestFocusOnHierarchyActive()
+                .rotaryScrollable(
+                    behavior = RotaryScrollableDefaults.behavior(listState),
+                    focusRequester = rotaryFocusRequester,
+                ),
+            state = listState,
+            contentPadding = PaddingValues(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                bottom = 36.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (state.sessions.isEmpty()) {
@@ -512,8 +538,19 @@ private fun TranscriptScreen(
     onRetry: () -> Unit,
 ) {
     val transcript = state.transcript
+    val scrollState = rememberScrollState()
+    val rotaryFocusRequester = remember { FocusRequester() }
+    val horizontalPadding = roundAwareHorizontalPadding()
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp),
+        Modifier
+            .fillMaxSize()
+            .requestFocusOnHierarchyActive()
+            .rotaryScrollable(
+                behavior = RotaryScrollableDefaults.behavior(scrollState),
+                focusRequester = rotaryFocusRequester,
+            )
+            .verticalScroll(scrollState)
+            .padding(horizontal = horizontalPadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         ScreenHeader("Review", onBack, horizontalPadding = 28.dp)
@@ -569,8 +606,19 @@ private fun AlertScreen(
         AlertKind.ERROR -> "AGENT STOPPED"
         null -> "NO RECENT ALERT"
     }
+    val scrollState = rememberScrollState()
+    val rotaryFocusRequester = remember { FocusRequester() }
+    val horizontalPadding = roundAwareHorizontalPadding(round = 30.dp, square = 20.dp)
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 25.dp),
+        Modifier
+            .fillMaxSize()
+            .requestFocusOnHierarchyActive()
+            .rotaryScrollable(
+                behavior = RotaryScrollableDefaults.behavior(scrollState),
+                focusRequester = rotaryFocusRequester,
+            )
+            .verticalScroll(scrollState)
+            .padding(horizontal = horizontalPadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         ScreenHeader("Latest", onBack, horizontalPadding = 25.dp)
@@ -647,11 +695,25 @@ private fun SettingsScreen(
     onUpdate: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
+    val listState = rememberLazyListState()
+    val rotaryFocusRequester = remember { FocusRequester() }
+    val horizontalPadding = roundAwareHorizontalPadding()
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Settings", onBack)
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 30.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .requestFocusOnHierarchyActive()
+                .rotaryScrollable(
+                    behavior = RotaryScrollableDefaults.behavior(listState),
+                    focusRequester = rotaryFocusRequester,
+                ),
+            state = listState,
+            contentPadding = PaddingValues(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                bottom = 36.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
             item { SectionLabel("TRANSCRIPTION") }
@@ -731,8 +793,19 @@ private fun PairScreen(
     val clipboard = LocalClipboard.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
+    val rotaryFocusRequester = remember { FocusRequester() }
+    val horizontalPadding = roundAwareHorizontalPadding(round = 30.dp, square = 20.dp)
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 26.dp),
+        Modifier
+            .fillMaxSize()
+            .requestFocusOnHierarchyActive()
+            .rotaryScrollable(
+                behavior = RotaryScrollableDefaults.behavior(scrollState),
+                focusRequester = rotaryFocusRequester,
+            )
+            .verticalScroll(scrollState)
+            .padding(horizontal = horizontalPadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(8.dp))
@@ -999,6 +1072,12 @@ private fun UpdateCard(update: UpdateUiState, onClick: () -> Unit) {
 private fun SectionLabel(text: String) {
     Text(text, color = Violet, fontSize = 9.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp, modifier = Modifier.padding(start = 8.dp, top = 4.dp))
 }
+
+@Composable
+private fun roundAwareHorizontalPadding(
+    round: Dp = 28.dp,
+    square: Dp = 18.dp,
+): Dp = if (LocalConfiguration.current.isScreenRound) round else square
 
 @Composable
 private fun ScreenHeader(title: String, onBack: () -> Unit, horizontalPadding: Dp = 50.dp) {
