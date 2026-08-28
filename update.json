@@ -1,7 +1,7 @@
 {
-  "versionCode": 17,
-  "versionName": "0.2.5",
-  "apkUrl": "https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.2.5-alpha/agentic-wear.apk",
-  "sha256": "96fdd901f7d06bb7ef9fbf6875302027cec35cbfff18e923def906779f7b5548",
-  "apkSize": 3045132
+  "versionCode": 18,
+  "versionName": "0.4.0-alpha",
+  "apkUrl": "https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.4.0-alpha/agentic-wear.apk",
+  "sha256": "cb3ddb712e95352100a8fde0f5f300423bc7e5bf129768a25642d3342fcb4bcf",
+  "apkSize": 3061556
 }
