@@ -337,6 +337,7 @@ private fun HomeScreen(
                 size = orbSize,
                 recording = state.recording,
                 transcribing = state.transcribing,
+                transcriptionElapsedMillis = state.transcriptionElapsedMillis,
                 pending = state.pending,
                 voiceLevel = state.voiceLevel,
                 enabled = state.isPaired && !state.pending,
@@ -345,7 +346,9 @@ private fun HomeScreen(
             Text(
                 text = when {
                     state.recording -> "Tap again to transcribe"
-                    state.transcribing -> "Transcribing audio…"
+                    state.transcribing -> state.transcriptionElapsedMillis?.let { elapsedMillis ->
+                        "Transcribing · ${formatTranscriptionElapsed(elapsedMillis)}"
+                    } ?: "Transcribing audio…"
                     state.pending -> "Agentic Wear is working…"
                     else -> "Tap to talk"
                 },
@@ -378,6 +381,7 @@ private fun PushToTalkOrb(
     size: Dp,
     recording: Boolean,
     transcribing: Boolean,
+    transcriptionElapsedMillis: Long?,
     pending: Boolean,
     voiceLevel: Float,
     enabled: Boolean,
@@ -397,7 +401,8 @@ private fun PushToTalkOrb(
         animationSpec = tween(100, easing = LinearEasing),
         label = "live voice activity",
     )
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(size + if (compact) 12.dp else 20.dp)) {
+    val activityHaloSize = size + if (compact) 28.dp else 52.dp
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(activityHaloSize)) {
         AnimatedVisibility(
             visible = transcribing,
             enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
@@ -405,19 +410,9 @@ private fun PushToTalkOrb(
             exit = fadeOut(tween(140, easing = AgenticEaseOut)) +
                 scaleOut(tween(140, easing = AgenticEaseOut), targetScale = 0.96f),
         ) {
-            TranscribingRing(size + if (compact) 10.dp else 16.dp)
+            TranscribingIndicator(size + if (compact) 10.dp else 16.dp)
         }
-        Box(
-            Modifier
-                .size(size + if (compact) 10.dp else 16.dp)
-                .graphicsLayer {
-                    val activityScale = 0.92f + activity * 0.18f
-                    scaleX = activityScale
-                    scaleY = activityScale
-                    alpha = activity * 0.72f
-                }
-                .border(2.dp, Cyan, CircleShape),
-        )
+        VoiceActivityHalo(size = activityHaloSize, activity = activity)
         Box(
             modifier = Modifier
                 .size(size)
@@ -436,7 +431,9 @@ private fun PushToTalkOrb(
                 .semantics {
                     contentDescription = when {
                         recording -> "Stop recording and transcribe"
-                        transcribing -> "Transcribing audio"
+                        transcribing -> transcriptionElapsedMillis?.let { elapsedMillis ->
+                            "Transcribing audio, ${formatTranscriptionElapsed(elapsedMillis)} elapsed"
+                        } ?: "Transcribing audio"
                         else -> "Start recording for the selected agent"
                     }
                     role = Role.Button
@@ -466,40 +463,72 @@ private fun PushToTalkOrb(
 }
 
 @Composable
-private fun TranscribingRing(size: Dp) {
-    val transition = rememberInfiniteTransition(label = "transcribing indicator")
-    val rotation by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
-        label = "transcribing rotation",
-    )
-    val pulse by transition.animateFloat(
-        initialValue = 0.97f,
-        targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = AgenticEaseInOut),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "transcribing pulse",
-    )
+private fun VoiceActivityHalo(size: Dp, activity: Float) {
     Canvas(
         Modifier
             .size(size)
             .graphicsLayer {
-                rotationZ = rotation
-                scaleX = pulse
-                scaleY = pulse
+                val activityScale = 0.78f + activity * 0.22f
+                scaleX = activityScale
+                scaleY = activityScale
+                alpha = (activity * 1.4f).coerceIn(0f, 1f)
             },
     ) {
-        val stroke = this.size.width * 0.035f
+        val stroke = this.size.minDimension * 0.025f
+        drawArc(
+            color = Violet.copy(alpha = 0.22f),
+            startAngle = 127.5f,
+            sweepAngle = 285f,
+            useCenter = false,
+            style = Stroke(stroke * 2.4f, cap = StrokeCap.Round),
+        )
         drawArc(
             brush = Brush.sweepGradient(listOf(Cyan, Violet, Frost, Cyan)),
-            startAngle = 118f,
-            sweepAngle = 274f,
+            startAngle = 127.5f,
+            sweepAngle = 285f,
             useCenter = false,
             style = Stroke(stroke, cap = StrokeCap.Round),
         )
+    }
+}
+
+@Composable
+private fun TranscribingIndicator(size: Dp) {
+    val transition = rememberInfiniteTransition(label = "transcribing indicator")
+    val glow by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = AgenticEaseInOut),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "transcribing glow",
+    )
+    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = this.size.minDimension * 0.035f
+            drawArc(
+                color = Violet.copy(alpha = 0.34f),
+                startAngle = 127.5f,
+                sweepAngle = 285f,
+                useCenter = false,
+                style = Stroke(stroke * 1.5f, cap = StrokeCap.Round),
+            )
+        }
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = glow },
+        ) {
+            val stroke = this.size.minDimension * 0.035f
+            drawArc(
+                brush = Brush.sweepGradient(listOf(Cyan, Violet, Frost, Cyan)),
+                startAngle = 127.5f,
+                sweepAngle = 285f,
+                useCenter = false,
+                style = Stroke(stroke, cap = StrokeCap.Round),
+            )
+        }
     }
 }
 
@@ -510,39 +539,55 @@ private fun AgentGlyph(
     voiceLevel: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
+    val activity = if (recording) voiceLevel.coerceIn(0f, 1f) else 0f
     val accent = when {
         recording -> Cyan
         pending -> Violet
         else -> Frost
     }
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        drawArc(
-            brush = Brush.sweepGradient(listOf(Cyan, Violet, Cyan)),
-            startAngle = 127.5f,
-            sweepAngle = 285f,
-            useCenter = false,
-            topLeft = Offset(w * 0.08f, h * 0.08f),
-            size = androidx.compose.ui.geometry.Size(w * 0.84f, h * 0.84f),
-            style = Stroke(w * 0.08f, cap = StrokeCap.Round),
-        )
-        val widths = w * 0.11f
-        val xs = listOf(w * 0.32f, w * 0.50f, w * 0.68f)
-        val activity = if (recording) voiceLevel.coerceIn(0f, 1f) else 0f
-        val heights = listOf(
-            h * (0.27f + activity * 0.25f),
-            h * (0.48f + activity * 0.34f),
-            h * (0.34f + activity * 0.28f),
-        )
-        xs.indices.forEach { index ->
-            drawLine(
-                color = if (index == 1) accent else if (index == 0) Cyan else Violet,
-                start = Offset(xs[index], (h - heights[index]) / 2f),
-                end = Offset(xs[index], (h + heights[index]) / 2f),
-                strokeWidth = widths,
-                cap = StrokeCap.Round,
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val arcScale = VoiceGlyphGeometry.arcScale(activity)
+                    scaleX = arcScale
+                    scaleY = arcScale
+                },
+        ) {
+            val w = size.width
+            val h = size.height
+            drawArc(
+                brush = Brush.sweepGradient(listOf(Cyan, Violet, Cyan)),
+                startAngle = 127.5f,
+                sweepAngle = 285f,
+                useCenter = false,
+                topLeft = Offset(
+                    w * VoiceGlyphGeometry.ARC_INSET_FRACTION,
+                    h * VoiceGlyphGeometry.ARC_INSET_FRACTION,
+                ),
+                size = androidx.compose.ui.geometry.Size(
+                    w * VoiceGlyphGeometry.ARC_DIAMETER_FRACTION,
+                    h * VoiceGlyphGeometry.ARC_DIAMETER_FRACTION,
+                ),
+                style = Stroke(w * VoiceGlyphGeometry.ARC_STROKE_FRACTION, cap = StrokeCap.Round),
             )
+        }
+        Canvas(Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val strokeWidth = w * VoiceGlyphGeometry.BAR_STROKE_FRACTION
+            repeat(VoiceGlyphGeometry.BAR_COUNT) { index ->
+                val x = w * VoiceGlyphGeometry.barXFraction(index)
+                val barHeight = h * VoiceGlyphGeometry.barHeightFraction(index, activity)
+                drawLine(
+                    color = if (index == 1) accent else if (index == 0) Cyan else Violet,
+                    start = Offset(x, (h - barHeight) / 2f),
+                    end = Offset(x, (h + barHeight) / 2f),
+                    strokeWidth = strokeWidth,
+                    cap = StrokeCap.Round,
+                )
+            }
         }
     }
 }
@@ -626,7 +671,26 @@ private fun TranscriptScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         ScreenHeader("Review", onBack, horizontalPadding = 28.dp)
-        Text("Your prompt", color = Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Your prompt", color = Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            state.transcriptionElapsedMillis?.let { elapsedMillis ->
+                val elapsedLabel = formatTranscriptionElapsed(elapsedMillis)
+                Text(
+                    "Took $elapsedLabel",
+                    color = Violet,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Transcribed in $elapsedLabel"
+                    },
+                )
+            }
+        }
         Spacer(Modifier.height(5.dp))
         Box(
             Modifier.fillMaxWidth().clip(SurfaceShape).background(Panel).border(1.dp, Color(0xFF373B55), SurfaceShape)

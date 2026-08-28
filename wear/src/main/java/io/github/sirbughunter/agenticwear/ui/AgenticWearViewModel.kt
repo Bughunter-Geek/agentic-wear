@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -49,6 +50,7 @@ data class WearUiState(
     val pending: Boolean = false,
     val recording: Boolean = false,
     val transcribing: Boolean = false,
+    val transcriptionElapsedMillis: Long? = null,
     val voiceLevel: Float = 0f,
     val error: String? = null,
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
@@ -72,6 +74,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private var deviceSpeech: DeviceSpeechController? = null
     private var voiceMonitorJob: Job? = null
     private var recordingTimeoutJob: Job? = null
+    private var transcriptionTimerJob: Job? = null
+    @Volatile
+    private var transcriptionStartedAtElapsedRealtime: Long? = null
+    @Volatile
+    private var frozenTranscriptionElapsedMillis: Long? = null
     private var downloadedUpdate: File? = null
     private var awaitingInstallPermission = false
     private var foregroundStartedAtMillis = System.currentTimeMillis()
@@ -137,11 +144,18 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun beginPushToTalk() {
         if (_state.value.recording || _state.value.pending) return
+        cancelTranscriptionTimerJob()
         if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
             runCatching { recorder.start() }
                 .onSuccess {
                     _state.update { current ->
-                        current.copy(recording = true, transcribing = false, voiceLevel = 0f, error = null)
+                        current.copy(
+                            recording = true,
+                            transcribing = false,
+                            transcriptionElapsedMillis = null,
+                            voiceLevel = 0f,
+                            error = null,
+                        )
                     }
                     startVoiceMonitoring()
                     startRecordingTimeout()
@@ -157,7 +171,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             runCatching { controller.start() }
                 .onSuccess {
                     _state.update { current ->
-                        current.copy(recording = true, transcribing = false, voiceLevel = 0f, error = null)
+                        current.copy(
+                            recording = true,
+                            transcribing = false,
+                            transcriptionElapsedMillis = null,
+                            voiceLevel = 0f,
+                            error = null,
+                        )
                     }
                     startRecordingTimeout()
                 }
@@ -165,8 +185,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun endPushToTalk() {
+    fun endPushToTalk() = finishPushToTalk(measureLatency = true)
+
+    private fun finishPushToTalk(measureLatency: Boolean) {
         if (!_state.value.recording) return
+        if (measureLatency) startTranscriptionTimer()
         stopVoiceMonitoring()
         _state.update { it.copy(recording = false, voiceLevel = 0f) }
         if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
@@ -201,6 +224,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun retryTranscript() {
         stopVoiceMonitoring()
+        cancelTranscriptionTimerJob()
         recordingTimeoutJob?.cancel()
         recorder.cancel()
         deviceSpeech?.cancel()
@@ -245,12 +269,23 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun disconnect() {
         cancelRecording()
+        cancelTranscriptionTimerJob()
+        _state.update { current ->
+            current.copy(
+                pending = false,
+                recording = false,
+                transcribing = false,
+                transcriptionElapsedMillis = null,
+                voiceLevel = 0f,
+            )
+        }
         repository.disconnect()
         reload(WearScreen.PAIR)
     }
 
     fun showDemo(stateName: String?) {
         if (!BuildConfig.DEBUG || stateName.isNullOrBlank()) return
+        cancelTranscriptionTimerJob()
         val now = System.currentTimeMillis()
         val sessions = listOf(
             AgentSession("demo-build", "Build Agentic Wear Alpha 0.2", now, SessionStatus.ACTIVE, true, true),
@@ -286,6 +321,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             pending = normalized == "home-transcribing",
             recording = normalized == "home-listening" || normalized == "home-speaking",
             transcribing = normalized == "home-transcribing",
+            transcriptionElapsedMillis = when (normalized) {
+                "home-transcribing" -> 3_400L
+                "transcript" -> 5_200L
+                else -> null
+            },
             voiceLevel = if (normalized == "home-speaking") 0.72f else 0f,
             approvalMode = if (normalized == "approval") ApprovalMode.ALLOW_CONTROLS else ApprovalMode.ALERT_ONLY,
             relayUrl = "https://relay.example.workers.dev",
@@ -308,12 +348,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun acceptDeviceTranscript(text: String) {
         stopVoiceMonitoring()
+        val elapsedMillis = freezeTranscriptionTimer()
         val transcript = Transcript(UUID.randomUUID().toString(), text, _state.value.selectedSession?.id)
         _state.update {
             it.copy(
                 recording = false,
                 pending = false,
                 transcribing = false,
+                transcriptionElapsedMillis = elapsedMillis ?: it.transcriptionElapsedMillis,
                 voiceLevel = 0f,
                 transcript = transcript,
                 screen = WearScreen.TRANSCRIPT,
@@ -333,7 +375,6 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             }
                 .onFailure(::showError)
                 .onSuccess {
-                    _state.update { current -> current.copy(transcribing = false) }
                     reload(WearScreen.HOME)
                 }
         }
@@ -353,8 +394,48 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         recordingTimeoutJob?.cancel()
         recordingTimeoutJob = viewModelScope.launch {
             delay(MAX_RECORDING_DURATION_MS)
-            if (_state.value.recording) endPushToTalk()
+            if (_state.value.recording) finishPushToTalk(measureLatency = false)
         }
+    }
+
+    @Synchronized
+    private fun startTranscriptionTimer() {
+        cancelTranscriptionTimerJob()
+        val startedAt = SystemClock.elapsedRealtime()
+        transcriptionStartedAtElapsedRealtime = startedAt
+        _state.update { current -> current.copy(transcriptionElapsedMillis = 0L) }
+        transcriptionTimerJob = viewModelScope.launch {
+            while (isActive && transcriptionStartedAtElapsedRealtime == startedAt) {
+                delay(TRANSCRIPTION_TIMER_INTERVAL_MS)
+                if (transcriptionStartedAtElapsedRealtime != startedAt) break
+                val elapsedMillis = elapsedRealtimeDelta(startedAt, SystemClock.elapsedRealtime())
+                _state.update { current ->
+                    if (current.transcriptionElapsedMillis == elapsedMillis) {
+                        current
+                    } else {
+                        current.copy(transcriptionElapsedMillis = elapsedMillis)
+                    }
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun freezeTranscriptionTimer(): Long? {
+        frozenTranscriptionElapsedMillis?.let { return it }
+        val startedAt = transcriptionStartedAtElapsedRealtime ?: return null
+        val elapsedMillis = elapsedRealtimeDelta(startedAt, SystemClock.elapsedRealtime())
+        frozenTranscriptionElapsedMillis = elapsedMillis
+        cancelTranscriptionTimerJob(clearFrozenElapsed = false)
+        return elapsedMillis
+    }
+
+    @Synchronized
+    private fun cancelTranscriptionTimerJob(clearFrozenElapsed: Boolean = true) {
+        transcriptionStartedAtElapsedRealtime = null
+        transcriptionTimerJob?.cancel()
+        transcriptionTimerJob = null
+        if (clearFrozenElapsed) frozenTranscriptionElapsedMillis = null
     }
 
     private fun stopVoiceMonitoring() {
@@ -493,6 +574,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun showError(message: String) {
         stopVoiceMonitoring()
+        cancelTranscriptionTimerJob()
         recorder.cancel()
         deviceSpeech?.cancel()
         _state.update {
@@ -500,6 +582,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 recording = false,
                 pending = false,
                 transcribing = false,
+                transcriptionElapsedMillis = null,
                 voiceLevel = 0f,
                 error = message.take(180),
             )
@@ -520,12 +603,27 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val current = _state.value
         val restored = readState(screen ?: current.screen)
         val transcriptReady = restored.transcript != null
+        val transcriptDismissed = current.transcript != null && restored.transcript == null
+        val transcriptionFailed = restored.error != null
+        val elapsedMillis = when {
+            transcriptReady -> freezeTranscriptionTimer() ?: current.transcriptionElapsedMillis
+            transcriptDismissed -> {
+                cancelTranscriptionTimerJob()
+                null
+            }
+            transcriptionFailed -> {
+                cancelTranscriptionTimerJob()
+                null
+            }
+            else -> current.transcriptionElapsedMillis
+        }
         _state.value = restored.copy(
             appUpdate = current.appUpdate,
             showInstallPermissionPrompt = current.showInstallPermissionPrompt,
             recording = current.recording && !transcriptReady,
-            transcribing = current.transcribing && !transcriptReady,
-            voiceLevel = if (transcriptReady) 0f else current.voiceLevel,
+            transcribing = current.transcribing && !transcriptReady && !transcriptionFailed,
+            transcriptionElapsedMillis = elapsedMillis,
+            voiceLevel = if (transcriptReady || transcriptionFailed) 0f else current.voiceLevel,
         )
     }
 
@@ -555,6 +653,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     override fun onCleared() {
         stopVoiceMonitoring()
+        cancelTranscriptionTimerJob()
         recorder.cancel()
         deviceSpeech?.destroy()
         getApplication<Application>().unregisterReceiver(stateReceiver)
@@ -563,6 +662,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     companion object {
         private const val VOICE_LEVEL_INTERVAL_MS = 80L
+        private const val TRANSCRIPTION_TIMER_INTERVAL_MS = 100L
         private const val MAX_RECORDING_DURATION_MS = 55_000L
     }
 }
@@ -573,6 +673,7 @@ internal fun resetForNewTranscription(current: WearUiState): WearUiState = curre
     pending = false,
     recording = false,
     transcribing = false,
+    transcriptionElapsedMillis = null,
     voiceLevel = 0f,
     error = null,
 )

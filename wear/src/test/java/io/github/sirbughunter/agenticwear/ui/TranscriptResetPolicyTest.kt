@@ -16,6 +16,7 @@ class TranscriptResetPolicyTest {
                 pending = true,
                 recording = true,
                 transcribing = true,
+                transcriptionElapsedMillis = 4_321L,
                 voiceLevel = 0.8f,
                 error = "Old error",
             ),
@@ -26,6 +27,7 @@ class TranscriptResetPolicyTest {
         assertFalse(reset.pending)
         assertFalse(reset.recording)
         assertFalse(reset.transcribing)
+        assertNull(reset.transcriptionElapsedMillis)
         assertEquals(0f, reset.voiceLevel, 0f)
         assertNull(reset.error)
     }
