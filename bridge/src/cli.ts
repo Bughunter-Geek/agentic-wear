@@ -2,7 +2,8 @@
 import { execFile } from "node:child_process";
 import { constants, existsSync } from "node:fs";
 import { access, stat } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -129,6 +130,7 @@ async function pair(args: string[]): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  process.env.AGENTIC_WEAR_CODEX_PATH ||= await resolveCodexExecutable();
   const config = await readConfig();
   const [privateKey, credential] = await Promise.all([
     readKeychainSecret(privateKeyAccount(config.pairId)),
@@ -149,7 +151,7 @@ async function start(): Promise<void> {
     : openAiTranscriber();
   if (provider === "local") await assertLocalWhisperInstalled();
   try {
-    await Promise.all([startManagedDaemon(), transcriber.prepare?.() ?? Promise.resolve()]);
+    await (transcriber.prepare?.() ?? Promise.resolve());
   } catch (error) {
     await transcriber.close?.();
     throw error;
@@ -212,11 +214,12 @@ function wait(milliseconds: number): Promise<void> {
 async function doctor(): Promise<void> {
   const checks: Array<{ check: string; ok: boolean; detail: string }> = [];
   try {
-    const { stdout } = await execFileAsync(codexExecutable(), ["--version"], {
+    const executable = await resolveCodexExecutable();
+    const { stdout } = await execFileAsync(executable, ["--version"], {
       timeout: 10_000,
       maxBuffer: 64 * 1_024,
     });
-    checks.push({ check: "codex", ok: true, detail: stdout.trim().slice(0, 120) });
+    checks.push({ check: "codex", ok: true, detail: `${stdout.trim().slice(0, 100)} · ${executable}` });
   } catch {
     checks.push({ check: "codex", ok: false, detail: "Codex CLI was not found" });
   }
@@ -253,24 +256,25 @@ async function doctor(): Promise<void> {
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 }
 
-async function startManagedDaemon(): Promise<void> {
-  try {
-    await execFileAsync(codexExecutable(), ["app-server", "daemon", "start"], {
-      timeout: 30_000,
-      maxBuffer: 256 * 1_024,
-    });
-  } catch (error) {
-    throw new Error(`Could not start the managed Codex App Server: ${safeMessage(error)}`);
-  }
-}
-
-function codexExecutable(): string {
-  return process.env.AGENTIC_WEAR_CODEX_PATH?.trim() || "codex";
-}
-
 async function resolveCodexExecutable(): Promise<string> {
   const configured = process.env.AGENTIC_WEAR_CODEX_PATH?.trim();
-  const candidate = configured || (await execFileAsync("/usr/bin/which", ["codex"], {
+  const desktopCandidates = [
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    join(homedir(), "Applications", "ChatGPT.app", "Contents", "Resources", "codex"),
+  ];
+  let candidate = configured;
+  if (!candidate) {
+    for (const desktopCandidate of desktopCandidates) {
+      try {
+        await access(desktopCandidate, constants.X_OK);
+        candidate = desktopCandidate;
+        break;
+      } catch {
+        // Keep looking for a current desktop-bundled Codex runtime.
+      }
+    }
+  }
+  candidate ||= (await execFileAsync("/usr/bin/which", ["codex"], {
     timeout: 10_000,
     maxBuffer: 64 * 1_024,
   })).stdout.trim().split(/\r?\n/u)[0];

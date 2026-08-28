@@ -15,6 +15,14 @@ type ClientInternals = {
     },
     newerThanMs: number,
   ) => Promise<void>;
+  rememberRecentTerminals: (session: {
+    id: string;
+    title: string;
+    updatedAt: number;
+    status: "active" | "idle" | "error" | "notLoaded";
+    ownedByWear: boolean;
+    canAcceptDirectInput: boolean;
+  }) => Promise<void>;
 };
 
 function thread(status: "notLoaded" | "idle" | "active" = "idle") {
@@ -46,7 +54,7 @@ describe("AppServerClient session delivery", () => {
   });
 
   it("performs one resume before starting a turn in an unloaded session", async () => {
-    const target = client();
+    const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
     internals.request = vi.fn((method: string) => {
@@ -63,6 +71,30 @@ describe("AppServerClient session delivery", () => {
     });
 
     expect(methods).toEqual(["thread/read", "thread/resume", "turn/start"]);
+  });
+
+  it("queues input for a session owned by another Codex client without competing for its writer", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      requests.push({ method, params: params as Record<string, unknown> });
+      if (method === "thread/queue/add") return Promise.resolve({ queuedSubmission: { id: "queued-1" } });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Please continue.", "/tmp")).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("thread/queue/add");
+    expect(requests[0]?.params).toMatchObject({
+      threadId: "thread-1",
+      input: [{ type: "text", text: "Please continue." }],
+    });
+    expect(requests[0]?.params.clientUserMessageId).toEqual(expect.any(String));
   });
 
   it("returns only the newest five assistant paragraphs in chronological order", async () => {
@@ -188,5 +220,40 @@ describe("AppServerClient session delivery", () => {
       eventId: "turn:thread-1:turn-completed:completed",
       kind: "terminal.completed",
     }]);
+  });
+
+  it("baselines existing terminal turns without alerting, then emits only a later completion", async () => {
+    const events: string[] = [];
+    const target = new AppServerClient(new Set(), async (event) => {
+      events.push(event.eventId);
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    let includeNew = false;
+    internals.request = vi.fn((method: string) => {
+      if (method !== "thread/turns/list") return Promise.reject(new Error(`Unexpected method ${method}`));
+      return Promise.resolve({
+        data: [
+          ...(includeNew ? [{ id: "turn-new", status: "completed", completedAt: 1_787_900_020, error: null }] : []),
+          { id: "turn-old", status: "completed", completedAt: 1_787_900_000, error: null },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      });
+    });
+    const session = {
+      id: "thread-1",
+      title: "Watch session",
+      updatedAt: 1_787_900_020_000,
+      status: "notLoaded" as const,
+      ownedByWear: false,
+      canAcceptDirectInput: false,
+    };
+
+    await internals.rememberRecentTerminals(session);
+    await internals.emitRecentTerminals(session, 1_787_899_900_000);
+    includeNew = true;
+    await internals.emitRecentTerminals(session, 1_787_900_010_000);
+
+    expect(events).toEqual(["turn:thread-1:turn-new:completed"]);
   });
 });

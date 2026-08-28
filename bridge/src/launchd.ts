@@ -25,7 +25,7 @@ export async function installLaunchAgent(
   await rename(temporary, plistPath);
   await chmod(plistPath, 0o600);
   await bootout().catch(() => undefined);
-  await execFileAsync("launchctl", ["bootstrap", domain(), plistPath], { timeout: 15_000, maxBuffer: 64 * 1_024 });
+  await bootstrapWithRetry(plistPath);
   await execFileAsync("launchctl", ["kickstart", "-k", `${domain()}/${label}`], {
     timeout: 15_000,
     maxBuffer: 64 * 1_024,
@@ -98,6 +98,29 @@ function domain(): string {
 
 async function bootout(): Promise<void> {
   await execFileAsync("launchctl", ["bootout", `${domain()}/${label}`], { timeout: 10_000, maxBuffer: 64 * 1_024 });
+}
+
+async function bootstrapWithRetry(plistPath: string): Promise<void> {
+  const retryDelaysMs = [0, 500, 1_000, 2_000, 4_000, 8_000];
+  let lastError: unknown;
+  for (const retryDelayMs of retryDelaysMs) {
+    if (retryDelayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, retryDelayMs));
+    try {
+      await execFileAsync("launchctl", ["bootstrap", domain(), plistPath], {
+        timeout: 15_000,
+        maxBuffer: 64 * 1_024,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : "";
+      // bootout can release the service label asynchronously. Retry only the
+      // documented transient EIO; configuration and permission failures still
+      // fail immediately with their original diagnostics.
+      if (!/Bootstrap failed: 5|Input\/output error/iu.test(message)) throw error;
+    }
+  }
+  throw lastError;
 }
 
 function requireMac(): void {

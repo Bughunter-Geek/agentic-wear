@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -208,7 +209,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.1" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.2" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -264,6 +265,17 @@ export class AppServerClient {
       this.watchOwnedThreadIds.add(thread.id);
       this.subscriptions.add(thread.id);
       created = true;
+    } else if (!this.watchOwnedThreadIds.has(threadId)) {
+      // Desktop and other Codex clients retain the only live writer for their
+      // threads. The persisted queue is the supported cross-client handoff:
+      // the owning client starts it immediately when idle, or after its active
+      // turn finishes. Resuming here would compete for the writer lock.
+      await this.request("thread/queue/add", {
+        threadId,
+        input: [textInput(text)],
+        clientUserMessageId: randomUUID(),
+      });
+      return { threadId, created: false };
     } else {
       thread = await this.readThread(threadId, true);
       if (thread.status.type === "active") {
@@ -374,43 +386,26 @@ export class AppServerClient {
   }
 
   async monitorTerminals(signal: AbortSignal, intervalMs = 5_000): Promise<void> {
-    let previous = snapshot(await this.listSessions());
-    let previousObservedAt = Date.now();
-    const activityWindows = new Map<string, { newerThanMs: number; expiresAtMs: number }>();
+    const monitoredSince = Date.now();
+    const initialSessions = (await this.listSessions()).slice(0, MAX_TERMINAL_SCAN_SESSIONS);
+    // Establish a baseline before polling. This prevents every bridge restart
+    // from replaying already-finished work while leaving an in-progress turn
+    // eligible once it reaches a terminal state.
+    for (const session of initialSessions) {
+      await this.rememberRecentTerminals(session).catch((error: unknown) => {
+        console.error(JSON.stringify({ level: "error", message: "terminal baseline skipped", error: safeError(error) }));
+      });
+    }
     while (!signal.aborted) {
       await delay(intervalMs, signal);
       if (signal.aborted) return;
       try {
-        const observedAt = Date.now();
-        const sessions = await this.listSessions();
-        const visibleSessionIds = new Set(sessions.map((session) => session.id));
-        for (const session of sessions) {
-          const before = previous.get(session.id);
-          const activityChanged = (
-            before === undefined || before.status === "active" || session.updatedAt > before.updatedAt
-          );
-          if (activityChanged || session.status === "active") {
-            const existing = activityWindows.get(session.id);
-            activityWindows.set(session.id, {
-              newerThanMs: existing?.newerThanMs ?? before?.updatedAt ?? previousObservedAt,
-              expiresAtMs: observedAt + TERMINAL_ACTIVITY_WINDOW_MS,
-            });
-          }
-          const window = activityWindows.get(session.id);
-          if (window && window.expiresAtMs >= observedAt) {
-            // A user can start another turn before this poll runs. Scan a small
-            // recent window so an in-progress or interrupted newest turn cannot
-            // hide the completed answer immediately beneath it.
-            await this.emitRecentTerminals(session, window.newerThanMs);
-          } else if (window) {
-            activityWindows.delete(session.id);
-          }
-        }
-        for (const threadId of activityWindows.keys()) {
-          if (!visibleSessionIds.has(threadId)) activityWindows.delete(threadId);
-        }
-        previous = snapshot(sessions);
-        previousObservedAt = observedAt;
+        // Some Codex clients own their writer in another process and expose the
+        // session as `notLoaded` here. Their status/updatedAt can therefore lag.
+        // Poll recent turns directly instead of gating completion detection on
+        // those advisory fields.
+        const sessions = (await this.listSessions()).slice(0, MAX_TERMINAL_SCAN_SESSIONS);
+        for (const session of sessions) await this.emitRecentTerminals(session, monitoredSince);
       } catch (error) {
         console.error(JSON.stringify({ level: "error", message: "terminal monitor retrying", error: safeError(error) }));
       }
@@ -688,18 +683,33 @@ export class AppServerClient {
     }
   }
 
+  private async rememberRecentTerminals(session: SessionView): Promise<void> {
+    const raw = await this.request("thread/turns/list", {
+      threadId: session.id,
+      limit: MAX_TERMINAL_SCAN_TURNS,
+      sortDirection: "desc",
+      itemsView: "notLoaded",
+    });
+    const turns = turnListResponseSchema.parse(raw).data.filter((turn) => turn.status !== "inProgress");
+    for (const turn of turns) this.rememberTerminalEvent(`turn:${session.id}:${turn.id}:${turn.status}`);
+  }
+
   private async emitTerminal(event: TerminalEvent): Promise<void> {
     if (this.deliveredTerminalEvents.has(event.eventId)) return;
-    this.deliveredTerminalEvents.add(event.eventId);
-    if (this.deliveredTerminalEvents.size > 2_000) {
-      const oldest = this.deliveredTerminalEvents.values().next().value;
-      if (oldest) this.deliveredTerminalEvents.delete(oldest);
-    }
+    this.rememberTerminalEvent(event.eventId);
     try {
       await this.onTerminal(event);
     } catch (error) {
       this.deliveredTerminalEvents.delete(event.eventId);
       throw error;
+    }
+  }
+
+  private rememberTerminalEvent(eventId: string): void {
+    this.deliveredTerminalEvents.add(eventId);
+    if (this.deliveredTerminalEvents.size > 2_000) {
+      const oldest = this.deliveredTerminalEvents.values().next().value;
+      if (oldest) this.deliveredTerminalEvents.delete(oldest);
     }
   }
 
@@ -830,10 +840,6 @@ function safeError(error: unknown): string {
   return (error instanceof Error ? error.message : "Unknown error").slice(0, 400);
 }
 
-function snapshot(sessions: SessionView[]): Map<string, Pick<SessionView, "status" | "updatedAt">> {
-  return new Map(sessions.map((session) => [session.id, { status: session.status, updatedAt: session.updatedAt }]));
-}
-
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const finish = () => {
@@ -856,4 +862,4 @@ const MAX_CACHED_CHAT_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGE_CHARS = 24_000;
 const MAX_CACHED_CHATS = 20;
 const MAX_TERMINAL_SCAN_TURNS = 8;
-const TERMINAL_ACTIVITY_WINDOW_MS = 2 * 60 * 1_000;
+const MAX_TERMINAL_SCAN_SESSIONS = 12;

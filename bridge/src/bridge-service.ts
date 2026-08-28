@@ -60,7 +60,7 @@ export class BridgeService {
     );
     try {
       if (this.controller.signal.aborted) throw abortError(this.controller.signal);
-      await this.appServer.connect("daemon");
+      await this.appServer.connect("stdio");
       await this.sendSessions();
       const monitorTask = this.appServer.monitorTerminals(this.controller.signal).catch((error: unknown) => {
         this.fatalError = error instanceof Error ? error : new Error("Terminal monitor stopped");
@@ -259,6 +259,12 @@ function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string 
   }
   if (/not connected|socket closed|app server closed/iu.test(message)) {
     return "The private bridge lost its Codex connection. Restart Codex and the Agentic Wear bridge, then retry.";
+  }
+  if (/active writer/iu.test(message)) {
+    return "Codex still owns this session in another client. Update and restart Codex, then retry so Agentic Wear can queue the prompt safely.";
+  }
+  if (/unknown variant [`']thread\/queue\/add|queued submission operation failed/iu.test(message)) {
+    return "This Codex version cannot receive queued watch prompts yet. Update and restart Codex on the bridge host, then retry.";
   }
   return message;
 }

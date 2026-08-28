@@ -2,6 +2,22 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.2-alpha — 2026-08-28
+
+### Fixed
+
+- Sends prompts to sessions already open in Codex through the supported cross-client queue, eliminating the raw “already has an active writer” failure.
+- Automatically uses the current Codex desktop runtime when available, so Agentic Wear receives the queue and session APIs shipped with the installed app.
+- Detects completions by polling the newest turns directly every five seconds, even when another Codex client reports the session as unloaded or leaves its advisory update time stale.
+- Baselines terminal history when the bridge starts, preventing old completed or interrupted turns from vibrating the watch after a restart.
+- Keeps one terminal event ID per turn, preserving single-notification delivery while the same completion remains visible across polls.
+
+### Notes
+
+- The cross-client queue was validated with two independent Codex app-server processes: the owning process automatically started the prompt submitted by the second process.
+- Error delivery to the physical watch was confirmed separately, narrowing the remaining alert defect to completion observation.
+- This watch update requires the 0.4.2 bridge.
+
 ## 0.4.1-alpha — 2026-08-28
 
 ### Fixed
