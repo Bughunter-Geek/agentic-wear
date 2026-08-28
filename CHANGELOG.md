@@ -2,6 +2,14 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.4-alpha — 2026-08-28
+
+### OTA path test
+
+- Increments the Alpha build to versionCode 22 so the watch can exercise update discovery, download, signature verification, and the system installer through the public `ota-alpha` channel.
+- Contains no claimed fix for minimized completion notifications; its purpose is to verify the OTA path independently before changing notification behavior.
+- After installing, open Agentic Wear once so the current pairing can refresh its background-wake registration.
+
 ## 0.4.3-alpha — 2026-08-28
 
 ### Fixed
