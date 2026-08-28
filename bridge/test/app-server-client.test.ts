@@ -4,6 +4,17 @@ import { AppServerClient } from "../src/app-server-client.js";
 type ClientInternals = {
   request: (method: string, params: unknown) => Promise<unknown>;
   handleNotification: (method: string, params: unknown) => Promise<void>;
+  emitRecentTerminals: (
+    session: {
+      id: string;
+      title: string;
+      updatedAt: number;
+      status: "active" | "idle" | "error" | "notLoaded";
+      ownedByWear: boolean;
+      canAcceptDirectInput: boolean;
+    },
+    newerThanMs: number,
+  ) => Promise<void>;
 };
 
 function thread(status: "notLoaded" | "idle" | "active" = "idle") {
@@ -120,5 +131,62 @@ describe("AppServerClient session delivery", () => {
     expect(snapshot.paragraphs.at(-1)?.text).toBe("Working safely");
     expect(outputThreads).toEqual(["thread-1"]);
     expect(methods).toEqual(["thread/read", "thread/turns/list"]);
+  });
+
+  it("finds a completed response hidden beneath a newer interrupted turn", async () => {
+    const events: Array<{ eventId: string; kind: string }> = [];
+    const target = new AppServerClient(new Set(), async (event) => {
+      events.push({ eventId: event.eventId, kind: event.kind });
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method !== "thread/turns/list") return Promise.reject(new Error(`Unexpected method ${method}`));
+      return Promise.resolve({
+        data: [
+          {
+            id: "turn-newer-interrupted",
+            status: "interrupted",
+            completedAt: null,
+            error: null,
+          },
+          {
+            id: "turn-completed",
+            status: "completed",
+            completedAt: 1_787_900_010,
+            error: null,
+          },
+          {
+            id: "turn-old",
+            status: "completed",
+            completedAt: 1_787_899_900,
+            error: null,
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      });
+    });
+
+    await internals.emitRecentTerminals({
+      id: "thread-1",
+      title: "Watch session",
+      updatedAt: 1_787_900_020_000,
+      status: "notLoaded",
+      ownedByWear: false,
+      canAcceptDirectInput: false,
+    }, 1_787_900_000_000);
+    await internals.emitRecentTerminals({
+      id: "thread-1",
+      title: "Watch session",
+      updatedAt: 1_787_900_020_000,
+      status: "notLoaded",
+      ownedByWear: false,
+      canAcceptDirectInput: false,
+    }, 1_787_900_000_000);
+
+    expect(events).toEqual([{
+      eventId: "turn:thread-1:turn-completed:completed",
+      kind: "terminal.completed",
+    }]);
   });
 });

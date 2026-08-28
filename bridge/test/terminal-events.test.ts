@@ -57,4 +57,8 @@ describe("terminal event classification", () => {
     expect(isTerminalNewerThan(null, observedAtMs)).toBe(false);
     expect(isTerminalNewerThan(1_787_876_600, observedAtMs)).toBe(true);
   });
+
+  it("accepts a completion in the same coarse timestamp second as observed activity", () => {
+    expect(isTerminalNewerThan(1_787_876_500, 1_787_876_500_842)).toBe(true);
+  });
 });

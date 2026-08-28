@@ -2,6 +2,20 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.1-alpha — 2026-08-28
+
+### Fixed
+
+- Restored completion alerts for Codex sessions owned by another active client, including the Codex desktop and mobile interfaces.
+- Polls active session windows every five seconds and scans the eight newest turns, so a newer prompt or interrupted turn cannot hide the full response that just completed.
+- Keeps terminal-event deduplication, preventing repeated notifications while the bridge observes the same completed turn.
+- Handles Codex's second-resolution completion timestamps without dropping responses that finish in the same timestamp second as the preceding activity update.
+
+### Notes
+
+- The push and encrypted relay path was verified independently: FCM woke the remote Pixel Watch, which fetched and acknowledged the diagnostic inbox event.
+- This watch update requires the 0.4.1 bridge for the completion-observation fix.
+
 ## 0.4.0-alpha — 2026-08-28
 
 ### Added

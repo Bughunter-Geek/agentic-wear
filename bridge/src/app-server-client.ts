@@ -208,7 +208,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.0" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.1" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -373,27 +373,41 @@ export class AppServerClient {
     }
   }
 
-  async monitorTerminals(signal: AbortSignal, intervalMs = 20_000): Promise<void> {
+  async monitorTerminals(signal: AbortSignal, intervalMs = 5_000): Promise<void> {
     let previous = snapshot(await this.listSessions());
     let previousObservedAt = Date.now();
+    const activityWindows = new Map<string, { newerThanMs: number; expiresAtMs: number }>();
     while (!signal.aborted) {
       await delay(intervalMs, signal);
       if (signal.aborted) return;
       try {
         const observedAt = Date.now();
         const sessions = await this.listSessions();
+        const visibleSessionIds = new Set(sessions.map((session) => session.id));
         for (const session of sessions) {
           const before = previous.get(session.id);
-          const mayHaveFinished = session.status !== "active" && (
+          const activityChanged = (
             before === undefined || before.status === "active" || session.updatedAt > before.updatedAt
           );
-          if (mayHaveFinished) {
-            // An idle thread can be updated by a rename, a child-agent event, or
-            // other metadata. Only replay a terminal turn that actually ended
-            // after our preceding observation; otherwise an old interrupted
-            // turn would become a false fresh alert.
-            await this.emitLatestTerminal(session, before?.updatedAt ?? previousObservedAt);
+          if (activityChanged || session.status === "active") {
+            const existing = activityWindows.get(session.id);
+            activityWindows.set(session.id, {
+              newerThanMs: existing?.newerThanMs ?? before?.updatedAt ?? previousObservedAt,
+              expiresAtMs: observedAt + TERMINAL_ACTIVITY_WINDOW_MS,
+            });
           }
+          const window = activityWindows.get(session.id);
+          if (window && window.expiresAtMs >= observedAt) {
+            // A user can start another turn before this poll runs. Scan a small
+            // recent window so an in-progress or interrupted newest turn cannot
+            // hide the completed answer immediately beneath it.
+            await this.emitRecentTerminals(session, window.newerThanMs);
+          } else if (window) {
+            activityWindows.delete(session.id);
+          }
+        }
+        for (const threadId of activityWindows.keys()) {
+          if (!visibleSessionIds.has(threadId)) activityWindows.delete(threadId);
         }
         previous = snapshot(sessions);
         previousObservedAt = observedAt;
@@ -645,30 +659,33 @@ export class AppServerClient {
     revision.reject(error);
   }
 
-  private async emitLatestTerminal(session: SessionView, newerThanMs: number): Promise<void> {
+  private async emitRecentTerminals(session: SessionView, newerThanMs: number): Promise<void> {
     const raw = await this.request("thread/turns/list", {
       threadId: session.id,
-      limit: 1,
+      limit: MAX_TERMINAL_SCAN_TURNS,
       sortDirection: "desc",
       itemsView: "notLoaded",
     });
-    const turn = turnListResponseSchema.parse(raw).data[0];
-    if (!turn || turn.status === "inProgress" || !isTerminalNewerThan(turn.completedAt, newerThanMs)) return;
-    const kind = `terminal.${turn.status}` as TerminalEvent["kind"];
-    const detail = turn.status === "completed"
-      ? "The agent finished its full response."
-      : turn.status === "failed"
-        ? clean(turn.error?.message ?? "The agent stopped with an error.", 260)
-        : "The agent was interrupted before finishing.";
-    await this.emitTerminal({
-      eventId: `turn:${session.id}:${turn.id}:${turn.status}`,
-      kind,
-      turnScope: "topLevel",
-      threadId: session.id,
-      title: session.title,
-      detail,
-      occurredAt: turn.completedAt! * 1_000,
-    });
+    const turns = turnListResponseSchema.parse(raw).data
+      .filter((turn) => turn.status !== "inProgress" && isTerminalNewerThan(turn.completedAt, newerThanMs))
+      .reverse();
+    for (const turn of turns) {
+      const kind = `terminal.${turn.status}` as TerminalEvent["kind"];
+      const detail = turn.status === "completed"
+        ? "The agent finished its full response."
+        : turn.status === "failed"
+          ? clean(turn.error?.message ?? "The agent stopped with an error.", 260)
+          : "The agent was interrupted before finishing.";
+      await this.emitTerminal({
+        eventId: `turn:${session.id}:${turn.id}:${turn.status}`,
+        kind,
+        turnScope: "topLevel",
+        threadId: session.id,
+        title: session.title,
+        detail,
+        occurredAt: turn.completedAt! * 1_000,
+      });
+    }
   }
 
   private async emitTerminal(event: TerminalEvent): Promise<void> {
@@ -758,7 +775,7 @@ export function isTopLevelUserThread(thread: CodexThread): boolean {
 }
 
 export function isTerminalNewerThan(completedAt: number | null | undefined, observedAtMs: number): boolean {
-  return completedAt != null && completedAt * 1_000 > observedAtMs;
+  return completedAt != null && completedAt * 1_000 >= Math.floor(observedAtMs / 1_000) * 1_000;
 }
 
 function textInput(text: string): Record<string, unknown> {
@@ -838,3 +855,5 @@ const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CACHED_CHAT_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGE_CHARS = 24_000;
 const MAX_CACHED_CHATS = 20;
+const MAX_TERMINAL_SCAN_TURNS = 8;
+const TERMINAL_ACTIVITY_WINDOW_MS = 2 * 60 * 1_000;
