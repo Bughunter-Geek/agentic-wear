@@ -8,7 +8,11 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -96,6 +100,7 @@ import androidx.wear.compose.material3.Text
 import kotlinx.coroutines.launch
 
 private val AgenticEaseOut = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
+private val AgenticEaseInOut = CubicBezierEasing(0.77f, 0f, 0.175f, 1f)
 private val SurfaceShape = RoundedCornerShape(24.dp)
 
 @Composable
@@ -331,6 +336,7 @@ private fun HomeScreen(
             PushToTalkOrb(
                 size = orbSize,
                 recording = state.recording,
+                transcribing = state.transcribing,
                 pending = state.pending,
                 voiceLevel = state.voiceLevel,
                 enabled = state.isPaired && !state.pending,
@@ -339,11 +345,15 @@ private fun HomeScreen(
             Text(
                 text = when {
                     state.recording -> "Tap again to transcribe"
-                    state.transcribing -> "Transcribing…"
+                    state.transcribing -> "Transcribing audio…"
                     state.pending -> "Agentic Wear is working…"
                     else -> "Tap to talk"
                 },
-                color = if (state.recording) Cyan else Muted,
+                color = when {
+                    state.recording -> Cyan
+                    state.transcribing -> Violet
+                    else -> Muted
+                },
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
             )
@@ -367,6 +377,7 @@ private fun HomeScreen(
 private fun PushToTalkOrb(
     size: Dp,
     recording: Boolean,
+    transcribing: Boolean,
     pending: Boolean,
     voiceLevel: Float,
     enabled: Boolean,
@@ -387,6 +398,15 @@ private fun PushToTalkOrb(
         label = "live voice activity",
     )
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(size + if (compact) 12.dp else 20.dp)) {
+        AnimatedVisibility(
+            visible = transcribing,
+            enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
+                scaleIn(tween(180, easing = AgenticEaseOut), initialScale = 0.94f),
+            exit = fadeOut(tween(140, easing = AgenticEaseOut)) +
+                scaleOut(tween(140, easing = AgenticEaseOut), targetScale = 0.96f),
+        ) {
+            TranscribingRing(size + if (compact) 10.dp else 16.dp)
+        }
         Box(
             Modifier
                 .size(size + if (compact) 10.dp else 16.dp)
@@ -414,10 +434,10 @@ private fun PushToTalkOrb(
                     CircleShape,
                 )
                 .semantics {
-                    contentDescription = if (recording) {
-                        "Stop recording and transcribe"
-                    } else {
-                        "Start recording for the selected agent"
+                    contentDescription = when {
+                        recording -> "Stop recording and transcribe"
+                        transcribing -> "Transcribing audio"
+                        else -> "Start recording for the selected agent"
                     }
                     role = Role.Button
                 }
@@ -442,6 +462,44 @@ private fun PushToTalkOrb(
                 modifier = Modifier.size(size * 0.48f),
             )
         }
+    }
+}
+
+@Composable
+private fun TranscribingRing(size: Dp) {
+    val transition = rememberInfiniteTransition(label = "transcribing indicator")
+    val rotation by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "transcribing rotation",
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.97f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = AgenticEaseInOut),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "transcribing pulse",
+    )
+    Canvas(
+        Modifier
+            .size(size)
+            .graphicsLayer {
+                rotationZ = rotation
+                scaleX = pulse
+                scaleY = pulse
+            },
+    ) {
+        val stroke = this.size.width * 0.035f
+        drawArc(
+            brush = Brush.sweepGradient(listOf(Cyan, Violet, Frost, Cyan)),
+            startAngle = 118f,
+            sweepAngle = 274f,
+            useCenter = false,
+            style = Stroke(stroke, cap = StrokeCap.Round),
+        )
     }
 }
 
