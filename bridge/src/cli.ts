@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { constants, existsSync } from "node:fs";
+import { access, stat } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -47,7 +47,7 @@ async function service(args: string[]): Promise<void> {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
     const builtCli = resolve(root, "bridge", "dist", "cli.js");
     if (!existsSync(builtCli)) throw new Error("Build the bridge first with `npm --prefix bridge run build`");
-    const path = await installLaunchAgent(root, process.execPath);
+    const path = await installLaunchAgent(root, process.execPath, await resolveCodexExecutable());
     console.log(`Background bridge installed: ${path}`);
     return;
   }
@@ -187,7 +187,10 @@ function wait(milliseconds: number): Promise<void> {
 async function doctor(): Promise<void> {
   const checks: Array<{ check: string; ok: boolean; detail: string }> = [];
   try {
-    const { stdout } = await execFileAsync("codex", ["--version"], { timeout: 10_000, maxBuffer: 64 * 1_024 });
+    const { stdout } = await execFileAsync(codexExecutable(), ["--version"], {
+      timeout: 10_000,
+      maxBuffer: 64 * 1_024,
+    });
     checks.push({ check: "codex", ok: true, detail: stdout.trim().slice(0, 120) });
   } catch {
     checks.push({ check: "codex", ok: false, detail: "Codex CLI was not found" });
@@ -220,13 +223,30 @@ async function doctor(): Promise<void> {
 
 async function startManagedDaemon(): Promise<void> {
   try {
-    await execFileAsync("codex", ["app-server", "daemon", "start"], {
+    await execFileAsync(codexExecutable(), ["app-server", "daemon", "start"], {
       timeout: 30_000,
       maxBuffer: 256 * 1_024,
     });
   } catch (error) {
     throw new Error(`Could not start the managed Codex App Server: ${safeMessage(error)}`);
   }
+}
+
+function codexExecutable(): string {
+  return process.env.AGENTIC_WEAR_CODEX_PATH?.trim() || "codex";
+}
+
+async function resolveCodexExecutable(): Promise<string> {
+  const configured = process.env.AGENTIC_WEAR_CODEX_PATH?.trim();
+  const candidate = configured || (await execFileAsync("/usr/bin/which", ["codex"], {
+    timeout: 10_000,
+    maxBuffer: 64 * 1_024,
+  })).stdout.trim().split(/\r?\n/u)[0];
+  if (!candidate || !isAbsolute(candidate)) {
+    throw new Error("Codex executable could not be resolved to an absolute path");
+  }
+  await access(candidate, constants.X_OK);
+  return candidate;
 }
 
 function loadLocalEnvironment(): void {

@@ -7,14 +7,21 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const label = "io.github.sirbughunter.agenticwear.bridge";
 
-export async function installLaunchAgent(repoRoot: string, nodePath: string): Promise<string> {
+export async function installLaunchAgent(
+  repoRoot: string,
+  nodePath: string,
+  codexPath: string,
+): Promise<string> {
   requireMac();
   const plistPath = launchAgentPath();
   const directory = dirname(plistPath);
   const cliPath = resolve(repoRoot, "bridge", "dist", "cli.js");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = `${plistPath}.${process.pid}.tmp`;
-  await writeFile(temporary, plist(nodePath, cliPath, repoRoot), { encoding: "utf8", mode: 0o600 });
+  await writeFile(temporary, plist(nodePath, cliPath, repoRoot, codexPath), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await rename(temporary, plistPath);
   await chmod(plistPath, 0o600);
   await bootout().catch(() => undefined);
@@ -44,7 +51,7 @@ export async function launchAgentStatus(): Promise<boolean> {
   }
 }
 
-function plist(nodePath: string, cliPath: string, repoRoot: string): string {
+function plist(nodePath: string, cliPath: string, repoRoot: string, codexPath: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -59,6 +66,11 @@ function plist(nodePath: string, cliPath: string, repoRoot: string): string {
   </array>
   <key>WorkingDirectory</key>
   <string>${escapeXml(repoRoot)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AGENTIC_WEAR_CODEX_PATH</key>
+    <string>${escapeXml(codexPath)}</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

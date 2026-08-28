@@ -103,7 +103,9 @@ export class AppServerClient {
   }
 
   private openStdio(): void {
-    const child = spawn("codex", ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.env.AGENTIC_WEAR_CODEX_PATH?.trim() || "codex", ["app-server"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     this.child = child;
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
