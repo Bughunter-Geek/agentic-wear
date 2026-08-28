@@ -5,7 +5,7 @@ Agentic Wear is self-hosted software. The repository does not operate a shared b
 ## Data processed
 
 - Session identifiers, titles, status, prompts, transcriptions, completion details, approval summaries, and timestamps pass between the watch and local bridge with end-to-end encryption.
-- Microphone audio is recorded to the watch cache, deleted after the encrypted request reaches the online bridge or the request fails, held in bridge memory for transcription, and sent to OpenAI only when GPT Transcribe is selected.
+- Microphone audio is recorded to the watch cache, deleted after the encrypted request reaches the online bridge or the request fails, and decoded and transcribed in bridge memory by default. It leaves the bridge host only when the deployment owner explicitly opts into hosted OpenAI transcription.
 - The relay stores encrypted bridge-to-watch envelopes for up to 24 hours. It does not store watch-to-bridge audio or prompts.
 - Firebase Cloud Messaging receives a Firebase Installation ID, opaque pair ID, and content-free wake signal.
 - The bridge reads Codex session metadata and terminal events from the local managed Codex App Server.
@@ -18,4 +18,4 @@ The watch stores encrypted pairing credentials, recent encrypted-delivery result
 
 Disconnecting in the watch app removes pairing and cached app state. `agentic-wear service uninstall` removes the background service but intentionally preserves Keychain/config data. Relay data disappears automatically when its queue TTL expires; a deployment owner may also delete its Durable Object namespace.
 
-OpenAI, Firebase, Cloudflare, and Codex account retention are governed by the deployment owner’s accounts and policies.
+Firebase, Cloudflare, and Codex account retention are governed by the deployment owner’s accounts and policies. OpenAI API retention also applies only when the deployment owner explicitly selects the hosted transcription provider.

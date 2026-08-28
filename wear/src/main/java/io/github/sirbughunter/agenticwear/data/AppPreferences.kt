@@ -22,7 +22,7 @@ class AppPreferences(context: Context) {
         set(value) = prefs.edit { putString(KEY_SELECTED_THREAD, value) }
 
     var transcriptionEngine: TranscriptionEngine
-        get() = enumValue(prefs.getString(KEY_ENGINE, null), TranscriptionEngine.GPT_TRANSCRIBE)
+        get() = storedTranscriptionEngine(prefs.getString(KEY_ENGINE, null))
         set(value) = prefs.edit { putString(KEY_ENGINE, value.name) }
 
     var approvalMode: ApprovalMode
@@ -113,6 +113,12 @@ class AppPreferences(context: Context) {
         private const val KEY_LAST_ERROR = "last_error"
         private const val KEY_HANDLED_IDS = "handled_ids"
     }
+}
+
+internal fun storedTranscriptionEngine(value: String?): TranscriptionEngine = when (value) {
+    null, "GPT_TRANSCRIBE", TranscriptionEngine.BRIDGE_WHISPER.name -> TranscriptionEngine.BRIDGE_WHISPER
+    TranscriptionEngine.DEVICE_SPEECH.name -> TranscriptionEngine.DEVICE_SPEECH
+    else -> TranscriptionEngine.BRIDGE_WHISPER
 }
 
 object RelayUrlPolicy {

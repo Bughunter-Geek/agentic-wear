@@ -21,10 +21,15 @@ The bridge:
 - Connects to the managed Codex App Server’s local Unix WebSocket.
 - Subscribes to loaded sessions and reconciles their persisted terminal turns every 20 seconds.
 - Emits one idempotent event per final turn status.
-- Uses GPT Transcribe for audio when requested by the watch.
+- Uses a persistent local MLX Whisper worker for audio by default, keeping the multilingual model warm between prompts.
+- Supports hosted GPT Transcribe only as an explicit deployment-owner opt-in.
 - Stores long-lived credentials in macOS Keychain.
 - Atomically claims authenticated inbound message IDs on disk before side effects, preventing replay across restarts and concurrent processes.
 - Runs as a throttled background launchd agent.
+
+The watch sends a bounded encrypted AAC recording only to its paired bridge. The local worker decodes it through `ffmpeg` pipes and transcribes the in-memory waveform; it does not create an audio file. This removes hosted inference latency and per-minute transcription billing while keeping raw audio on the bridge host.
+
+There is no shared transcription backend: every deployment owner runs their own bridge and model. The public relay routes opaque envelopes by pair identity and cannot enroll an unrelated watch into another owner's authenticated pair.
 
 The polling fallback examines only `completed`, `failed`, or `interrupted` turn records. It cannot turn reasoning, tool progress, item completion, or partial assistant text into an alert.
 

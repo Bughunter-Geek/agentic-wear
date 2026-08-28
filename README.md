@@ -7,7 +7,7 @@ It is not affiliated with or endorsed by OpenAI. “Codex” is used only to des
 ## What works in v0.1
 
 - Push-to-talk prompts with a review-before-send transcript.
-- GPT Transcribe by default; Wear OS device speech is an optional fallback.
+- Free multilingual Whisper on the private Mac bridge by default; hosted GPT Transcribe and Wear OS device speech are optional fallbacks.
 - Recent Codex session picker with exact session titles and state.
 - One continuous one-second vibration when a full response completes.
 - Distinct permission and error vibration patterns with amber/red alert states.
@@ -23,10 +23,12 @@ Agentic Wear never treats reasoning paragraphs, item completion, streamed text, 
 
 ```text
 Pixel Watch  ⇄  encrypted relay + FCM wake  ⇄  macOS bridge  ⇄  Codex App Server
-                                                     └──────→ OpenAI transcription
+                                                     └──────→ local Whisper
 ```
 
 The relay stores only encrypted bridge-to-watch envelopes for up to 24 hours. Watch audio is forwarded only while the bridge is online and is never queued by the relay. FCM receives a content-free wake signal; session titles, transcripts, prompts, and alert details remain encrypted in transit through the relay.
+
+Every watch is authenticated to one private bridge. Local transcription uses that bridge owner's Mac only; installing Agentic Wear never sends another user's audio to someone else's computer or turns a maintainer's Mac into shared infrastructure.
 
 The bridge connects to the managed Codex App Server over its local Unix WebSocket. This lets it observe sessions run through that same managed daemon, including Codex remote-control sessions from an iPhone. It is not a direct iPhone-to-watch connection, and it cannot observe unrelated ChatGPT conversations or a different Codex host.
 
@@ -38,7 +40,7 @@ See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Roadmap
 - Node.js 22+, JDK 17, Android SDK 37, and Android Studio.
 - A Wear OS 4+ watch (minimum API 31).
 - Your own Cloudflare and Firebase projects.
-- A dedicated OpenAI API key for transcription.
+- An Apple-silicon Mac for the automatic free Local Whisper setup. Hosted transcription is optional.
 
 ## 1. Configure Firebase
 
@@ -84,8 +86,13 @@ Copy `.env.example` to `.env.local` at the repository root and fill in your own 
 ```bash
 npm --prefix bridge ci
 npm --prefix bridge run build
+node bridge/dist/cli.js transcription setup
 node bridge/dist/cli.js pair --relay https://your-relay.example.workers.dev --cwd /path/to/default/project
 ```
+
+The one-time transcription setup installs Apple MLX Whisper into `~/.agentic-wear`, downloads the multilingual Whisper Large v3 Turbo model, and keeps it loaded while the bridge runs. Allow roughly 3 GB for its isolated runtime and model. Prompts have no per-minute API charge and audio is decoded and transcribed in bridge memory. Install `ffmpeg` first with `brew install ffmpeg` if setup asks for it.
+
+To opt into OpenAI's paid hosted transcription instead, set `AGENTIC_WEAR_TRANSCRIPTION_PROVIDER=openai` and provide `OPENAI_API_KEY`. This is never the default.
 
 The bridge creates and displays an eight-character code locally. Enter it with the relay URL on the watch. The command waits until the watch and bridge have mutually authenticated both public keys; the relay only forwards their proofs and never receives the code. Finish with:
 

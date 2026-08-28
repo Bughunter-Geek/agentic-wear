@@ -9,6 +9,8 @@
 node_modules/
 .wrangler/
 bridge/dist/
+__pycache__/
+*.pyc
 coverage/
 dist/
 .idea/

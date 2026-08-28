@@ -45,7 +45,7 @@ data class WearUiState(
     val pending: Boolean = false,
     val recording: Boolean = false,
     val error: String? = null,
-    val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.GPT_TRANSCRIBE,
+    val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val relayUrl: String = "",
     val appUpdate: UpdateUiState = UpdateUiState(),
@@ -124,7 +124,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun beginPushToTalk() {
         if (_state.value.recording || _state.value.pending) return
         _state.update { it.copy(recording = true, error = null) }
-        if (_state.value.transcriptionEngine == TranscriptionEngine.GPT_TRANSCRIBE) {
+        if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
             runCatching { recorder.start() }.onFailure(::showError)
         } else {
             val controller = deviceSpeech ?: DeviceSpeechController(
@@ -139,7 +139,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun endPushToTalk() {
         if (!_state.value.recording) return
         _state.update { it.copy(recording = false) }
-        if (_state.value.transcriptionEngine == TranscriptionEngine.GPT_TRANSCRIBE) {
+        if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
             val audio = recorder.stop()
             if (audio == null) showError("Hold a little longer so I can hear you") else transcribe(audio)
         } else {
@@ -212,6 +212,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         )
         val normalized = stateName.lowercase()
         val updatePermissionDemo = normalized == "update-permission"
+        val homeErrorDemo = normalized == "home-error"
         val alert = when (normalized) {
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
             "complete" -> AgentAlert("demo-complete", AlertKind.COMPLETE, "demo-build", sessions[0].title, "All checks passed. Release APK is ready for review.", now)
@@ -249,6 +250,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 UpdateUiState(enabled = updateManager.enabled)
             },
             showInstallPermissionPrompt = updatePermissionDemo,
+            error = if (homeErrorDemo) "Hold a little longer so I can hear you" else null,
             demo = true,
         )
     }

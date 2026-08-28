@@ -3,7 +3,9 @@ import OpenAI, { toFile } from "openai";
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 
 export interface Transcriber {
+  prepare?(): Promise<void>;
   transcribe(audio: Uint8Array, mimeType: "audio/mp4"): Promise<string>;
+  close?(): void | Promise<void>;
 }
 
 export class OpenAITranscriber implements Transcriber {

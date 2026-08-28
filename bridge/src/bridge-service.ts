@@ -68,6 +68,7 @@ export class BridgeService {
       this.appServer.close();
       this.controller.abort();
       await socketTask.catch(() => undefined);
+      await this.transcriber.close?.();
     }
   }
 

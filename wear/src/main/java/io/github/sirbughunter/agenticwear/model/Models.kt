@@ -24,7 +24,7 @@ data class AgentAlert(
     val canControl: Boolean = false,
 )
 
-enum class TranscriptionEngine { GPT_TRANSCRIBE, DEVICE_SPEECH }
+enum class TranscriptionEngine { BRIDGE_WHISPER, DEVICE_SPEECH }
 
 enum class ApprovalMode { ALERT_ONLY, ALLOW_CONTROLS }
 

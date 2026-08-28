@@ -182,7 +182,16 @@ fun AgenticWearApp(
             }
         }
         state.error?.takeIf { state.screen != WearScreen.PAIR }?.let { error ->
-            ErrorPill(error, Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp))
+            val horizontalPadding = roundAwareHorizontalPadding(round = 28.dp, square = 16.dp)
+            val bottomPadding = if (LocalConfiguration.current.isScreenRound) 40.dp else 16.dp
+            ErrorPill(
+                error,
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding)
+                    .padding(bottom = bottomPadding),
+            )
         }
         AnimatedVisibility(
             visible = state.showInstallPermissionPrompt,
@@ -718,15 +727,15 @@ private fun SettingsScreen(
             item { SectionLabel("TRANSCRIPTION") }
             item {
                 SettingChoice(
-                    title = "GPT Transcribe",
-                    subtitle = "More accurate · runs on your host",
-                    selected = state.transcriptionEngine == TranscriptionEngine.GPT_TRANSCRIBE,
-                ) { onEngine(TranscriptionEngine.GPT_TRANSCRIBE) }
+                    title = "Private Whisper",
+                    subtitle = "Free · multilingual · runs on your Mac",
+                    selected = state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER,
+                ) { onEngine(TranscriptionEngine.BRIDGE_WHISPER) }
             }
             item {
                 SettingChoice(
                     title = "Device speech",
-                    subtitle = "Uses the watch speech service",
+                    subtitle = "Faster · limited language switching",
                     selected = state.transcriptionEngine == TranscriptionEngine.DEVICE_SPEECH,
                 ) { onEngine(TranscriptionEngine.DEVICE_SPEECH) }
             }
@@ -1158,6 +1167,7 @@ private fun ErrorPill(message: String, modifier: Modifier = Modifier) {
         message,
         color = Frost,
         fontSize = 10.sp,
+        lineHeight = 13.sp,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
         textAlign = TextAlign.Center,

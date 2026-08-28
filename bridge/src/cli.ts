@@ -25,6 +25,14 @@ import {
 } from "./pairing-auth.js";
 import { RelayClient } from "./relay-client.js";
 import { OpenAITranscriber } from "./transcriber.js";
+import type { Transcriber } from "./transcriber.js";
+import {
+  assertLocalWhisperInstalled,
+  LocalWhisperTranscriber,
+  localWhisperModel,
+  resolveTranscriptionProvider,
+  setupLocalWhisper,
+} from "./local-whisper.js";
 import { installLaunchAgent, launchAgentStatus, uninstallLaunchAgent } from "./launchd.js";
 
 const execFileAsync = promisify(execFile);
@@ -36,8 +44,17 @@ async function main(): Promise<void> {
   else if (command === "start") await start();
   else if (command === "doctor") await doctor();
   else if (command === "service") await service(args);
+  else if (command === "transcription") await transcription(args);
   else if (command === "help" || command === "--help" || command === undefined) usage();
   else throw new Error(`Unknown command: ${command}`);
+}
+
+async function transcription(args: string[]): Promise<void> {
+  const action = args[0];
+  if (args.length !== 1 || action !== "setup") throw new Error("Use `agentic-wear transcription setup`");
+  console.log(`Preparing free Local Whisper transcription (${localWhisperModel()})…`);
+  await setupLocalWhisper();
+  console.log("Local Whisper is ready. No OpenAI API key or per-minute transcription billing is required.");
 }
 
 async function service(args: string[]): Promise<void> {
@@ -126,14 +143,22 @@ async function start(): Promise<void> {
     await writeConfig(config);
     await deleteKeychainSecret(pairingAuthenticatorAccount(config.pairId));
   }
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is missing; store it in .env.local or the bridge environment");
-  await startManagedDaemon();
+  const provider = resolveTranscriptionProvider();
+  const transcriber: Transcriber = provider === "local"
+    ? new LocalWhisperTranscriber()
+    : openAiTranscriber();
+  if (provider === "local") await assertLocalWhisperInstalled();
+  try {
+    await Promise.all([startManagedDaemon(), transcriber.prepare?.() ?? Promise.resolve()]);
+  } catch (error) {
+    await transcriber.close?.();
+    throw error;
+  }
   const service = new BridgeService(
     config,
     relay,
     privateKey,
-    new OpenAITranscriber(apiKey, process.env.AGENTIC_WEAR_TRANSCRIPTION_MODEL ?? "gpt-transcribe"),
+    transcriber,
   );
   const stop = () => service.stop();
   process.once("SIGINT", stop);
@@ -212,11 +237,18 @@ async function doctor(): Promise<void> {
   } catch (error) {
     checks.push({ check: "configuration", ok: false, detail: safeMessage(error) });
   }
-  checks.push({
-    check: "transcription",
-    ok: Boolean(process.env.OPENAI_API_KEY),
-    detail: process.env.OPENAI_API_KEY ? "API key is configured" : "OPENAI_API_KEY is missing",
-  });
+  try {
+    const provider = resolveTranscriptionProvider();
+    if (provider === "local") {
+      await assertLocalWhisperInstalled();
+      checks.push({ check: "transcription", ok: true, detail: `Local Whisper · ${localWhisperModel()} · no API billing` });
+    } else {
+      openAiTranscriber();
+      checks.push({ check: "transcription", ok: true, detail: "OpenAI API · paid opt-in" });
+    }
+  } catch (error) {
+    checks.push({ check: "transcription", ok: false, detail: safeMessage(error) });
+  }
   for (const check of checks) console.log(`${check.ok ? "✓" : "✗"} ${check.check}: ${check.detail}`);
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 }
@@ -284,7 +316,14 @@ Usage:
   agentic-wear pair --relay <https-url> [--cwd <directory>] [--replace]
   agentic-wear start
   agentic-wear doctor
+  agentic-wear transcription setup
   agentic-wear service install|uninstall|status`);
+}
+
+function openAiTranscriber(): OpenAITranscriber {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is required only when AGENTIC_WEAR_TRANSCRIPTION_PROVIDER=openai");
+  return new OpenAITranscriber(apiKey, process.env.AGENTIC_WEAR_TRANSCRIPTION_MODEL ?? "gpt-transcribe");
 }
 
 function safeMessage(error: unknown): string {
