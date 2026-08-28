@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,10 +14,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import io.github.sirbughunter.agenticwear.ui.AgenticWearApp
 import io.github.sirbughunter.agenticwear.ui.AgenticWearTheme
 import io.github.sirbughunter.agenticwear.ui.AgenticWearViewModel
 import io.github.sirbughunter.agenticwear.ui.extractPairingCode
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<AgenticWearViewModel>()
@@ -40,6 +45,7 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        observeActiveVoiceSession()
         requestNotificationPermission()
     }
 
@@ -62,6 +68,25 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         if (!isChangingConfigurations && !requestingMicrophonePermission) viewModel.cancelRecording()
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        setKeepScreenOn(false)
+        super.onDestroy()
+    }
+
+    private fun observeActiveVoiceSession() {
+        lifecycleScope.launch {
+            viewModel.state
+                .map { state -> keepScreenOnForVoiceSession(state.recording, state.transcribing) }
+                .distinctUntilChanged()
+                .collect(::setKeepScreenOn)
+        }
+    }
+
+    private fun setKeepScreenOn(enabled: Boolean) {
+        val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        if (enabled) window.addFlags(flag) else window.clearFlags(flag)
     }
 
     private fun togglePushToTalk() {
@@ -105,3 +130,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PAIRING_CODE = "io.github.sirbughunter.agenticwear.PAIRING_CODE"
     }
 }
+
+internal fun keepScreenOnForVoiceSession(recording: Boolean, transcribing: Boolean): Boolean =
+    recording || transcribing
