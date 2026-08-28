@@ -85,18 +85,24 @@ mkdir -p "$dist_dir"
 install -m 0644 "$source_apk" "$dist_dir/agentic-wear.apk"
 sha256=$(shasum -a 256 "$dist_dir/agentic-wear.apk" | awk '{print $1}')
 apk_size=$(stat -f '%z' "$dist_dir/agentic-wear.apk")
+release_tag="${AGENTIC_WEAR_RELEASE_TAG:-v$version_name}"
+if [[ ! "$release_tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "AGENTIC_WEAR_RELEASE_TAG contains unsupported characters: $release_tag" >&2
+    exit 1
+fi
 
 UPDATE_FILE="$dist_dir/update.json" \
 VERSION_CODE="$version_code" \
 VERSION_NAME="$version_name" \
 APK_SHA256="$sha256" \
 APK_SIZE="$apk_size" \
+RELEASE_TAG="$release_tag" \
 node -e '
 const fs = require("fs");
 const manifest = {
   versionCode: Number(process.env.VERSION_CODE),
   versionName: process.env.VERSION_NAME,
-  apkUrl: "https://github.com/Bughunter-Geek/agentic-wear/releases/latest/download/agentic-wear.apk",
+  apkUrl: `https://github.com/Bughunter-Geek/agentic-wear/releases/download/${process.env.RELEASE_TAG}/agentic-wear.apk`,
   sha256: process.env.APK_SHA256,
   apkSize: Number(process.env.APK_SIZE),
 };
@@ -104,6 +110,7 @@ fs.writeFileSync(process.env.UPDATE_FILE, JSON.stringify(manifest, null, 2) + "\
 '
 
 echo "Prepared signed Agentic Wear v$version_name ($version_code):"
+echo "  Release tag $release_tag"
 echo "  $dist_dir/agentic-wear.apk"
 echo "  $dist_dir/update.json"
 echo "  SHA-256 $sha256"

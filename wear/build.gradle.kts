@@ -77,9 +77,12 @@ val defaultRelayUrl = configured("AGENTIC_WEAR_RELAY_URL").ifBlank {
     "https://agentic-wear-relay.cleanuxlabs.workers.dev"
 }
 val configuredUpdateManifestUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_URL")
-val publicUpdateManifestUrl = configuredUpdateManifestUrl.ifBlank {
-    "https://github.com/Bughunter-Geek/agentic-wear/releases/latest/download/update.json"
+val releaseUpdateManifestUrl = configuredUpdateManifestUrl.ifBlank {
+    "https://raw.githubusercontent.com/Bughunter-Geek/agentic-wear/ota-alpha/update.json"
 }
+val configuredReleaseChannel = configured("AGENTIC_WEAR_RELEASE_CHANNEL")
+val releaseChannel = configuredReleaseChannel.ifBlank { "Alpha" }
+val developmentChannel = configuredReleaseChannel.ifBlank { "Development" }
 val firebase = firebaseConfig(
     configured("AGENTIC_WEAR_FIREBASE_CONFIG_FILE"),
     "io.github.sirbughunter.agenticwear",
@@ -105,6 +108,7 @@ android {
         buildConfigField("String", "FIREBASE_API_KEY", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_API_KEY", "apiKey")))
         buildConfigField("String", "FIREBASE_SENDER_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_SENDER_ID", "senderId")))
         buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(configuredUpdateManifestUrl))
+        buildConfigField("String", "RELEASE_CHANNEL", quoted(developmentChannel))
     }
 
     signingConfigs {
@@ -126,7 +130,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(publicUpdateManifestUrl))
+            buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(releaseUpdateManifestUrl))
+            buildConfigField("String", "RELEASE_CHANNEL", quoted(releaseChannel))
             signingConfig = if (releaseSigningConfigured) signingConfigs.getByName("release") else null
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

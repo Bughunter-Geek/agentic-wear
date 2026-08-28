@@ -103,7 +103,7 @@ The background service reads `.env.local`, stores its relay credential and ECDH 
 adb install -r wear/build/outputs/apk/debug/wear-debug.apk
 ```
 
-Wireless ADB is useful for the first install, but it is intentionally treated as temporary developer transport rather than permanent distribution infrastructure. Release builds include an opt-in updater in **Settings → App updates**. After one final ADB install, the watch can download a signed APK from GitHub Releases, verify its checksum, package name, version, and signing certificate, then open Wear OS's system installer. No Play Console account or future ADB pairing is required.
+Wireless ADB is useful for the first install, but it is intentionally treated as temporary developer transport rather than permanent distribution infrastructure. Release builds include an opt-in updater in **Settings → App updates**. Alpha builds follow the public `ota-alpha` manifest and download signed APKs from GitHub Pre-releases, verify their checksum, package name, version, and signing certificate, then open Wear OS's system installer. No Play Console account or future ADB pairing is required.
 
 Android still requires the watch owner to enable **Install unknown apps** for Agentic Wear once and confirm each update. Agentic Wear explains the handoff, then opens Android's package installer so the system can preserve the correct source-app context. If Android blocks the first install, use the installer's **Settings** action to enable Agentic Wear and return; Agentic Wear automatically resumes the verified installer. The app cannot and does not silently install software. The flow is verified on a 454 px round Wear OS 7 / Android 17 emulator. See [No-Play distribution](docs/distribution.md) for the exact workflow and security boundaries.
 
@@ -131,6 +131,7 @@ Prepare a signed GitHub Release payload with monotonically increasing version va
 ```bash
 AGENTIC_WEAR_VERSION_CODE=2 \
 AGENTIC_WEAR_VERSION_NAME=0.1.1 \
+AGENTIC_WEAR_RELEASE_TAG=v0.1.1-alpha \
 ./scripts/prepare-release.sh
 ```
 

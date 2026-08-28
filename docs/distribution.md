@@ -3,14 +3,14 @@
 Agentic Wear can update directly on a Wear OS watch without a Google Play developer account. The intended path is:
 
 1. Install one updater-enabled, release-signed APK over ADB.
-2. Publish every later APK with the same signing key as GitHub Release assets named `agentic-wear.apk` and `update.json`.
+2. Publish every later APK with the same signing key as GitHub Pre-release assets named `agentic-wear.apk` and `update.json`.
 3. On the watch, open **Settings → App updates** and tap the available version.
 4. The first time only, Agentic Wear explains the permission and opens Android's package installer. If Android blocks the update, tap **Settings** in that installer, enable **Install unknown apps** for Agentic Wear, and return. Agentic Wear resumes the verified installer; confirm the update there.
 
 The default release manifest URL is:
 
 ```text
-https://github.com/Bughunter-Geek/agentic-wear/releases/latest/download/update.json
+https://raw.githubusercontent.com/Bughunter-Geek/agentic-wear/ota-alpha/update.json
 ```
 
 Override it at build time with `AGENTIC_WEAR_UPDATE_MANIFEST_URL` if the public repository changes.
@@ -30,6 +30,7 @@ CI and non-macOS maintainers can configure all four `ANDROID_RELEASE_*` values i
 ```bash
 AGENTIC_WEAR_VERSION_CODE=2 \
 AGENTIC_WEAR_VERSION_NAME=0.1.1 \
+AGENTIC_WEAR_RELEASE_TAG=v0.1.1-alpha \
 ./scripts/prepare-release.sh
 ```
 
@@ -41,13 +42,17 @@ The script refuses unsigned APKs and writes:
 After reviewing those files, an authorized maintainer can publish them explicitly:
 
 ```bash
-gh release create v0.1.1 \
+gh release create v0.1.1-alpha \
   dist/agentic-wear.apk \
   dist/update.json \
+  --prerelease \
+  --title "Agentic Wear Alpha 0.1.1" \
   --generate-notes
 ```
 
-Publishing is deliberately not part of the preparation script, so a local build can never become public accidentally.
+Copy the reviewed `update.json` to the public `ota-alpha` branch only after the
+pre-release assets are live. Publishing is deliberately not part of the
+preparation script, so a local build can never become public accidentally.
 
 ## Security boundaries
 

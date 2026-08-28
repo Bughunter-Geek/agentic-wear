@@ -746,6 +746,8 @@ private fun SettingsScreen(
                 ) { onApprovalMode(ApprovalMode.ALLOW_CONTROLS) }
             }
             if (state.appUpdate.enabled) {
+                item { SectionLabel("BUILD STATUS") }
+                item { BuildStatusCard() }
                 item { SectionLabel("APP UPDATES") }
                 item { UpdateCard(state.appUpdate, onUpdate) }
             }
@@ -767,7 +769,7 @@ private fun SettingsScreen(
             }
             item {
                 Text(
-                    "Version ${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
+                    "${BuildConfig.RELEASE_CHANNEL} ${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
                     color = Muted.copy(alpha = 0.8f),
                     fontSize = 9.sp,
                     textAlign = TextAlign.Center,
@@ -1017,19 +1019,59 @@ private fun SettingChoice(title: String, subtitle: String, selected: Boolean, on
 }
 
 @Composable
+private fun BuildStatusCard() {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(SurfaceShape)
+            .background(Brush.linearGradient(listOf(PanelRaised, Panel)))
+            .border(1.dp, Amber.copy(alpha = 0.72f), SurfaceShape)
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(Amber.copy(alpha = 0.14f))
+                .border(1.dp, Amber.copy(alpha = 0.72f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("α", color = Amber, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "${BuildConfig.RELEASE_CHANNEL} ${BuildConfig.VERSION_NAME}",
+                color = Frost,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Testing build · not stable",
+                color = Amber,
+                fontSize = 10.sp,
+                lineHeight = 13.sp,
+            )
+        }
+    }
+}
+
+@Composable
 private fun UpdateCard(update: UpdateUiState, onClick: () -> Unit) {
     val releaseName = update.release?.versionName
+    val releaseLabel = "${BuildConfig.RELEASE_CHANNEL} $releaseName"
     val title = when (update.stage) {
         UpdateStage.IDLE -> "Check for updates"
         UpdateStage.CHECKING -> "Checking for updates…"
-        UpdateStage.AVAILABLE -> "Update to v$releaseName"
-        UpdateStage.DOWNLOADING -> "Downloading v$releaseName…"
-        UpdateStage.READY -> "Install v$releaseName"
-        UpdateStage.CURRENT -> "Version ${BuildConfig.VERSION_NAME}"
+        UpdateStage.AVAILABLE -> "Update to $releaseLabel"
+        UpdateStage.DOWNLOADING -> "Downloading $releaseLabel…"
+        UpdateStage.READY -> "Install $releaseLabel"
+        UpdateStage.CURRENT -> "${BuildConfig.RELEASE_CHANNEL} ${BuildConfig.VERSION_NAME}"
         UpdateStage.ERROR -> "Update unavailable"
     }
     val subtitle = when (update.stage) {
-        UpdateStage.IDLE -> "Signed builds from GitHub · no Play account"
+        UpdateStage.IDLE -> "Signed ${BuildConfig.RELEASE_CHANNEL.lowercase()} builds from GitHub"
         UpdateStage.CHECKING -> "Contacting the release server"
         UpdateStage.AVAILABLE -> "Tap to download and install"
         UpdateStage.DOWNLOADING -> if (update.progress > 0) "Verified download · ${update.progress}%" else "Starting verified download"
