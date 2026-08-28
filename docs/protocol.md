@@ -47,9 +47,10 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 | Kind | Purpose |
 |---|---|
 | `session.sync` | Request the recent session snapshot. |
-| `transcription.create` | Send one bounded AAC/M4A recording of up to four minutes for transcription. |
+| `transcription.create` | Send one bounded AAC/M4A recording of up to four minutes, plus an optional bounded previous draft for an explicit semantic revision. |
 | `turn.submit` | Send up to 12,000 characters of reviewed text to a new or selected session. |
 | `approval.respond` | Accept or decline a controllable watch-owned approval. |
+| `chat.watch` / `.unwatch` | Start or stop a 90-second renewable live-view subscription for one selected session. |
 
 ## Bridge to watch
 
@@ -58,6 +59,7 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 | `sessions.snapshot` | Recent session title, time, status, and ownership. |
 | `transcription.ready` / `.error` | Return transcript or safe failure. |
 | `turn.accepted` / `.error` | Confirm prompt handoff or failure. |
+| `chat.snapshot` / `.error` | Return at most five assistant paragraphs or an actionable live-view failure. |
 | `approval.request` | Alert with optional watch-owned controls. |
 | `approval.accepted` / `.error` | Confirm approval response or failure. |
 | `terminal.completed` | Top-level user turn completed successfully; requires `turnScope: "topLevel"`. |
@@ -67,6 +69,10 @@ Terminal failures and request-level `.error` payloads produce red alerts. Each
 alert is deduplicated by its authenticated envelope or terminal event ID.
 
 Message IDs and terminal event IDs are idempotency keys. The watch acknowledges inbox envelopes only after successful decryption and handling.
+
+Chat snapshots contain assistant text only. Reasoning, tool output, and command/file payloads never enter the watch chat cache. The bridge retrieves full history one turn at a time, retains a bounded local assistant-message cache, then sends only the latest five cleaned paragraphs. Agent-message deltas update that cache while the renewable watch subscription is active.
+
+`turn.accepted` is a transaction acknowledgement: the watch retains the editable draft until the matching request ID is accepted. An active session uses `turn/steer` only when Codex reports direct-input support and the bridge knows the exact active turn ID. Codex 0.147 exposes no supported queue request, so busy non-steerable sessions fail with a retryable explanation instead of silently dropping or misrouting text.
 
 The watch caps compressed recording files below 1.3 MB. The encrypted transport independently caps audio, ciphertext, WebSocket messages, and HTTP request bodies at each hop. Watch-to-bridge audio remains live-only and is never stored in the relay inbox.
 

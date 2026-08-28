@@ -23,6 +23,9 @@ export class BridgeService {
   private readonly controller = new AbortController();
   private persistTask: Promise<void> = Promise.resolve();
   private fatalError: Error | null = null;
+  private watchedThreadId: string | null = null;
+  private watchExpiresAt = 0;
+  private chatSyncTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly config: BridgeConfig,
@@ -41,6 +44,7 @@ export class BridgeService {
         this.fatalError = error;
         this.controller.abort(error);
       },
+      (threadId) => this.onAgentOutput(threadId),
     );
   }
 
@@ -67,6 +71,8 @@ export class BridgeService {
       if (this.fatalError) throw this.fatalError;
     } finally {
       this.appServer.close();
+      if (this.chatSyncTimer) clearTimeout(this.chatSyncTimer);
+      this.chatSyncTimer = null;
       this.controller.abort();
       await socketTask.catch(() => undefined);
       await this.transcriber.close?.();
@@ -113,6 +119,17 @@ export class BridgeService {
           await this.sendSessions();
           return;
         }
+        case "chat.watch":
+          this.watchedThreadId = payload.threadId;
+          this.watchExpiresAt = Date.now() + CHAT_WATCH_TTL_MS;
+          await this.sendChatSnapshot(payload.threadId, payload.requestId);
+          return;
+        case "chat.unwatch":
+          if (this.watchedThreadId === payload.threadId) {
+            this.watchedThreadId = null;
+            this.watchExpiresAt = 0;
+          }
+          return;
         case "approval.respond":
           this.appServer.respondToApproval(payload.approvalId, payload.decision);
           await this.send({
@@ -126,6 +143,8 @@ export class BridgeService {
     } catch (error) {
       const kind = payload.kind === "transcription.create"
         ? "transcription.error"
+        : payload.kind === "chat.watch" || payload.kind === "chat.unwatch"
+          ? "chat.error"
         : payload.kind === "approval.respond"
           ? "approval.error"
           : "turn.error";
@@ -134,7 +153,7 @@ export class BridgeService {
         kind,
         requestId: payload.requestId,
         threadId: "threadId" in payload ? payload.threadId : undefined,
-        message: publicError(error),
+        message: publicRequestError(error, payload.kind),
         occurredAt: Date.now(),
       });
     }
@@ -147,12 +166,16 @@ export class BridgeService {
         throw new Error("Voice recordings must be between 1 KiB and the four-minute limit");
       }
       const text = await this.transcriber.transcribe(audio, payload.mimeType);
+      const revisedText = payload.previousText
+        ? await this.appServer.reviseDraft(payload.previousText, text, this.config.defaultCwd)
+        : text;
       await this.send({
         version: 1,
         kind: "transcription.ready",
         requestId: payload.requestId,
         threadId: payload.threadId,
-        text,
+        text: revisedText,
+        revised: payload.previousText != null,
       });
     } finally {
       audio.fill(0);
@@ -175,6 +198,32 @@ export class BridgeService {
     await this.send({ version: 1, kind: "sessions.snapshot", sessions });
   }
 
+  private async sendChatSnapshot(threadId: string, requestId?: string): Promise<void> {
+    const snapshot = await this.appServer.chatSnapshot(threadId, requestId !== undefined);
+    await this.send({
+      version: 1,
+      kind: "chat.snapshot",
+      requestId,
+      ...snapshot,
+      generatedAt: Date.now(),
+    });
+  }
+
+  private onAgentOutput(threadId: string): Promise<void> {
+    if (this.watchedThreadId !== threadId || Date.now() > this.watchExpiresAt || this.chatSyncTimer) {
+      return Promise.resolve();
+    }
+    this.chatSyncTimer = setTimeout(() => {
+      this.chatSyncTimer = null;
+      if (this.watchedThreadId !== threadId || Date.now() > this.watchExpiresAt) return;
+      void this.sendChatSnapshot(threadId).catch((error: unknown) => {
+        console.error(JSON.stringify({ level: "error", message: "Could not stream chat snapshot", error: publicError(error) }));
+      });
+    }, CHAT_SYNC_DEBOUNCE_MS);
+    this.chatSyncTimer.unref();
+    return Promise.resolve();
+  }
+
   private async send(payload: SendablePayload): Promise<void> {
     await this.relay.sendToWatch(await this.crypto.encrypt(payload));
   }
@@ -194,6 +243,28 @@ function publicError(error: unknown): string {
   const message = error instanceof Error ? error.message : "The request could not be completed";
   return message.trim().replace(/\s+/gu, " ").slice(0, 260) || "The request could not be completed";
 }
+
+function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string {
+  const message = publicError(error);
+  if (/timed out/iu.test(message)) {
+    return kind === "chat.watch"
+      ? "Codex did not return this chat in time. Keep Codex and your private bridge running, then retry."
+      : "Codex did not acknowledge the prompt in time. Keep Codex and your private bridge running, then retry.";
+  }
+  if (/unauthori[sz]ed|sign(?:ed)? out|log in/iu.test(message)) {
+    return "Codex is signed out on the bridge host. Sign in there, then retry.";
+  }
+  if (/not found|no rollout/iu.test(message)) {
+    return "That Codex session is no longer available on this bridge. Refresh Sessions and choose another one.";
+  }
+  if (/not connected|socket closed|app server closed/iu.test(message)) {
+    return "The private bridge lost its Codex connection. Restart Codex and the Agentic Wear bridge, then retry.";
+  }
+  return message;
+}
+
+const CHAT_SYNC_DEBOUNCE_MS = 700;
+const CHAT_WATCH_TTL_MS = 90_000;
 
 function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("Bridge stopped");

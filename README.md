@@ -4,13 +4,16 @@ Agentic Wear is an unofficial, open-source Wear OS companion for Codex. Tap to s
 
 It is not affiliated with or endorsed by OpenAI. “Codex” is used only to describe compatibility with the Codex App Server.
 
-## What works in Alpha 0.2
+## What works in Alpha 0.4
 
 - Tap once to record for up to four minutes, then tap again to transcribe, with an editable review-before-send transcript.
 - A speech-reactive voice orb that stays still during silence.
 - Free multilingual Whisper on the private Mac bridge by default; hosted GPT Transcribe and Wear OS device speech are optional fallbacks.
 - Warmed Local Whisper inference and active foreground transcript retrieval for lower first-request and delivery latency.
 - Recent Codex session picker with exact session titles and state.
+- A crown-scrollable live-session view containing only the latest five assistant paragraphs and newly streamed output.
+- Acknowledged prompt delivery into new or selected Codex sessions, plus steering when the active Codex turn explicitly allows it.
+- Smart voice revisions that replace conflicting older requirements while preserving unrelated parts of the unsent draft.
 - Exactly one continuous one-second vibration per completion, permission, or error alert.
 - Visually distinct mint, amber, and red alert states.
 - Exact completion time and session name in every alert.
@@ -18,7 +21,7 @@ It is not affiliated with or endorsed by OpenAI. “Codex” is used only to des
 - End-to-end encrypted watch↔bridge payloads through a small Cloudflare Durable Object relay.
 - Endpoint-authenticated pairing: the relay never receives the human-readable pairing code and cannot silently replace either endpoint key.
 - A background macOS bridge that reconnects automatically with `launchd`.
-- Wrist-down recording continuity: the display stays awake only while recording, then returns to normal power behavior after the voice session.
+- Wrist-down recording continuity: the display stays awake only while recording or waiting for that transcript, then returns to normal power behavior.
 
 Agentic Wear never treats reasoning paragraphs, item completion, streamed text, or tool progress as a finished response. Live notifications use `turn/completed`; a 20-second reconciliation loop checks only persisted terminal turn states as a delivery fallback.
 
@@ -33,7 +36,9 @@ The relay stores only encrypted bridge-to-watch envelopes for up to 24 hours. Wa
 
 Every watch is authenticated to one private bridge. Local transcription uses that bridge owner's Mac only; installing Agentic Wear never sends another user's audio to someone else's computer or turns a maintainer's Mac into shared infrastructure.
 
-The bridge connects to the managed Codex App Server over its local Unix WebSocket. This lets it observe sessions run through that same managed daemon, including Codex remote-control sessions from an iPhone. It is not a direct iPhone-to-watch connection, and it cannot observe unrelated ChatGPT conversations or a different Codex host.
+Smart revision is deliberately separate from transcription. Whisper still runs locally without per-minute billing; when the user chooses **Revise** and dictates a correction, the private bridge submits the old draft and correction as one low-effort, ephemeral Codex editing turn. That action uses the bridge owner's Codex allowance. The original draft is restored if reconciliation fails.
+
+The bridge connects to the managed Codex App Server over its local Unix WebSocket. This lets it observe sessions run through that same managed daemon, including Codex remote-control sessions from an iPhone. It is not a direct iPhone-to-watch connection, and it cannot observe unrelated ChatGPT conversations or a different Codex host. Agentic Wear uses experimental App Server surfaces that are available in Codex CLI 0.147.0; later Codex updates may require a bridge compatibility update.
 
 See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Roadmap](ROADMAP.md), [Privacy](PRIVACY.md), and [Security](SECURITY.md) before running a public deployment.
 

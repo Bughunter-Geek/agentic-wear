@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -202,6 +203,12 @@ class VoiceSessionService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setContentIntent(openIntent)
+
+        if (Build.VERSION.SDK_INT >= 36) {
+            builder
+                .setRequestPromotedOngoing(true)
+                .setShortCriticalText(if (transcribing) "TXT" else "REC")
+        }
 
         if (!transcribing) {
             val finishIntent = PendingIntent.getService(

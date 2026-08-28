@@ -4,6 +4,9 @@ import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.BridgePayload
+import io.github.sirbughunter.agenticwear.model.ChatParagraph
+import io.github.sirbughunter.agenticwear.model.ChatPhase
+import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
@@ -24,6 +27,7 @@ object PayloadCodec {
             .put("audioBase64", payload.audioBase64)
             .put("mimeType", payload.mimeType)
             .put("threadId", payload.threadId)
+            .put("previousText", payload.previousText)
             .toString()
         is BridgePayload.SubmitTurn -> JSONObject()
             .put("version", 1)
@@ -38,6 +42,18 @@ object PayloadCodec {
             .put("requestId", payload.requestId)
             .put("approvalId", payload.approvalId)
             .put("decision", payload.decision)
+            .toString()
+        is BridgePayload.WatchChat -> JSONObject()
+            .put("version", 1)
+            .put("kind", "chat.watch")
+            .put("requestId", payload.requestId)
+            .put("threadId", payload.threadId)
+            .toString()
+        is BridgePayload.UnwatchChat -> JSONObject()
+            .put("version", 1)
+            .put("kind", "chat.unwatch")
+            .put("requestId", payload.requestId)
+            .put("threadId", payload.threadId)
             .toString()
     }
 
@@ -133,8 +149,94 @@ object PayloadCodec {
         val requestId = json.optString("requestId").takeIf(::isSafeId) ?: return null
         val text = clean(json.optString("text"), MAX_TRANSCRIPT_CHARS)
         if (text.isEmpty()) return null
-        return Transcript(requestId, text, json.optString("threadId").takeIf(::isSafeId))
+        return Transcript(
+            requestId = requestId,
+            text = text,
+            threadId = json.optString("threadId").takeIf(::isSafeId),
+            revised = json.optBoolean("revised", false),
+        )
     }
+
+    fun decodeChatSnapshot(json: JSONObject): ChatSnapshot? {
+        if (json.optInt("version") != 1 || json.optString("kind") != "chat.snapshot") return null
+        val threadId = json.optString("threadId").takeIf(::isSafeId) ?: return null
+        val paragraphsJson = json.optJSONArray("paragraphs") ?: JSONArray()
+        val paragraphs = buildList {
+            for (index in 0 until minOf(paragraphsJson.length(), 5)) {
+                val item = paragraphsJson.optJSONObject(index) ?: continue
+                val id = item.optString("id").takeIf(::isSafeId) ?: continue
+                val text = clean(item.optString("text"), 1_200)
+                if (text.isEmpty()) continue
+                val phase = when (item.optString("phase")) {
+                    "commentary" -> ChatPhase.COMMENTARY
+                    "final_answer" -> ChatPhase.FINAL_ANSWER
+                    else -> ChatPhase.UNKNOWN
+                }
+                add(ChatParagraph(id, text, phase))
+            }
+        }
+        val status = when (json.optString("status")) {
+            "active" -> SessionStatus.ACTIVE
+            "idle" -> SessionStatus.IDLE
+            "error" -> SessionStatus.ERROR
+            else -> SessionStatus.NOT_LOADED
+        }
+        return ChatSnapshot(
+            threadId = threadId,
+            title = clean(json.optString("title"), 100).ifEmpty { "Codex session" },
+            status = status,
+            paragraphs = paragraphs,
+            generatedAtMillis = json.optLong("generatedAt", System.currentTimeMillis()),
+            requestId = json.optString("requestId").takeIf(::isSafeId),
+        )
+    }
+
+    fun chatSnapshotToJson(snapshot: ChatSnapshot): String = JSONObject()
+        .put("threadId", snapshot.threadId)
+        .put("title", snapshot.title)
+        .put("status", snapshot.status.name)
+        .put("generatedAt", snapshot.generatedAtMillis)
+        .put("requestId", snapshot.requestId)
+        .put(
+            "paragraphs",
+            JSONArray().apply {
+                snapshot.paragraphs.takeLast(5).forEach { paragraph ->
+                    put(
+                        JSONObject()
+                            .put("id", paragraph.id)
+                            .put("text", paragraph.text)
+                            .put("phase", paragraph.phase.name),
+                    )
+                }
+            },
+        )
+        .toString()
+
+    fun chatSnapshotFromJson(value: String): ChatSnapshot? = runCatching {
+        val json = JSONObject(value)
+        val threadId = json.getString("threadId")
+        val paragraphsJson = json.optJSONArray("paragraphs") ?: JSONArray()
+        val paragraphs = buildList {
+            for (index in 0 until minOf(paragraphsJson.length(), 5)) {
+                val item = paragraphsJson.getJSONObject(index)
+                add(
+                    ChatParagraph(
+                        id = item.getString("id"),
+                        text = clean(item.getString("text"), 1_200),
+                        phase = runCatching { ChatPhase.valueOf(item.getString("phase")) }.getOrDefault(ChatPhase.UNKNOWN),
+                    ),
+                )
+            }
+        }
+        ChatSnapshot(
+            threadId = threadId,
+            title = clean(json.getString("title"), 100),
+            status = runCatching { SessionStatus.valueOf(json.getString("status")) }.getOrDefault(SessionStatus.NOT_LOADED),
+            paragraphs = paragraphs,
+            generatedAtMillis = json.optLong("generatedAt"),
+            requestId = json.optString("requestId").takeIf(::isSafeId),
+        )
+    }.getOrNull()
 
     fun sessionsToJson(sessions: List<AgentSession>): String = JSONArray().apply {
         sessions.take(50).forEach { session ->

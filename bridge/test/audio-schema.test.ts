@@ -45,4 +45,11 @@ describe("watch transcription audio formats", () => {
     expect(watchPayloadSchema.safeParse({ ...prompt, text: "x".repeat(MAX_TRANSCRIPT_CHARS) }).success).toBe(true);
     expect(watchPayloadSchema.safeParse({ ...prompt, text: "x".repeat(MAX_TRANSCRIPT_CHARS + 1) }).success).toBe(false);
   });
+
+  it("bounds the previous draft used for semantic revision", () => {
+    const payload = { ...transcription, mimeType: "audio/aac" };
+    expect(watchPayloadSchema.safeParse({ ...payload, previousText: "Keep the cyan border" }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...payload, previousText: "x".repeat(MAX_TRANSCRIPT_CHARS) }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...payload, previousText: "x".repeat(MAX_TRANSCRIPT_CHARS + 1) }).success).toBe(false);
+  });
 });

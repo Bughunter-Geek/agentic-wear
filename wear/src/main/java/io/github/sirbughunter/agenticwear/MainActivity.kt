@@ -13,8 +13,11 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.wear.compose.foundation.LocalAmbientModeManager
+import androidx.wear.compose.foundation.rememberAmbientModeManager
 import io.github.sirbughunter.agenticwear.ui.AgenticWearApp
 import io.github.sirbughunter.agenticwear.ui.AgenticWearTheme
 import io.github.sirbughunter.agenticwear.ui.AgenticWearViewModel
@@ -37,12 +40,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         handleIntent(intent)
         setContent {
-            AgenticWearTheme {
-                AgenticWearApp(
-                    viewModel = viewModel,
-                    onPushToTalk = ::togglePushToTalk,
-                    pairingCodePrefill = pairingCodePrefill,
-                )
+            val ambientModeManager = rememberAmbientModeManager()
+            CompositionLocalProvider(LocalAmbientModeManager provides ambientModeManager) {
+                AgenticWearTheme {
+                    AgenticWearApp(
+                        viewModel = viewModel,
+                        onPushToTalk = ::togglePushToTalk,
+                        pairingCodePrefill = pairingCodePrefill,
+                    )
+                }
             }
         }
         observeActiveVoiceSession()

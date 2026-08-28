@@ -6,6 +6,7 @@ import io.github.sirbughunter.agenticwear.BuildConfig
 import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
+import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import org.json.JSONObject
@@ -50,28 +51,26 @@ class AppPreferences(context: Context) {
     fun alert(eventId: String): AgentAlert? = alertHistory().firstOrNull { it.eventId == eventId }
 
     var transcript: Transcript?
-        get() = prefs.getString(KEY_TRANSCRIPT, null)?.let { encoded ->
-            runCatching {
-                val json = JSONObject(encoded)
-                Transcript(
-                    requestId = json.getString("requestId"),
-                    text = json.getString("text"),
-                    threadId = json.optString("threadId").ifEmpty { null },
-                )
-            }.getOrNull()
-        }
+        get() = prefs.getString(KEY_TRANSCRIPT, null)?.let(::decodeTranscript)
         set(value) = prefs.edit {
-            putString(
-                KEY_TRANSCRIPT,
-                value?.let {
-                    JSONObject()
-                        .put("requestId", it.requestId)
-                        .put("text", it.text)
-                        .put("threadId", it.threadId)
-                        .toString()
-                },
-            )
+            putString(KEY_TRANSCRIPT, value?.let(::encodeTranscript))
         }
+
+    var revisionBase: Transcript?
+        get() = prefs.getString(KEY_REVISION_BASE, null)?.let(::decodeTranscript)
+        set(value) = prefs.edit { putString(KEY_REVISION_BASE, value?.let(::encodeTranscript)) }
+
+    var chatSnapshot: ChatSnapshot?
+        get() = prefs.getString(KEY_CHAT_SNAPSHOT, null)?.let(PayloadCodec::chatSnapshotFromJson)
+        set(value) = prefs.edit { putString(KEY_CHAT_SNAPSHOT, value?.let(PayloadCodec::chatSnapshotToJson)) }
+
+    var pendingTurnRequestId: String?
+        get() = prefs.getString(KEY_PENDING_TURN_REQUEST, null)
+        set(value) = prefs.edit { putString(KEY_PENDING_TURN_REQUEST, value) }
+
+    var lastAcceptedThreadId: String?
+        get() = prefs.getString(KEY_LAST_ACCEPTED_THREAD, null)
+        set(value) = prefs.edit { putString(KEY_LAST_ACCEPTED_THREAD, value) }
 
     var pending: Boolean
         get() = prefs.getBoolean(KEY_PENDING, false)
@@ -96,6 +95,23 @@ class AppPreferences(context: Context) {
         prefs.getString(KEY_ALERTS, "[]").orEmpty(),
     )
 
+    private fun encodeTranscript(transcript: Transcript): String = JSONObject()
+        .put("requestId", transcript.requestId)
+        .put("text", transcript.text)
+        .put("threadId", transcript.threadId)
+        .put("revised", transcript.revised)
+        .toString()
+
+    private fun decodeTranscript(encoded: String): Transcript? = runCatching {
+        val json = JSONObject(encoded)
+        Transcript(
+            requestId = json.getString("requestId"),
+            text = json.getString("text"),
+            threadId = json.optString("threadId").ifEmpty { null },
+            revised = json.optBoolean("revised", false),
+        )
+    }.getOrNull()
+
     companion object {
         private const val KEY_RELAY_URL = "relay_url"
         private const val KEY_SELECTED_THREAD = "selected_thread"
@@ -105,6 +121,10 @@ class AppPreferences(context: Context) {
         private const val KEY_ALERT = "latest_alert"
         private const val KEY_ALERTS = "recent_alerts"
         private const val KEY_TRANSCRIPT = "transcript"
+        private const val KEY_REVISION_BASE = "revision_base"
+        private const val KEY_CHAT_SNAPSHOT = "chat_snapshot"
+        private const val KEY_PENDING_TURN_REQUEST = "pending_turn_request"
+        private const val KEY_LAST_ACCEPTED_THREAD = "last_accepted_thread"
         private const val KEY_PENDING = "pending"
         private const val KEY_LAST_ERROR = "last_error"
         private const val KEY_HANDLED_IDS = "handled_ids"

@@ -16,6 +16,7 @@ import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
+import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
@@ -40,7 +41,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, ALERT, SETTINGS }
+enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, CHAT, ALERT, SETTINGS }
 
 data class WearUiState(
     val screen: WearScreen = WearScreen.HOME,
@@ -49,6 +50,7 @@ data class WearUiState(
     val selectedThreadId: String? = null,
     val latestAlert: AgentAlert? = null,
     val transcript: Transcript? = null,
+    val chat: ChatSnapshot? = null,
     val pending: Boolean = false,
     val recording: Boolean = false,
     val transcribing: Boolean = false,
@@ -75,6 +77,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private var deviceSpeech: DeviceSpeechController? = null
     private var recordingTimeoutJob: Job? = null
     private var transcriptionTimerJob: Job? = null
+    private var chatStreamJob: Job? = null
     @Volatile
     private var transcriptionStartedAtElapsedRealtime: Long? = null
     @Volatile
@@ -106,6 +109,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun navigate(screen: WearScreen) {
+        if (_state.value.screen == WearScreen.CHAT && screen != WearScreen.CHAT) stopChatStream()
         if (screen != WearScreen.HOME) cancelRecording()
         _state.update { current ->
             current.copy(
@@ -132,7 +136,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun selectSession(threadId: String) {
         preferences.selectedThreadId = threadId
+        preferences.chatSnapshot = null
         reload(WearScreen.HOME)
+    }
+
+    fun openSelectedChat() {
+        val threadId = _state.value.selectedSession?.id ?: return showError("Choose a Codex session first")
+        openChat(threadId)
     }
 
     fun setTranscriptionEngine(engine: TranscriptionEngine) {
@@ -232,21 +242,50 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun submitTranscript() {
         val transcript = _state.value.transcript ?: return
         launchTask {
-            repository.submitTurn(transcript.threadId ?: _state.value.selectedSession?.id, transcript.text)
-            reload(WearScreen.HOME)
+            val threadId = repository.submitTurn(transcript.threadId ?: _state.value.selectedSession?.id, transcript.text)
+            preferences.selectedThreadId = threadId
+            repository.watchChat(threadId)
+            reload(WearScreen.CHAT)
+            startChatStream(threadId)
         }
     }
 
-    fun retryTranscript() {
+    fun reviseTranscript() {
+        val transcript = _state.value.transcript ?: return
+        if (_state.value.transcriptionEngine != TranscriptionEngine.BRIDGE_WHISPER) {
+            discardTranscript()
+            return
+        }
+        stopVoiceMonitoring()
+        cancelTranscriptionTimerJob()
+        preferences.revisionBase = transcript
+        preferences.transcript = null
+        preferences.pending = false
+        preferences.lastError = null
+        _state.update(::resetForNewTranscription)
+    }
+
+    fun discardTranscript() {
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
         recordingTimeoutJob?.cancel()
         VoiceSessionService.cancel(getApplication())
         deviceSpeech?.cancel()
         preferences.transcript = null
+        preferences.revisionBase = null
         preferences.pending = false
         preferences.lastError = null
         _state.update(::resetForNewTranscription)
+    }
+
+    fun retryChat() {
+        val threadId = _state.value.selectedSession?.id ?: return
+        openChat(threadId)
+    }
+
+    fun replyFromChat() {
+        stopChatStream()
+        _state.update { it.copy(screen = WearScreen.HOME, error = null) }
     }
 
     fun respondToApproval(approve: Boolean) {
@@ -303,13 +342,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         cancelTranscriptionTimerJob()
         val now = System.currentTimeMillis()
         val sessions = listOf(
-            AgentSession("demo-build", "Build Agentic Wear Alpha 0.2", now, SessionStatus.ACTIVE, true, true),
+            AgentSession("demo-build", "Build Agentic Wear Alpha 0.4", now, SessionStatus.ACTIVE, true, true),
             AgentSession("demo-qa", "Review watch interface", now - 318_000, SessionStatus.IDLE, false, true),
             AgentSession("demo-docs", "Prepare open-source launch", now - 1_460_000, SessionStatus.ERROR, false, false),
         )
         val normalized = stateName.lowercase()
         val updatePermissionDemo = normalized == "update-permission"
         val homeErrorDemo = normalized == "home-error"
+        val chatDemo = normalized == "chat" || normalized == "chat-error"
         val alert = when (normalized) {
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
             "complete" -> AgentAlert("demo-complete", AlertKind.COMPLETE, "demo-build", sessions[0].title, "All checks passed. Release APK is ready for review.", now)
@@ -324,6 +364,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
                 "transcript" -> WearScreen.TRANSCRIPT
+                "chat", "chat-error" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
                 else -> WearScreen.HOME
@@ -333,6 +374,26 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             selectedThreadId = "demo-build",
             latestAlert = alert,
             transcript = transcript,
+            chat = if (chatDemo) {
+                io.github.sirbughunter.agenticwear.model.ChatSnapshot(
+                    threadId = "demo-build",
+                    title = sessions[0].title,
+                    status = SessionStatus.ACTIVE,
+                    paragraphs = listOf(
+                        io.github.sirbughunter.agenticwear.model.ChatParagraph(
+                            "demo-chat-1",
+                            "I’ve isolated the delivery race and am validating the repaired bridge handshake now.",
+                            io.github.sirbughunter.agenticwear.model.ChatPhase.COMMENTARY,
+                        ),
+                        io.github.sirbughunter.agenticwear.model.ChatParagraph(
+                            "demo-chat-2",
+                            "The prompt is accepted, the draft remains recoverable, and only the latest five assistant paragraphs stay on the watch.",
+                            io.github.sirbughunter.agenticwear.model.ChatPhase.FINAL_ANSWER,
+                        ),
+                    ),
+                    generatedAtMillis = now,
+                )
+            } else null,
             pending = normalized == "home-transcribing",
             recording = normalized == "home-listening" || normalized == "home-speaking",
             transcribing = normalized == "home-transcribing",
@@ -356,7 +417,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 UpdateUiState(enabled = updateManager.enabled)
             },
             showInstallPermissionPrompt = updatePermissionDemo,
-            error = if (homeErrorDemo) "I didn't catch enough audio. Tap and try again." else null,
+            error = when {
+                homeErrorDemo -> "I didn't catch enough audio. Tap and try again."
+                normalized == "chat-error" -> "That Codex session is no longer available on this bridge. Refresh Sessions and choose another one."
+                else -> null
+            },
             demo = true,
         )
     }
@@ -365,6 +430,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         stopVoiceMonitoring()
         val elapsedMillis = freezeTranscriptionTimer()
         val transcript = Transcript(UUID.randomUUID().toString(), text, _state.value.selectedSession?.id)
+        preferences.revisionBase = null
         preferences.transcript = transcript
         preferences.pending = false
         preferences.lastError = null
@@ -510,6 +576,54 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                         )
                     }
                 }
+        }
+    }
+
+    private fun openChat(threadId: String) {
+        stopChatStream(sendUnwatch = false)
+        _state.update { current -> current.copy(screen = WearScreen.CHAT, pending = true, error = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.watchChat(threadId) }
+                .onSuccess { snapshot ->
+                    if (snapshot == null) {
+                        showError("The bridge did not return this chat. Keep Codex running, then tap Retry.")
+                    } else {
+                        reload(WearScreen.CHAT)
+                        startChatStream(threadId)
+                    }
+                }
+                .onFailure(::showError)
+            _state.update { current -> current.copy(pending = false) }
+        }
+    }
+
+    private fun startChatStream(threadId: String) {
+        chatStreamJob?.cancel()
+        chatStreamJob = viewModelScope.launch(Dispatchers.IO) {
+            var ticks = 0
+            while (isActive && _state.value.screen == WearScreen.CHAT) {
+                delay(CHAT_POLL_INTERVAL_MS)
+                runCatching { repository.refreshChatInbox() }
+                    .onFailure { error ->
+                        _state.update { current ->
+                            current.copy(error = (error.message ?: "Live chat refresh failed").take(180))
+                        }
+                    }
+                ticks += 1
+                if (ticks >= CHAT_WATCH_HEARTBEAT_TICKS) {
+                    ticks = 0
+                    runCatching { repository.watchChat(threadId) }
+                }
+            }
+        }
+    }
+
+    private fun stopChatStream(sendUnwatch: Boolean = true) {
+        chatStreamJob?.cancel()
+        chatStreamJob = null
+        val threadId = _state.value.chat?.threadId ?: _state.value.selectedSession?.id
+        if (sendUnwatch && threadId != null && repository.isPaired) {
+            viewModelScope.launch(Dispatchers.IO) { runCatching { repository.unwatchChat(threadId) } }
         }
     }
 
@@ -668,6 +782,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             selectedThreadId = preferences.selectedThreadId,
             latestAlert = preferences.latestAlert,
             transcript = transcript,
+            chat = preferences.chatSnapshot,
             pending = preferences.pending,
             error = preferences.lastError,
             transcriptionEngine = preferences.transcriptionEngine,
@@ -681,6 +796,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
         deviceSpeech?.destroy()
+        stopChatStream()
         getApplication<Application>().unregisterReceiver(stateReceiver)
         super.onCleared()
     }
@@ -688,6 +804,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     companion object {
         private const val TRANSCRIPTION_TIMER_INTERVAL_MS = 100L
         private const val MAX_RECORDING_DURATION_MS = 4L * 60L * 1_000L
+        private const val CHAT_POLL_INTERVAL_MS = 1_000L
+        private const val CHAT_WATCH_HEARTBEAT_TICKS = 45
     }
 }
 

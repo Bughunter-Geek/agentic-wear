@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
+import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import java.io.File
@@ -58,6 +59,7 @@ class AgenticWearRepository(private val context: Context) {
         notifyAfterMillis: Long? = null,
     ): String {
         val requestId = UUID.randomUUID().toString()
+        val revisionBase = preferences.revisionBase
         val bytes = audioFile.readBytes()
         try {
             require(bytes.size <= MAX_RECORDING_BYTES) { "Recording is too large; keep it under four minutes" }
@@ -70,6 +72,7 @@ class AgenticWearRepository(private val context: Context) {
                     audioBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
                     mimeType = "audio/aac",
                     threadId = threadId,
+                    previousText = revisionBase?.text,
                 ),
             )
             check(audioFile.delete() || !audioFile.exists()) { "Could not remove the sent recording" }
@@ -81,6 +84,8 @@ class AgenticWearRepository(private val context: Context) {
             return requestId
         } catch (error: Throwable) {
             audioFile.delete()
+            revisionBase?.let { preferences.transcript = it }
+            preferences.revisionBase = null
             preferences.pending = false
             preferences.lastError = error.message
             throw error
@@ -90,12 +95,62 @@ class AgenticWearRepository(private val context: Context) {
         }
     }
 
-    suspend fun submitTurn(threadId: String?, text: String) {
+    suspend fun submitTurn(threadId: String?, text: String): String {
         require(text.isNotBlank()) { "Transcript is empty" }
+        val requestId = UUID.randomUUID().toString()
         preferences.pending = true
-        send(BridgePayload.SubmitTurn(UUID.randomUUID().toString(), threadId, text.trim()))
-        preferences.transcript = null
-        broadcastStateChanged()
+        preferences.pendingTurnRequestId = requestId
+        preferences.lastAcceptedThreadId = null
+        preferences.lastError = null
+        try {
+            send(BridgePayload.SubmitTurn(requestId, threadId, text.trim()))
+            for (waitMillis in TURN_REPLY_DELAYS_MS) {
+                delay(waitMillis)
+                refreshInboxBatch(notify = true)
+                if (preferences.pendingTurnRequestId != requestId) break
+            }
+            if (preferences.pendingTurnRequestId == requestId) {
+                preferences.pendingTurnRequestId = null
+                preferences.pending = false
+                val message = "The relay delivered your prompt, but Codex did not acknowledge it within 15 seconds. Keep the private bridge and Codex running, then retry."
+                preferences.lastError = message
+                error(message)
+            }
+            preferences.lastError?.let(::error)
+            return preferences.lastAcceptedThreadId
+                ?: error("Codex accepted the request without returning a session. Refresh Sessions and retry.")
+        } catch (error: Throwable) {
+            if (preferences.pendingTurnRequestId == requestId) preferences.pendingTurnRequestId = null
+            preferences.pending = false
+            if (preferences.lastError == null) preferences.lastError = error.message
+            throw error
+        } finally {
+            broadcastStateChanged()
+        }
+    }
+
+    suspend fun watchChat(threadId: String): ChatSnapshot? {
+        require(threadId.isNotBlank()) { "Choose a Codex session first" }
+        val requestId = UUID.randomUUID().toString()
+        preferences.lastError = null
+        send(BridgePayload.WatchChat(requestId, threadId))
+        for (waitMillis in CHAT_REPLY_DELAYS_MS) {
+            delay(waitMillis)
+            refreshInboxBatch(notify = true)
+            preferences.chatSnapshot
+                ?.takeIf { it.threadId == threadId && it.requestId == requestId }
+                ?.let { return it }
+            if (preferences.lastError != null) break
+        }
+        return preferences.chatSnapshot?.takeIf { it.threadId == threadId && it.requestId == requestId }
+    }
+
+    suspend fun refreshChatInbox() {
+        refreshInboxBatch(notify = true)
+    }
+
+    suspend fun unwatchChat(threadId: String) {
+        send(BridgePayload.UnwatchChat(UUID.randomUUID().toString(), threadId))
     }
 
     suspend fun respondToApproval(approvalId: String, approve: Boolean) {
@@ -156,6 +211,10 @@ class AgenticWearRepository(private val context: Context) {
         preferences.sessions = emptyList()
         preferences.latestAlert = null
         preferences.transcript = null
+        preferences.revisionBase = null
+        preferences.chatSnapshot = null
+        preferences.pendingTurnRequestId = null
+        preferences.lastAcceptedThreadId = null
         preferences.pending = false
         preferences.lastError = null
         broadcastStateChanged()
@@ -181,7 +240,12 @@ class AgenticWearRepository(private val context: Context) {
             }
             "transcription.ready" -> {
                 preferences.transcript = PayloadCodec.decodeTranscript(payload)
+                preferences.revisionBase = null
                 preferences.pending = false
+                preferences.lastError = null
+            }
+            "chat.snapshot" -> {
+                PayloadCodec.decodeChatSnapshot(payload)?.let { preferences.chatSnapshot = it }
                 preferences.lastError = null
             }
             "terminal.completed", "terminal.failed", "terminal.interrupted", "terminal.blocked",
@@ -194,8 +258,24 @@ class AgenticWearRepository(private val context: Context) {
                     AgentNotifier.post(context, alert)
                 }
             }
+            "chat.error" -> {
+                preferences.lastError = payload.optString("message", "Could not load this Codex chat")
+                    .take(180)
+            }
             "transcription.error", "turn.error", "approval.error", "bridge.error" -> {
-                preferences.pending = false
+                val errorKind = payload.optString("kind")
+                val requestId = payload.optString("requestId")
+                val staleTurnError = errorKind == "turn.error" &&
+                    preferences.pendingTurnRequestId != null &&
+                    requestId != preferences.pendingTurnRequestId
+                if (!staleTurnError) preferences.pending = false
+                if (errorKind == "transcription.error") {
+                    preferences.revisionBase?.let { preferences.transcript = it }
+                    preferences.revisionBase = null
+                }
+                if (errorKind == "turn.error" && requestId == preferences.pendingTurnRequestId) {
+                    preferences.pendingTurnRequestId = null
+                }
                 val selectedSession = preferences.sessions.firstOrNull { it.id == preferences.selectedThreadId }
                     ?: preferences.sessions.firstOrNull()
                 val alert = PayloadCodec.decodeRequestError(
@@ -205,8 +285,10 @@ class AgenticWearRepository(private val context: Context) {
                     fallbackThreadId = selectedSession?.id,
                     fallbackTitle = selectedSession?.title,
                 )
-                preferences.lastError = alert?.detail
-                    ?: payload.optString("message", "The request could not be completed")
+                if (!staleTurnError) {
+                    preferences.lastError = alert?.detail
+                        ?: payload.optString("message", "The request could not be completed")
+                }
                 if (alert != null) {
                     preferences.latestAlert = alert
                     val firstDelivery = preferences.markEventHandled(alert.eventId)
@@ -215,7 +297,17 @@ class AgenticWearRepository(private val context: Context) {
                     }
                 }
             }
-            "turn.accepted", "approval.accepted" -> {
+            "turn.accepted" -> {
+                if (payload.optString("requestId") == preferences.pendingTurnRequestId) {
+                    preferences.pendingTurnRequestId = null
+                    preferences.lastAcceptedThreadId = payload.optString("threadId").takeIf(String::isNotBlank)
+                    preferences.transcript = null
+                    preferences.revisionBase = null
+                    preferences.pending = false
+                    preferences.lastError = null
+                }
+            }
+            "approval.accepted" -> {
                 preferences.pending = false
                 preferences.lastError = null
             }
@@ -230,6 +322,8 @@ class AgenticWearRepository(private val context: Context) {
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private const val MAX_RECORDING_BYTES = 1_300_000
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
+        private val TURN_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 600, 900, 1_200, 1_600, 2_000, 2_500, 3_000, 2_500)
+        private val CHAT_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500)
         private val inboxRefreshMutex = Mutex()
     }
 }

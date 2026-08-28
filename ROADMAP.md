@@ -9,24 +9,24 @@ must be dependable before it becomes broad.
 - Background delivery through a content-free Firebase wake and encrypted inbox.
 - Tap-to-toggle voice capture, session selection, safe approval boundaries, and signed OTA updates.
 
-## Alpha 0.3 — live sessions
+## Alpha 0.3 — live sessions (delivered in Alpha 0.4)
 
-- Stream the active Codex conversation into a compact, crown-scrollable watch view.
-- Follow agent output while a run is active without turning intermediate reasoning into completion alerts.
-- Intervene from the watch while work is running.
-- Queue a follow-up for the next turn or steer the active run when the supported Codex API exposes that distinction.
-- Keep completion, permission, interruption, and failure alerts deduplicated across the live view and background delivery.
+- [x] Stream the active Codex conversation into a compact, crown-scrollable watch view.
+- [x] Follow agent output while a run is active without turning intermediate reasoning into completion alerts.
+- [x] Intervene with `turn/steer` when Codex marks the active turn as directly steerable.
+- [x] Keep completion, permission, interruption, and failure alerts deduplicated across the live view and background delivery.
+- [ ] Queue a follow-up for the next turn when the supported Codex App Server exposes a queue operation. Codex 0.147 exposes steering, but no queue request.
 
-## Alpha 0.4 — semantic voice revisions
+## Alpha 0.4 — semantic voice revisions (delivered)
 
-- Let a user revise the same unsent prompt with another dictation from transcript review.
-- Treat newer speech as corrections: replace conflicting older facts or requirements while preserving unrelated instructions.
-- Return one editable reconciled draft instead of appending contradictory text.
-- Preserve the previous draft intact if semantic reconciliation is unavailable or fails.
+- [x] Let a user revise the same unsent prompt with another dictation from transcript review.
+- [x] Treat newer speech as corrections: replace conflicting older facts or requirements while preserving unrelated instructions.
+- [x] Return one editable reconciled draft instead of appending contradictory text.
+- [x] Preserve the previous draft intact if semantic reconciliation is unavailable or fails.
 
 ## Later
 
-- A compact conversation view with the latest user and agent messages.
+- Optional user-message context in the compact conversation view.
 - A recent-sessions tile backed by the watch's encrypted local cache.
 - An active-session complication that remains useful without holding a socket open.
 

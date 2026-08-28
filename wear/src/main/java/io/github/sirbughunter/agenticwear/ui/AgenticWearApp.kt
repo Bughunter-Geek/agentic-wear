@@ -90,6 +90,7 @@ import io.github.sirbughunter.agenticwear.BuildConfig
 import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
+import io.github.sirbughunter.agenticwear.model.ChatPhase
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import io.github.sirbughunter.agenticwear.update.UpdateStage
@@ -137,6 +138,7 @@ fun AgenticWearApp(
                     state = state,
                     onPushToTalk = onPushToTalk,
                     onSessions = { viewModel.navigate(WearScreen.SESSIONS) },
+                    onChat = viewModel::openSelectedChat,
                     onSettings = { viewModel.navigate(WearScreen.SETTINGS) },
                     onAlert = { viewModel.navigate(WearScreen.ALERT) },
                 )
@@ -154,10 +156,19 @@ fun AgenticWearApp(
                 )
                 WearScreen.TRANSCRIPT -> TranscriptScreen(
                     state = state,
-                    onBack = viewModel::retryTranscript,
+                    onBack = viewModel::discardTranscript,
                     onTextChanged = viewModel::updateTranscript,
                     onSend = viewModel::submitTranscript,
-                    onRetry = viewModel::retryTranscript,
+                    onRevise = viewModel::reviseTranscript,
+                )
+                WearScreen.CHAT -> ChatScreen(
+                    state = state,
+                    onBack = { viewModel.navigate(WearScreen.HOME) },
+                    onReply = {
+                        viewModel.replyFromChat()
+                        onPushToTalk()
+                    },
+                    onRetry = viewModel::retryChat,
                 )
                 WearScreen.ALERT -> AlertScreen(
                     alert = state.latestAlert,
@@ -177,7 +188,9 @@ fun AgenticWearApp(
                 )
             }
         }
-        state.error?.takeIf { state.screen != WearScreen.PAIR }?.let { error ->
+        state.error?.takeIf {
+            state.screen != WearScreen.PAIR && state.screen != WearScreen.CHAT && state.screen != WearScreen.TRANSCRIPT
+        }?.let { error ->
             val horizontalPadding = roundAwareHorizontalPadding(round = 28.dp, square = 16.dp)
             val bottomPadding = if (LocalConfiguration.current.isScreenRound) 40.dp else 16.dp
             ErrorPill(
@@ -287,6 +300,7 @@ private fun HomeScreen(
     state: WearUiState,
     onPushToTalk: () -> Unit,
     onSessions: () -> Unit,
+    onChat: () -> Unit,
     onSettings: () -> Unit,
     onAlert: () -> Unit,
 ) {
@@ -304,7 +318,10 @@ private fun HomeScreen(
             Spacer(Modifier.height(if (compact) 8.dp else 22.dp))
             ConnectionPill(connected = state.isPaired)
             Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
-            TactileCard(onClick = onSessions, modifier = Modifier.fillMaxWidth()) {
+            TactileCard(
+                onClick = if (state.selectedSession == null) onSessions else onChat,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(
                         horizontal = if (compact) 13.dp else 17.dp,
@@ -652,7 +669,7 @@ private fun TranscriptScreen(
     onBack: () -> Unit,
     onTextChanged: (String) -> Unit,
     onSend: () -> Unit,
-    onRetry: () -> Unit,
+    onRevise: () -> Unit,
 ) {
     val transcript = state.transcript
     val scrollState = rememberScrollState()
@@ -712,12 +729,154 @@ private fun TranscriptScreen(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        if (transcript?.revised == true) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Smart revision applied",
+                color = Mint,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        state.error?.let {
+            Spacer(Modifier.height(7.dp))
+            ErrorPill(it, Modifier.fillMaxWidth())
+        }
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ActionButton("Retry", false, onRetry, enabled = !state.pending)
+            ActionButton(
+                if (state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) "Revise" else "Redo",
+                false,
+                onRevise,
+                enabled = !state.pending,
+            )
             ActionButton(if (state.pending) "Sending…" else "Send", true, onSend, enabled = !state.pending && !transcript?.text.isNullOrBlank())
         }
+        if (state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
+            Spacer(Modifier.height(7.dp))
+            Text(
+                "Revise uses your private Codex bridge to replace conflicting details.",
+                color = Muted,
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
         Spacer(Modifier.height(48.dp))
+    }
+}
+
+@Composable
+private fun ChatScreen(
+    state: WearUiState,
+    onBack: () -> Unit,
+    onReply: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val rotaryFocusRequester = remember { FocusRequester() }
+    val horizontalPadding = roundAwareHorizontalPadding(round = 27.dp, square = 18.dp)
+    val chat = state.chat
+    Column(Modifier.fillMaxSize()) {
+        ScreenHeader("Live session", onBack)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .requestFocusOnHierarchyActive()
+                .rotaryScrollable(
+                    behavior = RotaryScrollableDefaults.behavior(listState),
+                    focusRequester = rotaryFocusRequester,
+                ),
+            state = listState,
+            contentPadding = PaddingValues(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                bottom = 42.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        chat?.title ?: state.selectedSession?.title ?: "Codex session",
+                        color = Frost,
+                        fontSize = 14.sp,
+                        lineHeight = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        when {
+                            state.pending && chat == null -> "Loading recent replies…"
+                            chat?.status == SessionStatus.ACTIVE -> "Live · agent working"
+                            chat != null -> "Live · ready for your reply"
+                            else -> "Waiting for the private bridge"
+                        },
+                        color = if (chat?.status == SessionStatus.ACTIVE) Cyan else Muted,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            state.error?.let { message ->
+                item { ErrorPill(message, Modifier.fillMaxWidth()) }
+            }
+            if (chat?.paragraphs.isNullOrEmpty()) {
+                item {
+                    EmptyState(
+                        "No assistant text yet",
+                        "Tap Voice reply to start or continue this Codex session.",
+                    )
+                }
+            } else {
+                items(chat.paragraphs, key = { it.id }) { paragraph ->
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(SurfaceShape)
+                            .background(if (paragraph.phase == ChatPhase.FINAL_ANSWER) PanelRaised else Panel)
+                            .border(
+                                1.dp,
+                                if (paragraph.phase == ChatPhase.FINAL_ANSWER) Violet.copy(alpha = 0.48f) else Color(0xFF34384D),
+                                SurfaceShape,
+                            )
+                            .padding(horizontal = 13.dp, vertical = 10.dp),
+                    ) {
+                        Column {
+                            Text(
+                                if (paragraph.phase == ChatPhase.FINAL_ANSWER) "ANSWER" else "UPDATE",
+                                color = if (paragraph.phase == ChatPhase.FINAL_ANSWER) Violet else Cyan,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                letterSpacing = 0.7.sp,
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                paragraph.text,
+                                color = Frost,
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp,
+                            )
+                        }
+                    }
+                }
+            }
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                ) {
+                    ActionButton("Retry", false, onRetry, enabled = !state.pending)
+                    ActionButton("Voice reply", true, onReply, enabled = !state.pending)
+                }
+            }
+        }
     }
 }
 
@@ -1259,14 +1418,23 @@ private fun roundAwareHorizontalPadding(
 
 @Composable
 private fun ScreenHeader(title: String, onBack: () -> Unit, horizontalPadding: Dp = 50.dp) {
+    val round = LocalConfiguration.current.isScreenRound
     Box(Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 5.dp)) {
         Text(
             title,
             color = Frost,
-            fontSize = 15.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
-            modifier = Modifier.align(Alignment.Center),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = if (round) 84.dp else 72.dp,
+                    end = if (round) 42.dp else 72.dp,
+                )
+                .align(Alignment.Center),
         )
         Box(Modifier.align(Alignment.CenterStart).padding(start = horizontalPadding)) {
             TactileCard(onClick = onBack) {
@@ -1296,7 +1464,7 @@ private fun ErrorPill(message: String, modifier: Modifier = Modifier) {
         color = Frost,
         fontSize = 10.sp,
         lineHeight = 13.sp,
-        maxLines = 2,
+        maxLines = 4,
         overflow = TextOverflow.Ellipsis,
         textAlign = TextAlign.Center,
         modifier = modifier.clip(CircleShape).background(Color(0xFF5A2431)).border(1.dp, Coral, CircleShape)

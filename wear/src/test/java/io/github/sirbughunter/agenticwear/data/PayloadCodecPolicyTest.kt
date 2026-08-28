@@ -23,6 +23,7 @@ class PayloadCodecPolicyTest {
         assertTrue(isRequestErrorKind("turn.error"))
         assertTrue(isRequestErrorKind("approval.error"))
         assertTrue(isRequestErrorKind("bridge.error"))
+        assertFalse(isRequestErrorKind("chat.error"))
         assertFalse(isRequestErrorKind("turn.accepted"))
         assertFalse(isRequestErrorKind("item.completed"))
     }

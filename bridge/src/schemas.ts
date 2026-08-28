@@ -34,6 +34,7 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     audioBase64,
     mimeType: z.enum(["audio/mp4", "audio/aac"]),
     threadId: safeId.nullable(),
+    previousText: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS).nullable().optional(),
   }).strict(),
   z.object({
     version: z.literal(1),
@@ -48,6 +49,18 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     requestId: safeId,
     approvalId: safeId,
     decision: z.enum(["accept", "decline"]),
+  }).strict(),
+  z.object({
+    version: z.literal(1),
+    kind: z.literal("chat.watch"),
+    requestId: safeId,
+    threadId: safeId,
+  }).strict(),
+  z.object({
+    version: z.literal(1),
+    kind: z.literal("chat.unwatch"),
+    requestId: safeId,
+    threadId: safeId,
   }).strict(),
 ]);
 
@@ -100,6 +113,39 @@ export const turnCompletedSchema = z.object({
 export const turnStartedSchema = z.object({
   threadId: safeId.optional(),
   turn: z.object({ id: safeId }).passthrough(),
+}).passthrough();
+
+export const agentMessageDeltaSchema = z.object({
+  threadId: safeId,
+  turnId: safeId,
+  itemId: safeId,
+  delta: z.string(),
+}).strict();
+
+export const itemCompletedSchema = z.object({
+  threadId: safeId,
+  turnId: safeId,
+  completedAtMs: z.number().int().nonnegative(),
+  item: z.object({
+    id: safeId,
+    type: z.string(),
+    text: z.string().optional(),
+    phase: z.enum(["commentary", "final_answer"]).nullable().optional(),
+  }).passthrough(),
+}).strict();
+
+export const chatTurnListResponseSchema = z.object({
+  data: z.array(z.object({
+    id: safeId,
+    items: z.array(z.object({
+      id: safeId,
+      type: z.string(),
+      text: z.string().optional(),
+      phase: z.enum(["commentary", "final_answer"]).nullable().optional(),
+    }).passthrough()),
+  }).passthrough()),
+  nextCursor: z.string().nullable().optional(),
+  backwardsCursor: z.string().nullable().optional(),
 }).passthrough();
 
 export const turnListResponseSchema = z.object({

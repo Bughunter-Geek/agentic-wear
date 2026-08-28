@@ -34,6 +34,24 @@ data class Transcript(
     val requestId: String,
     val text: String,
     val threadId: String?,
+    val revised: Boolean = false,
+)
+
+enum class ChatPhase { COMMENTARY, FINAL_ANSWER, UNKNOWN }
+
+data class ChatParagraph(
+    val id: String,
+    val text: String,
+    val phase: ChatPhase,
+)
+
+data class ChatSnapshot(
+    val threadId: String,
+    val title: String,
+    val status: SessionStatus,
+    val paragraphs: List<ChatParagraph>,
+    val generatedAtMillis: Long,
+    val requestId: String? = null,
 )
 
 sealed interface BridgePayload {
@@ -45,6 +63,7 @@ sealed interface BridgePayload {
         val audioBase64: String,
         val mimeType: String,
         val threadId: String?,
+        val previousText: String?,
     ) : BridgePayload
     data class SubmitTurn(
         override val requestId: String,
@@ -55,5 +74,13 @@ sealed interface BridgePayload {
         override val requestId: String,
         val approvalId: String,
         val decision: String,
+    ) : BridgePayload
+    data class WatchChat(
+        override val requestId: String,
+        val threadId: String,
+    ) : BridgePayload
+    data class UnwatchChat(
+        override val requestId: String,
+        val threadId: String,
     ) : BridgePayload
 }
