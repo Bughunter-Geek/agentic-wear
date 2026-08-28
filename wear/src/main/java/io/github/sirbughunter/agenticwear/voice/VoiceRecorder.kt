@@ -57,6 +57,8 @@ class VoiceRecorder(private val context: Context) {
         }
     }
 
+    fun maxAmplitude(): Int = runCatching { recorder?.maxAmplitude ?: 0 }.getOrDefault(0)
+
     fun cancel() {
         val file = stop()
         file?.delete()

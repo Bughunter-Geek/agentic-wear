@@ -1,16 +1,18 @@
 # Agentic Wear
 
-Agentic Wear is an unofficial, open-source Wear OS companion for Codex. Hold to speak to an agent, switch sessions, and receive a strong watch alert only when a complete turn finishes, fails, is interrupted, or needs permission.
+Agentic Wear is an unofficial, open-source Wear OS companion for Codex. Tap to speak to an agent, switch sessions, and receive a strong watch alert only when a complete turn finishes, fails, is interrupted, or needs permission.
 
 It is not affiliated with or endorsed by OpenAI. “Codex” is used only to describe compatibility with the Codex App Server.
 
-## What works in v0.1
+## What works in Alpha 0.2
 
-- Push-to-talk prompts with a review-before-send transcript.
+- Tap once to record, then tap again to transcribe, with a review-before-send transcript.
+- A speech-reactive voice orb that stays still during silence.
 - Free multilingual Whisper on the private Mac bridge by default; hosted GPT Transcribe and Wear OS device speech are optional fallbacks.
+- Warmed Local Whisper inference and active foreground transcript retrieval for lower first-request and delivery latency.
 - Recent Codex session picker with exact session titles and state.
-- One continuous one-second vibration when a full response completes.
-- Distinct permission and error vibration patterns with amber/red alert states.
+- Exactly one continuous one-second vibration per completion, permission, or error alert.
+- Visually distinct mint, amber, and red alert states.
 - Exact completion time and session name in every alert.
 - Alert-only approvals for existing sessions; accept/decline controls only for sessions created by the watch.
 - End-to-end encrypted watch↔bridge payloads through a small Cloudflare Durable Object relay.

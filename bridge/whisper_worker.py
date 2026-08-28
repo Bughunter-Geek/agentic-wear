@@ -76,8 +76,27 @@ def prepare(model: str) -> None:
     emit({"type": "prepared", "model": model})
 
 
+def transcribe_audio(transcribe, audio, model: str):
+    with contextlib.redirect_stdout(sys.stderr):
+        return transcribe(
+            audio,
+            path_or_hf_repo=model,
+            verbose=None,
+            task="transcribe",
+            language=None,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+
+
 def run(model: str, ffmpeg_path: str) -> None:
+    import numpy as np
+
     transcribe = load_transcriber(model)
+    # Compile and warm the actual decoder before advertising readiness. This moves
+    # Metal/JIT startup out of the first real voice request.
+    transcribe_audio(transcribe, np.zeros(16_000, dtype=np.float32), model)
     emit({"type": "ready", "model": model})
     for line in sys.stdin:
         request_id = ""
@@ -90,16 +109,7 @@ def run(model: str, ffmpeg_path: str) -> None:
             if not isinstance(encoded, str):
                 raise ValueError("Missing transcription audio")
             audio = decode_audio(encoded, ffmpeg_path)
-            with contextlib.redirect_stdout(sys.stderr):
-                result = transcribe(
-                    audio,
-                    path_or_hf_repo=model,
-                    verbose=None,
-                    task="transcribe",
-                    language=None,
-                    temperature=0.0,
-                    condition_on_previous_text=False,
-                )
+            result = transcribe_audio(transcribe, audio, model)
             text = str(result.get("text", "")).strip()
             if not text:
                 raise ValueError("The recording did not contain recognizable speech")

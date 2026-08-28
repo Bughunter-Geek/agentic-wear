@@ -21,9 +21,10 @@ import io.github.sirbughunter.agenticwear.ui.extractPairingCode
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<AgenticWearViewModel>()
     private var pairingCodePrefill by mutableStateOf("")
-    private var pushToTalkHeld = false
+    private var requestingMicrophonePermission = false
     private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted && pushToTalkHeld) viewModel.beginPushToTalk()
+        requestingMicrophonePermission = false
+        if (granted) viewModel.beginPushToTalk()
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -34,8 +35,7 @@ class MainActivity : ComponentActivity() {
             AgenticWearTheme {
                 AgenticWearApp(
                     viewModel = viewModel,
-                    onPushToTalkStart = ::startPushToTalk,
-                    onPushToTalkEnd = ::endPushToTalk,
+                    onPushToTalk = ::togglePushToTalk,
                     pairingCodePrefill = pairingCodePrefill,
                 )
             }
@@ -54,20 +54,25 @@ class MainActivity : ComponentActivity() {
         viewModel.resumePendingInstallAfterPermission()
     }
 
-    private fun startPushToTalk() {
-        pushToTalkHeld = true
+    override fun onStop() {
+        if (!isChangingConfigurations && !requestingMicrophonePermission) viewModel.cancelRecording()
+        super.onStop()
+    }
+
+    private fun togglePushToTalk() {
+        if (viewModel.state.value.recording) {
+            viewModel.endPushToTalk()
+            return
+        }
+        if (viewModel.state.value.pending) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         ) {
             viewModel.beginPushToTalk()
         } else {
+            requestingMicrophonePermission = true
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
         }
-    }
-
-    private fun endPushToTalk() {
-        pushToTalkHeld = false
-        viewModel.endPushToTalk()
     }
 
     private fun requestNotificationPermission() {

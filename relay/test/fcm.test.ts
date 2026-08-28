@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildWakeMessage } from "../src/fcm";
+import { buildWakeMessage, wakeTargetForNewEnvelope } from "../src/fcm";
 
 describe("Firebase wake message", () => {
   it("targets the registered installation with a high-priority data-only wake", () => {
@@ -10,5 +10,11 @@ describe("Firebase wake message", () => {
         android: { priority: "high", ttl: "60s" },
       },
     });
+  });
+
+  it("wakes only for a newly inserted envelope", () => {
+    expect(wakeTargetForNewEnvelope("installation-id", true)).toBe("installation-id");
+    expect(wakeTargetForNewEnvelope("installation-id", false)).toBeNull();
+    expect(wakeTargetForNewEnvelope(null, true)).toBeNull();
   });
 });

@@ -82,15 +82,11 @@ class AppPreferences(context: Context) {
         set(value) = prefs.edit { putString(KEY_LAST_ERROR, value?.take(180)) }
 
     fun markEventHandled(eventId: String): Boolean {
-        val ids = prefs.getString(KEY_HANDLED_IDS, null)
-            .orEmpty()
-            .split(',')
-            .filter(String::isNotBlank)
-            .toMutableList()
-        if (eventId in ids) return false
-        ids += eventId
-        prefs.edit(commit = true) { putString(KEY_HANDLED_IDS, ids.takeLast(100).joinToString(",")) }
-        return true
+        return claimHandledEvent(
+            eventId = eventId,
+            read = { prefs.getString(KEY_HANDLED_IDS, null) },
+            write = { ids -> prefs.edit(commit = true) { putString(KEY_HANDLED_IDS, ids) } },
+        )
     }
 
     private inline fun <reified T : Enum<T>> enumValue(value: String?, fallback: T): T =
@@ -113,6 +109,24 @@ class AppPreferences(context: Context) {
         private const val KEY_LAST_ERROR = "last_error"
         private const val KEY_HANDLED_IDS = "handled_ids"
     }
+}
+
+private val handledEventClaimLock = Any()
+
+internal fun claimHandledEvent(
+    eventId: String,
+    read: () -> String?,
+    write: (String) -> Unit,
+): Boolean = synchronized(handledEventClaimLock) {
+    val ids = read()
+        .orEmpty()
+        .split(',')
+        .filter(String::isNotBlank)
+        .toMutableList()
+    if (eventId in ids) return@synchronized false
+    ids += eventId
+    write(ids.takeLast(100).joinToString(","))
+    true
 }
 
 internal fun storedTranscriptionEngine(value: String?): TranscriptionEngine = when (value) {

@@ -20,9 +20,10 @@ import java.text.DateFormat
 import java.util.Date
 
 object AgentNotifier {
-    private const val CHANNEL_COMPLETE = "agent_complete_v1"
-    private const val CHANNEL_PERMISSION = "agent_permission_v1"
-    private const val CHANNEL_ERROR = "agent_error_v1"
+    private const val CHANNEL_COMPLETE = "agent_complete_v2"
+    private const val CHANNEL_PERMISSION = "agent_permission_v2"
+    private const val CHANNEL_ERROR = "agent_error_v2"
+    private val LEGACY_CHANNELS = listOf("agent_complete_v1", "agent_permission_v1", "agent_error_v1")
 
     fun createChannels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -37,7 +38,7 @@ object AgentNotifier {
             ).apply {
                 description = "One alert when an agent finishes a full turn"
                 enableVibration(true)
-                vibrationPattern = longArrayOf(0, 1_000)
+                vibrationPattern = alertVibrationPattern()
                 setSound(null, attributes)
             },
             NotificationChannel(
@@ -45,9 +46,9 @@ object AgentNotifier {
                 context.getString(R.string.notification_channel_permission),
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Distinct alerts when an agent needs a decision"
+                description = "One alert when an agent needs a decision"
                 enableVibration(true)
-                vibrationPattern = longArrayOf(0, 280, 120, 280, 120, 650)
+                vibrationPattern = alertVibrationPattern()
                 setSound(null, attributes)
             },
             NotificationChannel(
@@ -55,13 +56,14 @@ object AgentNotifier {
                 context.getString(R.string.notification_channel_error),
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Urgent alerts for failed or interrupted agent turns"
+                description = "One alert for failed or interrupted agent turns"
                 enableVibration(true)
-                vibrationPattern = longArrayOf(0, 850, 160, 850)
+                vibrationPattern = alertVibrationPattern()
                 setSound(null, attributes)
             },
         )
         manager.createNotificationChannels(channels)
+        LEGACY_CHANNELS.forEach(manager::deleteNotificationChannel)
     }
 
     fun post(context: Context, alert: AgentAlert) {
@@ -112,7 +114,7 @@ object AgentNotifier {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-            .setOnlyAlertOnce(false)
+            .setOnlyAlertOnce(true)
             .build()
         NotificationManagerCompat.from(context).notify(alert.eventId.hashCode(), notification)
     }

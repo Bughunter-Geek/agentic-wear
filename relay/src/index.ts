@@ -1,6 +1,6 @@
 import { ZodError } from "zod";
 import { deriveCredential, secureEqual, sha256Hex } from "./crypto";
-import { wakeWatch } from "./fcm";
+import { wakeTargetForNewEnvelope, wakeWatch } from "./fcm";
 import { PairAdmissionError } from "./pair-admission";
 import { PairRelayError } from "./pair-relay";
 import {
@@ -134,7 +134,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     const envelope = wireEnvelopeSchema.parse(await readJson(request, JSON_LIMIT));
     if (envelope.sender !== "bridge" || envelope.recipient !== "watch") throw new HttpError(400, "Envelope direction is invalid");
     const result = await stub.enqueueToWatch(credential, envelope);
-    if (result.fcmInstallationId) await wakeWatch(env, result.fcmInstallationId, pairId);
+    const wakeTarget = wakeTargetForNewEnvelope(result.fcmInstallationId, result.inserted);
+    if (wakeTarget) await wakeWatch(env, wakeTarget, pairId);
     return Response.json({ accepted: true, inserted: result.inserted }, { status: 202 });
   }
   if (request.method === "POST" && action === "to-bridge") {

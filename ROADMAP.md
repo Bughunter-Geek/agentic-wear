@@ -7,9 +7,17 @@ must be dependable before it becomes broad.
 
 - One alert per final top-level turn, including failed and interrupted turns.
 - Background delivery through a content-free Firebase wake and encrypted inbox.
-- Push-to-talk, session selection, safe approval boundaries, and signed OTA updates.
+- Tap-to-toggle voice capture, session selection, safe approval boundaries, and signed OTA updates.
 
-## Next
+## Alpha 0.3 — live sessions
+
+- Stream the active Codex conversation into a compact, crown-scrollable watch view.
+- Follow agent output while a run is active without turning intermediate reasoning into completion alerts.
+- Intervene from the watch while work is running.
+- Queue a follow-up for the next turn or steer the active run when the supported Codex API exposes that distinction.
+- Keep completion, permission, interruption, and failure alerts deduplicated across the live view and background delivery.
+
+## Later
 
 - A compact conversation view with the latest user and agent messages.
 - A recent-sessions tile backed by the watch's encrypted local cache.

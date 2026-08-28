@@ -10,7 +10,7 @@ npm --prefix relay test
 ./gradlew :wear:lintDebug :wear:assembleDebug
 ```
 
-The bridge suite includes cross-endpoint crypto interoperability, shared bridge/watch pairing vectors, persistent and concurrent replay rejection, timestamp bounds, and a negative matrix proving that reasoning/item/raw-response notifications cannot be classified as a finished turn. Relay tests cover mutual endpoint proof state, substitution rejection, pre-allocation admission, source rate limiting, bounded pending state, idempotent ciphertext queues, acknowledgement, and refusal to persist offline watch audio.
+The bridge suite includes cross-endpoint crypto interoperability, shared bridge/watch pairing vectors, persistent and concurrent replay rejection, timestamp bounds, and a negative matrix proving that reasoning/item/raw-response notifications cannot be classified as a finished turn. Relay tests cover mutual endpoint proof state, substitution rejection, pre-allocation admission, source rate limiting, bounded pending state, idempotent ciphertext queues, acknowledgement, refusal to persist offline watch audio, and suppression of duplicate Firebase wakes. Watch tests verify atomic alert claiming, one continuous one-second vibration policy, and silence-gated voice activity mapping.
 
 ## Emulator visual QA
 
@@ -21,7 +21,7 @@ adb shell am start -n io.github.sirbughunter.agenticwear.debug/io.github.sirbugh
   --es io.github.sirbughunter.agenticwear.DEMO_STATE sessions
 ```
 
-Inspect `home`, `pair`, `sessions`, `transcript`, `approval`, `complete`, `error`, and `settings` on a round Wear OS emulator. Check clipping, scroll reachability, touch targets, notification icon rendering, one-second completion vibration semantics, and motion at normal and disabled animation scales.
+Inspect `home`, `home-listening`, `home-speaking`, `pair`, `sessions`, `transcript`, `approval`, `complete`, `error`, and `settings` on a round Wear OS emulator. Check clipping, scroll reachability, touch targets, notification icon rendering, one-second alert vibration semantics, and motion at normal and disabled animation scales. The listening state must remain perfectly still under the voice noise gate; only the speaking state may animate.
 
 The release baseline is a 454 × 454 round Wear OS 7 / Android 17 (API 37) emulator. Exercise the complete updater path there: detect a higher version, download and verify it, grant the one-time per-source install permission, confirm in the native package installer, and verify that the installed `versionCode` increased without clearing app data.
 

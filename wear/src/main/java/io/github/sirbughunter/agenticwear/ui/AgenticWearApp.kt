@@ -8,10 +8,7 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -22,9 +19,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -68,7 +62,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -108,8 +101,7 @@ private val SurfaceShape = RoundedCornerShape(24.dp)
 @Composable
 fun AgenticWearApp(
     viewModel: AgenticWearViewModel,
-    onPushToTalkStart: () -> Unit,
-    onPushToTalkEnd: () -> Unit,
+    onPushToTalk: () -> Unit,
     pairingCodePrefill: String = "",
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -138,8 +130,7 @@ fun AgenticWearApp(
             when (screen) {
                 WearScreen.HOME -> HomeScreen(
                     state = state,
-                    onPushToTalkStart = onPushToTalkStart,
-                    onPushToTalkEnd = onPushToTalkEnd,
+                    onPushToTalk = onPushToTalk,
                     onSessions = { viewModel.navigate(WearScreen.SESSIONS) },
                     onSettings = { viewModel.navigate(WearScreen.SETTINGS) },
                     onAlert = { viewModel.navigate(WearScreen.ALERT) },
@@ -289,8 +280,7 @@ private fun InstallPermissionPrompt(
 @Composable
 private fun HomeScreen(
     state: WearUiState,
-    onPushToTalkStart: () -> Unit,
-    onPushToTalkEnd: () -> Unit,
+    onPushToTalk: () -> Unit,
     onSessions: () -> Unit,
     onSettings: () -> Unit,
     onAlert: () -> Unit,
@@ -342,15 +332,16 @@ private fun HomeScreen(
                 size = orbSize,
                 recording = state.recording,
                 pending = state.pending,
+                voiceLevel = state.voiceLevel,
                 enabled = state.isPaired && !state.pending,
-                onStart = onPushToTalkStart,
-                onEnd = onPushToTalkEnd,
+                onToggle = onPushToTalk,
             )
             Text(
                 text = when {
-                    state.recording -> "Listening… release to send"
+                    state.recording -> "Tap again to transcribe"
+                    state.transcribing -> "Transcribing…"
                     state.pending -> "Agentic Wear is working…"
-                    else -> "Hold to talk"
+                    else -> "Tap to talk"
                 },
                 color = if (state.recording) Cyan else Muted,
                 fontSize = 12.sp,
@@ -377,38 +368,36 @@ private fun PushToTalkOrb(
     size: Dp,
     recording: Boolean,
     pending: Boolean,
+    voiceLevel: Float,
     enabled: Boolean,
-    onStart: () -> Unit,
-    onEnd: () -> Unit,
+    onToggle: () -> Unit,
 ) {
-    var pressed by remember { mutableStateOf(false) }
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
     val haptics = LocalHapticFeedback.current
     val compact = size <= 80.dp
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
         animationSpec = tween(140, easing = AgenticEaseOut),
-        label = "push-to-talk press",
+        label = "voice control press",
+    )
+    val activity by animateFloatAsState(
+        targetValue = if (recording) voiceLevel.coerceIn(0f, 1f) else 0f,
+        animationSpec = tween(100, easing = LinearEasing),
+        label = "live voice activity",
     )
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(size + if (compact) 12.dp else 20.dp)) {
-        if (recording) {
-            val transition = rememberInfiniteTransition(label = "recording pulse")
-            val pulse by transition.animateFloat(
-                initialValue = 0.82f,
-                targetValue = 1.08f,
-                animationSpec = infiniteRepeatable(tween(1_000, easing = LinearEasing)),
-                label = "recording ring",
-            )
-            Box(
-                Modifier
-                    .size(size + if (compact) 10.dp else 16.dp)
-                    .graphicsLayer {
-                        scaleX = pulse
-                        scaleY = pulse
-                        alpha = (1.08f - pulse) * 1.8f
-                    }
-                    .border(2.dp, Cyan, CircleShape),
-            )
-        }
+        Box(
+            Modifier
+                .size(size + if (compact) 10.dp else 16.dp)
+                .graphicsLayer {
+                    val activityScale = 0.92f + activity * 0.18f
+                    scaleX = activityScale
+                    scaleY = activityScale
+                    alpha = activity * 0.72f
+                }
+                .border(2.dp, Cyan, CircleShape),
+        )
         Box(
             modifier = Modifier
                 .size(size)
@@ -425,32 +414,44 @@ private fun PushToTalkOrb(
                     CircleShape,
                 )
                 .semantics {
-                    contentDescription = "Hold to talk to the selected agent"
+                    contentDescription = if (recording) {
+                        "Stop recording and transcribe"
+                    } else {
+                        "Start recording for the selected agent"
+                    }
                     role = Role.Button
                 }
-                .pointerInput(enabled, pending) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        if (!enabled) return@awaitEachGesture
-                        down.consume()
-                        pressed = true
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onStart()
-                        waitForUpOrCancellation()?.consume()
-                        pressed = false
-                        onEnd()
-                    }
+                .clickable(
+                    enabled = enabled,
+                    interactionSource = interactions,
+                    indication = null,
+                    role = Role.Button,
+                ) {
+                    haptics.performHapticFeedback(
+                        if (recording) HapticFeedbackType.GestureEnd else HapticFeedbackType.ToggleOn,
+                    )
+                    onToggle()
                 }
                 .alpha(if (enabled) 1f else 0.55f),
             contentAlignment = Alignment.Center,
         ) {
-            AgentGlyph(recording = recording, pending = pending, modifier = Modifier.size(size * 0.48f))
+            AgentGlyph(
+                recording = recording,
+                pending = pending,
+                voiceLevel = activity,
+                modifier = Modifier.size(size * 0.48f),
+            )
         }
     }
 }
 
 @Composable
-private fun AgentGlyph(recording: Boolean, pending: Boolean, modifier: Modifier = Modifier) {
+private fun AgentGlyph(
+    recording: Boolean,
+    pending: Boolean,
+    voiceLevel: Float = 0f,
+    modifier: Modifier = Modifier,
+) {
     val accent = when {
         recording -> Cyan
         pending -> Violet
@@ -470,7 +471,12 @@ private fun AgentGlyph(recording: Boolean, pending: Boolean, modifier: Modifier 
         )
         val widths = w * 0.11f
         val xs = listOf(w * 0.32f, w * 0.50f, w * 0.68f)
-        val heights = listOf(h * 0.27f, h * 0.48f, h * 0.34f)
+        val activity = if (recording) voiceLevel.coerceIn(0f, 1f) else 0f
+        val heights = listOf(
+            h * (0.27f + activity * 0.25f),
+            h * (0.48f + activity * 0.34f),
+            h * (0.34f + activity * 0.28f),
+        )
         xs.indices.forEach { index ->
             drawLine(
                 color = if (index == 1) accent else if (index == 0) Cyan else Violet,
@@ -819,7 +825,7 @@ private fun PairScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(8.dp))
-        AgentGlyph(false, false, Modifier.size(40.dp))
+        AgentGlyph(recording = false, pending = false, modifier = Modifier.size(40.dp))
         Spacer(Modifier.height(2.dp))
         Text("Agentic Wear", color = Frost, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text("Connect your private bridge", color = Muted, fontSize = 11.sp)

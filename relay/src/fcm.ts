@@ -26,6 +26,10 @@ export async function wakeWatch(env: Env, installationId: string, pairId: string
   await drainBounded(response, 16_384);
 }
 
+export function wakeTargetForNewEnvelope(installationId: string | null, inserted: boolean): string | null {
+  return inserted && installationId ? installationId : null;
+}
+
 export function buildWakeMessage(installationId: string, pairId: string) {
   return {
     message: {

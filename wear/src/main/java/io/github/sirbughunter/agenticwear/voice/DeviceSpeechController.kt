@@ -11,6 +11,7 @@ class DeviceSpeechController(
     context: Context,
     private val onResult: (String) -> Unit,
     private val onFailure: (String) -> Unit,
+    private val onVoiceLevel: (Float) -> Unit,
 ) : RecognitionListener {
     private val recognizer = SpeechRecognizer.createSpeechRecognizer(context).also {
         it.setRecognitionListener(this)
@@ -32,6 +33,12 @@ class DeviceSpeechController(
         if (listening) recognizer.stopListening()
     }
 
+    fun cancel() {
+        if (listening) recognizer.cancel()
+        listening = false
+        onVoiceLevel(0f)
+    }
+
     fun destroy() {
         listening = false
         recognizer.destroy()
@@ -39,6 +46,7 @@ class DeviceSpeechController(
 
     override fun onResults(results: Bundle) {
         listening = false
+        onVoiceLevel(0f)
         val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             ?.firstOrNull()
             .orEmpty()
@@ -48,6 +56,7 @@ class DeviceSpeechController(
 
     override fun onError(error: Int) {
         listening = false
+        onVoiceLevel(0f)
         if (error != SpeechRecognizer.ERROR_CLIENT && error != SpeechRecognizer.ERROR_NO_MATCH) {
             onFailure("Device speech recognition stopped ($error)")
         } else if (error == SpeechRecognizer.ERROR_NO_MATCH) {
@@ -57,9 +66,9 @@ class DeviceSpeechController(
 
     override fun onReadyForSpeech(params: Bundle?) = Unit
     override fun onBeginningOfSpeech() = Unit
-    override fun onRmsChanged(rmsdB: Float) = Unit
+    override fun onRmsChanged(rmsdB: Float) = onVoiceLevel(rmsVoiceActivityLevel(rmsdB))
     override fun onBufferReceived(buffer: ByteArray?) = Unit
-    override fun onEndOfSpeech() = Unit
+    override fun onEndOfSpeech() = onVoiceLevel(0f)
     override fun onPartialResults(partialResults: Bundle?) = Unit
     override fun onEvent(eventType: Int, params: Bundle?) = Unit
 }

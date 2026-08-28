@@ -2,7 +2,7 @@
 
 ## Wear app
 
-The standalone Wear OS app records push-to-talk audio, encrypts bridge requests, displays session/alert state, and fetches an encrypted inbox after a high-priority FCM wake. It posts notifications even while its activity is foregrounded. Completion uses a one-second vibration; permissions and failures use distinct patterns.
+The standalone Wear OS app records tap-to-toggle audio, encrypts bridge requests, displays session/alert state, and fetches an encrypted inbox after a high-priority FCM wake. It posts notifications even while its activity is foregrounded. Every completion, permission, or failure alert uses one continuous one-second vibration and a visually distinct state.
 
 Android Keystore holds the non-exportable P-256 watch key and the AES key that protects the relay credential at rest.
 
@@ -35,4 +35,4 @@ The polling fallback examines only `completed`, `failed`, or `interrupted` turn 
 
 ## iPhone boundary
 
-An iPhone can control Codex sessions against the same managed daemon through Codex remote control. Agentic Wear observes those daemon sessions. It does not embed ChatGPT/Codex Live, deep-link into private iOS app state, or create a direct Bluetooth/iOS companion channel in v0.1.
+An iPhone can control Codex sessions against the same managed daemon through Codex remote control. Agentic Wear observes those daemon sessions. It does not embed ChatGPT/Codex Live, deep-link into private iOS app state, or create a direct Bluetooth/iOS companion channel in Alpha 0.2.

@@ -7,6 +7,8 @@ import io.github.sirbughunter.agenticwear.model.BridgePayload
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 class AgenticWearRepository(private val context: Context) {
@@ -55,6 +57,7 @@ class AgenticWearRepository(private val context: Context) {
             require(bytes.size <= 512 * 1_024) { "Recording is too large; keep it under one minute" }
             preferences.pending = true
             preferences.transcript = null
+            preferences.lastError = null
             send(
                 BridgePayload.CreateTranscription(
                     requestId = requestId,
@@ -64,6 +67,11 @@ class AgenticWearRepository(private val context: Context) {
                 ),
             )
             check(audioFile.delete() || !audioFile.exists()) { "Could not remove the sent recording" }
+            for (waitMillis in TRANSCRIPTION_REPLY_DELAYS_MS) {
+                delay(waitMillis)
+                refreshInboxBatch(notify = true)
+                if (preferences.transcript?.requestId == requestId || preferences.lastError != null) break
+            }
             return requestId
         } catch (error: Throwable) {
             audioFile.delete()
@@ -107,8 +115,8 @@ class AgenticWearRepository(private val context: Context) {
         }
     }
 
-    private suspend fun refreshInboxBatch(notify: Boolean): InboxRefreshResult {
-        val pairing = pairingStore.read() ?: return InboxRefreshResult(0, false)
+    private suspend fun refreshInboxBatch(notify: Boolean): InboxRefreshResult = inboxRefreshMutex.withLock {
+        val pairing = pairingStore.read() ?: return@withLock InboxRefreshResult(0, false)
         val envelopes = relay.fetchInbox(pairing)
         val acknowledged = mutableListOf<String>()
         var handled = 0
@@ -126,7 +134,7 @@ class AgenticWearRepository(private val context: Context) {
         }
         relay.acknowledge(pairing, acknowledged)
         if (handled > 0) broadcastStateChanged()
-        return InboxRefreshResult(handled, receivedSessionSnapshot)
+        InboxRefreshResult(handled, receivedSessionSnapshot)
     }
 
     suspend fun updateFcmRegistration(installationId: String) {
@@ -209,6 +217,8 @@ class AgenticWearRepository(private val context: Context) {
     companion object {
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
+        private val TRANSCRIPTION_REPLY_DELAYS_MS = longArrayOf(150, 200, 250, 350, 500, 700, 1_000)
+        private val inboxRefreshMutex = Mutex()
     }
 }
 
