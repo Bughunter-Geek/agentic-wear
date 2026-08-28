@@ -2,6 +2,20 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.3-alpha — 2026-08-28
+
+### Fixed
+
+- Restores completion and error alerts while Agentic Wear is minimized by enabling Firebase Cloud Messaging in the release APK.
+- Registers the watch's Firebase installation with its existing private bridge pairing, so background wake-ups keep working without exposing session content to Firebase.
+- Uses an expedited inbox sync after each wake signal, preserving the same encrypted relay and single-notification processing used while the app is open.
+
+### Privacy and cost
+
+- Firebase receives only an `inbox.ready` wake signal and the private pairing identifier; notification text and Codex session content remain end-to-end encrypted in the relay inbox.
+- Agentic Wear uses its own dedicated Firebase project on the no-cost Spark plan; it is not connected to Nudgely and does not introduce per-transcription charges.
+- Open Agentic Wear once after installing this update so the watch can register background alerts for the existing pairing.
+
 ## 0.4.2-alpha — 2026-08-28
 
 ### Fixed
