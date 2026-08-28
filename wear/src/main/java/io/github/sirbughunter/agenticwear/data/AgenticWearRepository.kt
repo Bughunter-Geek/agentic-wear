@@ -6,6 +6,7 @@ import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 
 class AgenticWearRepository(private val context: Context) {
@@ -94,22 +95,37 @@ class AgenticWearRepository(private val context: Context) {
     }
 
     suspend fun refreshInbox(notify: Boolean = true): Int {
-        val pairing = pairingStore.read() ?: return 0
+        return refreshInboxBatch(notify).handled
+    }
+
+    suspend fun refreshInboxAndSessions(notify: Boolean = true) {
+        refreshInboxBatch(notify)
+        syncSessions()
+        for (waitMillis in SESSION_REPLY_DELAYS_MS) {
+            delay(waitMillis)
+            if (refreshInboxBatch(notify).receivedSessionSnapshot) return
+        }
+    }
+
+    private suspend fun refreshInboxBatch(notify: Boolean): InboxRefreshResult {
+        val pairing = pairingStore.read() ?: return InboxRefreshResult(0, false)
         val envelopes = relay.fetchInbox(pairing)
         val acknowledged = mutableListOf<String>()
         var handled = 0
+        var receivedSessionSnapshot = false
         envelopes.forEach { envelope ->
             val messageId = envelope.optString("messageId")
             runCatching { crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope) }
                 .onSuccess { payload ->
                     processPayload(payload, notify)
+                    if (payload.optString("kind") == "sessions.snapshot") receivedSessionSnapshot = true
                     if (messageId.isNotBlank()) acknowledged += messageId
                     handled += 1
                 }
         }
         relay.acknowledge(pairing, acknowledged)
         if (handled > 0) broadcastStateChanged()
-        return handled
+        return InboxRefreshResult(handled, receivedSessionSnapshot)
     }
 
     suspend fun updateFcmRegistration(installationId: String) {
@@ -169,5 +185,11 @@ class AgenticWearRepository(private val context: Context) {
 
     companion object {
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
+        private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
     }
 }
+
+private data class InboxRefreshResult(
+    val handled: Int,
+    val receivedSessionSnapshot: Boolean,
+)

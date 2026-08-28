@@ -99,7 +99,7 @@ adb install -r wear/build/outputs/apk/debug/wear-debug.apk
 
 Wireless ADB is useful for the first install, but it is intentionally treated as temporary developer transport rather than permanent distribution infrastructure. Release builds include an opt-in updater in **Settings → App updates**. After one final ADB install, the watch can download a signed APK from GitHub Releases, verify its checksum, package name, version, and signing certificate, then open Wear OS's system installer. No Play Console account or future ADB pairing is required.
 
-Android still requires the watch owner to allow Agentic Wear as an install source once and confirm each update. The app cannot and does not silently install software. The flow is verified on a 454 px round Wear OS 7 / Android 17 emulator. See [No-Play distribution](docs/distribution.md) for the exact workflow and security boundaries.
+Android still requires the watch owner to enable **Install unknown apps** for Agentic Wear once and confirm each update. Agentic Wear explains that handoff before opening the exact system settings page; it cannot and does not silently install software. The flow is verified on a 454 px round Wear OS 7 / Android 17 emulator. See [No-Play distribution](docs/distribution.md) for the exact workflow and security boundaries.
 
 For the local maintainer build, create a permanent release identity once. The keystore remains outside the repository and its generated password is stored in macOS Keychain:
 

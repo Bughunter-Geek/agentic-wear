@@ -3,6 +3,7 @@
 package io.github.sirbughunter.agenticwear.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
@@ -177,6 +178,95 @@ fun AgenticWearApp(
         state.error?.takeIf { state.screen != WearScreen.PAIR }?.let { error ->
             ErrorPill(error, Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp))
         }
+        AnimatedVisibility(
+            visible = state.showInstallPermissionPrompt,
+            enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
+                scaleIn(tween(200, easing = AgenticEaseOut), initialScale = 0.94f),
+            exit = fadeOut(tween(130, easing = AgenticEaseOut)) +
+                scaleOut(tween(130, easing = AgenticEaseOut), targetScale = 0.97f),
+        ) {
+            InstallPermissionPrompt(
+                onOpenSettings = viewModel::openInstallPermission,
+                onDismiss = viewModel::dismissInstallPermissionPrompt,
+            )
+        }
+    }
+}
+
+@Composable
+private fun InstallPermissionPrompt(
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val blockerInteractions = remember { MutableInteractionSource() }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.76f))
+            .clickable(
+                interactionSource = blockerInteractions,
+                indication = null,
+                role = Role.Button,
+                onClick = {},
+            )
+            .padding(horizontal = 24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(SurfaceShape)
+                .background(Brush.linearGradient(listOf(PanelRaised, Panel)))
+                .border(1.dp, Violet.copy(alpha = 0.72f), SurfaceShape)
+                .padding(horizontal = 16.dp, vertical = 15.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(27.dp)
+                    .clip(CircleShape)
+                    .background(Violet.copy(alpha = 0.16f))
+                    .border(1.dp, Violet.copy(alpha = 0.74f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("↓", color = Cyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "One-time permission",
+                color = Frost,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Enable “Install unknown apps” on the next screen, then return. Your data stays intact.",
+                color = Muted,
+                fontSize = 10.sp,
+                lineHeight = 13.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(8.dp))
+            ActionButton(
+                label = "Open settings",
+                primary = true,
+                onClick = onOpenSettings,
+                enabled = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "Not now",
+                color = Muted,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .clickable(role = Role.Button, onClick = onDismiss)
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+            )
+        }
     }
 }
 
@@ -248,9 +338,15 @@ private fun HomeScreen(
             )
             Spacer(Modifier.height(if (compact) 2.dp else 9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 10.dp)) {
-                MiniAction("Sessions", "≡", onSessions)
-                if (state.latestAlert != null) MiniAction("Latest", "●", onAlert)
-                MiniAction("Settings", "⌁", onSettings)
+                MiniAction("Sessions", onSessions) {
+                    Text("≡", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+                if (state.latestAlert != null) {
+                    MiniAction("Latest", onAlert) {
+                        Text("●", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                MiniAction("Settings", onSettings) { SettingsGlyph() }
             }
         }
     }
@@ -608,6 +704,15 @@ private fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth().padding(8.dp),
                 )
             }
+            item {
+                Text(
+                    "Version ${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
+                    color = Muted.copy(alpha = 0.8f),
+                    fontSize = 9.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                )
+            }
         }
     }
 }
@@ -738,14 +843,31 @@ private fun ConnectionPill(connected: Boolean) {
 }
 
 @Composable
-private fun MiniAction(label: String, glyph: String, onClick: () -> Unit) {
+private fun MiniAction(label: String, onClick: () -> Unit, content: @Composable () -> Unit) {
     TactileCard(
         onClick = onClick,
         modifier = Modifier.size(34.dp).semantics { contentDescription = label },
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(glyph, color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            content()
         }
+    }
+}
+
+@Composable
+private fun SettingsGlyph() {
+    Canvas(Modifier.size(17.dp)) {
+        val stroke = 1.6.dp.toPx()
+        val start = 1.5.dp.toPx()
+        val end = size.width - start
+        fun drawTrack(y: Float, knobX: Float) {
+            drawLine(Cyan, Offset(start, y), Offset(end, y), stroke, StrokeCap.Round)
+            drawCircle(PanelRaised, 2.7.dp.toPx(), Offset(knobX, y))
+            drawCircle(Cyan, 2.1.dp.toPx(), Offset(knobX, y), style = Stroke(stroke))
+        }
+        drawTrack(size.height * 0.24f, size.width * 0.36f)
+        drawTrack(size.height * 0.5f, size.width * 0.68f)
+        drawTrack(size.height * 0.76f, size.width * 0.45f)
     }
 }
 

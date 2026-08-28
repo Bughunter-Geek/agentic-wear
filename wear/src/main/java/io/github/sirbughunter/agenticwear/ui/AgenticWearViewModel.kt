@@ -49,6 +49,7 @@ data class WearUiState(
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val relayUrl: String = "",
     val appUpdate: UpdateUiState = UpdateUiState(),
+    val showInstallPermissionPrompt: Boolean = false,
     val demo: Boolean = false,
 ) {
     val selectedSession: AgentSession?
@@ -101,8 +102,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun refreshInbox() = launchTask(showPending = false) {
-        repository.refreshInbox(notify = true)
-        repository.syncSessions()
+        repository.refreshInboxAndSessions(notify = true)
         reload()
     }
 
@@ -181,14 +181,38 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun dismissInstallPermissionPrompt() {
+        _state.update { current -> current.copy(showInstallPermissionPrompt = false) }
+    }
+
+    fun openInstallPermission() {
+        _state.update { current -> current.copy(showInstallPermissionPrompt = false) }
+        awaitingInstallPermission = true
+        if (!updateManager.openInstallPermission()) {
+            awaitingInstallPermission = false
+            _state.update { current ->
+                current.copy(
+                    appUpdate = current.appUpdate.copy(
+                        stage = UpdateStage.ERROR,
+                        message = "Install permission settings are unavailable",
+                    ),
+                )
+            }
+        }
+    }
+
     fun resumePendingInstall() {
         if (!awaitingInstallPermission) return
+        awaitingInstallPermission = false
         if (updateManager.canRequestInstalls()) {
-            awaitingInstallPermission = false
             continueInstall()
         } else {
             _state.update { current ->
-                current.copy(appUpdate = current.appUpdate.copy(message = "Allow installs, then return here"))
+                current.copy(
+                    appUpdate = current.appUpdate.copy(
+                        message = "Permission not enabled · tap to try again",
+                    ),
+                )
             }
         }
     }
@@ -207,6 +231,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             AgentSession("demo-docs", "Prepare open-source launch", now - 1_460_000, SessionStatus.ERROR, false, false),
         )
         val normalized = stateName.lowercase()
+        val updatePermissionDemo = normalized == "update-permission"
         val alert = when (normalized) {
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
             "complete" -> AgentAlert("demo-complete", AlertKind.COMPLETE, "demo-build", sessions[0].title, "All checks passed. Release APK is ready for review.", now)
@@ -222,7 +247,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "sessions" -> WearScreen.SESSIONS
                 "transcript" -> WearScreen.TRANSCRIPT
                 "approval", "complete", "error" -> WearScreen.ALERT
-                "settings" -> WearScreen.SETTINGS
+                "settings", "update-permission" -> WearScreen.SETTINGS
                 else -> WearScreen.HOME
             },
             isPaired = normalized != "pair",
@@ -232,7 +257,18 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             transcript = transcript,
             approvalMode = if (normalized == "approval") ApprovalMode.ALLOW_CONTROLS else ApprovalMode.ALERT_ONLY,
             relayUrl = "https://relay.example.workers.dev",
-            appUpdate = UpdateUiState(enabled = updateManager.enabled),
+            appUpdate = if (updatePermissionDemo) {
+                UpdateUiState(
+                    enabled = true,
+                    stage = UpdateStage.READY,
+                    release = AppRelease(8, "0.1.7", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                    progress = 100,
+                    message = "One-time permission needed",
+                )
+            } else {
+                UpdateUiState(enabled = updateManager.enabled)
+            },
+            showInstallPermissionPrompt = updatePermissionDemo,
             demo = true,
         )
     }
@@ -322,16 +358,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
         if (!updateManager.canRequestInstalls()) {
-            awaitingInstallPermission = true
-            if (!updateManager.openInstallPermission()) {
-                awaitingInstallPermission = false
-                _state.update { current ->
-                    current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.ERROR, message = "Install permission is unavailable"))
-                }
-            } else {
-                _state.update { current ->
-                    current.copy(appUpdate = current.appUpdate.copy(message = "Allow installs from Agentic Wear"))
-                }
+            _state.update { current ->
+                current.copy(
+                    showInstallPermissionPrompt = true,
+                    appUpdate = current.appUpdate.copy(message = "One-time permission needed"),
+                )
             }
             return
         }
@@ -367,8 +398,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun reload(screen: WearScreen? = null) {
         if (_state.value.demo) return
-        val appUpdate = _state.value.appUpdate
-        _state.value = readState(screen ?: _state.value.screen).copy(appUpdate = appUpdate)
+        val current = _state.value
+        _state.value = readState(screen ?: current.screen).copy(
+            appUpdate = current.appUpdate,
+            showInstallPermissionPrompt = current.showInstallPermissionPrompt,
+        )
     }
 
     private fun readState(screen: WearScreen? = null): WearUiState {
