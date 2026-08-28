@@ -169,7 +169,9 @@ export class AppServerClient {
     await this.request("initialize", {
       clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.1.0" },
       capabilities: {
-        experimentalApi: false,
+        // The fallback completion monitor intentionally uses
+        // `thread/turns/list`, which is negotiated behind this capability.
+        experimentalApi: true,
         requestAttestation: false,
         optOutNotificationMethods: [
           "item/agentMessage/delta",
