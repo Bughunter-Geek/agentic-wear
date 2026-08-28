@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
+import io.github.sirbughunter.agenticwear.notification.AgentNotifier
+import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -50,7 +52,7 @@ class AgenticWearRepository(private val context: Context) {
 
     suspend fun syncSessions() = send(BridgePayload.SessionSync(UUID.randomUUID().toString()))
 
-    suspend fun transcribe(audioFile: File, threadId: String?): String {
+    suspend fun transcribe(audioFile: File, threadId: String?, notifyAfterMillis: Long? = null): String {
         val requestId = UUID.randomUUID().toString()
         val bytes = audioFile.readBytes()
         try {
@@ -67,9 +69,9 @@ class AgenticWearRepository(private val context: Context) {
                 ),
             )
             check(audioFile.delete() || !audioFile.exists()) { "Could not remove the sent recording" }
-            for (waitMillis in TRANSCRIPTION_REPLY_DELAYS_MS) {
+            for (waitMillis in transcriptionReplyDelaysMs()) {
                 delay(waitMillis)
-                refreshInboxBatch(notify = true)
+                refreshInboxBatch(notify = true, notifyAfterMillis = notifyAfterMillis)
                 if (preferences.transcript?.requestId == requestId || preferences.lastError != null) break
             }
             return requestId
@@ -106,16 +108,19 @@ class AgenticWearRepository(private val context: Context) {
         return refreshInboxBatch(notify).handled
     }
 
-    suspend fun refreshInboxAndSessions(notify: Boolean = true) {
-        refreshInboxBatch(notify)
+    suspend fun refreshInboxAndSessions(notify: Boolean = true, notifyAfterMillis: Long? = null) {
+        refreshInboxBatch(notify, notifyAfterMillis)
         syncSessions()
         for (waitMillis in SESSION_REPLY_DELAYS_MS) {
             delay(waitMillis)
-            if (refreshInboxBatch(notify).receivedSessionSnapshot) return
+            if (refreshInboxBatch(notify, notifyAfterMillis).receivedSessionSnapshot) return
         }
     }
 
-    private suspend fun refreshInboxBatch(notify: Boolean): InboxRefreshResult = inboxRefreshMutex.withLock {
+    private suspend fun refreshInboxBatch(
+        notify: Boolean,
+        notifyAfterMillis: Long? = null,
+    ): InboxRefreshResult = inboxRefreshMutex.withLock {
         val pairing = pairingStore.read() ?: return@withLock InboxRefreshResult(0, false)
         val envelopes = relay.fetchInbox(pairing)
         val acknowledged = mutableListOf<String>()
@@ -126,7 +131,7 @@ class AgenticWearRepository(private val context: Context) {
             val sentAt = envelope.optLong("sentAt")
             runCatching { crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope) }
                 .onSuccess { payload ->
-                    processPayload(payload, notify, messageId, sentAt)
+                    processPayload(payload, notify, notifyAfterMillis, messageId, sentAt)
                     if (payload.optString("kind") == "sessions.snapshot") receivedSessionSnapshot = true
                     if (messageId.isNotBlank()) acknowledged += messageId
                     handled += 1
@@ -161,6 +166,7 @@ class AgenticWearRepository(private val context: Context) {
     private fun processPayload(
         payload: JSONObject,
         notify: Boolean,
+        notifyAfterMillis: Long?,
         envelopeMessageId: String,
         envelopeSentAt: Long,
     ) {
@@ -179,8 +185,9 @@ class AgenticWearRepository(private val context: Context) {
                 preferences.latestAlert = alert
                 preferences.pending = false
                 preferences.lastError = null
-                if (notify && preferences.markEventHandled(alert.eventId)) {
-                    io.github.sirbughunter.agenticwear.notification.AgentNotifier.post(context, alert)
+                val firstDelivery = preferences.markEventHandled(alert.eventId)
+                if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
+                    AgentNotifier.post(context, alert)
                 }
             }
             "transcription.error", "turn.error", "approval.error", "bridge.error" -> {
@@ -198,8 +205,9 @@ class AgenticWearRepository(private val context: Context) {
                     ?: payload.optString("message", "The request could not be completed")
                 if (alert != null) {
                     preferences.latestAlert = alert
-                    if (notify && preferences.markEventHandled(alert.eventId)) {
-                        io.github.sirbughunter.agenticwear.notification.AgentNotifier.post(context, alert)
+                    val firstDelivery = preferences.markEventHandled(alert.eventId)
+                    if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
+                        AgentNotifier.post(context, alert)
                     }
                 }
             }
@@ -217,7 +225,6 @@ class AgenticWearRepository(private val context: Context) {
     companion object {
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
-        private val TRANSCRIPTION_REPLY_DELAYS_MS = longArrayOf(150, 200, 250, 350, 500, 700, 1_000)
         private val inboxRefreshMutex = Mutex()
     }
 }
@@ -226,3 +233,6 @@ private data class InboxRefreshResult(
     val handled: Int,
     val receivedSessionSnapshot: Boolean,
 )
+
+internal fun transcriptionReplyDelaysMs(): LongArray =
+    longArrayOf(150, 200, 250, 350, 500, 700, 1_000, 500, 700, 900, 1_200, 1_600, 2_000)

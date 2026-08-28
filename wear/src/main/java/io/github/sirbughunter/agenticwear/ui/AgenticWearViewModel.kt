@@ -74,6 +74,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private var recordingTimeoutJob: Job? = null
     private var downloadedUpdate: File? = null
     private var awaitingInstallPermission = false
+    private var foregroundStartedAtMillis = System.currentTimeMillis()
 
     private val stateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) = reload()
@@ -86,8 +87,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             IntentFilter(AgenticWearRepository.ACTION_STATE_CHANGED),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        if (repository.isPaired) refreshInbox()
         if (updateManager.enabled) checkForUpdate(silent = true)
+    }
+
+    fun onForegrounded() {
+        foregroundStartedAtMillis = System.currentTimeMillis()
+        if (repository.isPaired) refreshInbox()
     }
 
     fun navigate(screen: WearScreen) {
@@ -111,7 +116,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun refreshInbox() = launchTask(showPending = false) {
-        repository.refreshInboxAndSessions(notify = true)
+        repository.refreshInboxAndSessions(notify = true, notifyAfterMillis = foregroundStartedAtMillis)
         reload()
     }
 
@@ -195,7 +200,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun retryTranscript() {
-        _state.update { it.copy(screen = WearScreen.HOME, transcript = null, error = null) }
+        stopVoiceMonitoring()
+        recordingTimeoutJob?.cancel()
+        recorder.cancel()
+        deviceSpeech?.cancel()
+        preferences.transcript = null
+        preferences.pending = false
+        preferences.lastError = null
+        _state.update(::resetForNewTranscription)
     }
 
     fun respondToApproval(approve: Boolean) {
@@ -310,11 +322,17 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private fun transcribe(file: File) {
         _state.update { it.copy(pending = true, transcribing = true, error = null) }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.transcribe(file, _state.value.selectedSession?.id) }
+            runCatching {
+                repository.transcribe(
+                    audioFile = file,
+                    threadId = _state.value.selectedSession?.id,
+                    notifyAfterMillis = foregroundStartedAtMillis,
+                )
+            }
                 .onFailure(::showError)
                 .onSuccess {
-                    reload(WearScreen.HOME)
                     _state.update { current -> current.copy(transcribing = false) }
+                    reload(WearScreen.HOME)
                 }
         }
     }
@@ -498,12 +516,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private fun reload(screen: WearScreen? = null) {
         if (_state.value.demo) return
         val current = _state.value
-        _state.value = readState(screen ?: current.screen).copy(
+        val restored = readState(screen ?: current.screen)
+        val transcriptReady = restored.transcript != null
+        _state.value = restored.copy(
             appUpdate = current.appUpdate,
             showInstallPermissionPrompt = current.showInstallPermissionPrompt,
-            recording = current.recording,
-            transcribing = current.transcribing,
-            voiceLevel = current.voiceLevel,
+            recording = current.recording && !transcriptReady,
+            transcribing = current.transcribing && !transcriptReady,
+            voiceLevel = if (transcriptReady) 0f else current.voiceLevel,
         )
     }
 
@@ -544,3 +564,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         private const val MAX_RECORDING_DURATION_MS = 55_000L
     }
 }
+
+internal fun resetForNewTranscription(current: WearUiState): WearUiState = current.copy(
+    screen = WearScreen.HOME,
+    transcript = null,
+    pending = false,
+    recording = false,
+    transcribing = false,
+    voiceLevel = 0f,
+    error = null,
+)

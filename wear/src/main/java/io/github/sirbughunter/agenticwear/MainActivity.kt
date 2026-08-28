@@ -43,6 +43,11 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermission()
     }
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.onForegrounded()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)

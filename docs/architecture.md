@@ -2,7 +2,7 @@
 
 ## Wear app
 
-The standalone Wear OS app records tap-to-toggle audio, encrypts bridge requests, displays session/alert state, and fetches an encrypted inbox after a high-priority FCM wake. It posts notifications even while its activity is foregrounded. Every completion, permission, or failure alert uses one continuous one-second vibration and a visually distinct state.
+The standalone Wear OS app records tap-to-toggle audio, encrypts bridge requests, displays session/alert state, and fetches an encrypted inbox after a high-priority FCM wake. It posts notifications even while its activity is foregrounded. A foreground session silently consumes alerts that predate the moment the app became visible, while completions that occur afterward remain eligible. Every completion, permission, or failure alert uses one continuous one-second vibration and a visually distinct state.
 
 Android Keystore holds the non-exportable P-256 watch key and the AES key that protects the relay credential at rest.
 
@@ -27,7 +27,7 @@ The bridge:
 - Atomically claims authenticated inbound message IDs on disk before side effects, preventing replay across restarts and concurrent processes.
 - Runs as a throttled background launchd agent.
 
-The watch sends a bounded encrypted AAC recording only to its paired bridge. The local worker decodes it through `ffmpeg` pipes and transcribes the in-memory waveform; it does not create an audio file. This removes hosted inference latency and per-minute transcription billing while keeping raw audio on the bridge host.
+The watch sends a bounded encrypted AAC recording only to its paired bridge. The local worker decodes it through `ffmpeg` pipes and transcribes the in-memory waveform; it does not create an audio file. After a user-initiated recording, the watch keeps a fast foreground inbox-retrieval window open for roughly ten seconds so longer transcripts do not fall through to slower background scheduling. This removes hosted inference latency and per-minute transcription billing while keeping raw audio on the bridge host.
 
 There is no shared transcription backend: every deployment owner runs their own bridge and model. The public relay routes opaque envelopes by pair identity and cannot enroll an unrelated watch into another owner's authenticated pair.
 
