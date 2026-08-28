@@ -1,10 +1,11 @@
 import OpenAI, { toFile } from "openai";
 
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+export type AudioMimeType = "audio/mp4" | "audio/aac";
 
 export interface Transcriber {
   prepare?(): Promise<void>;
-  transcribe(audio: Uint8Array, mimeType: "audio/mp4"): Promise<string>;
+  transcribe(audio: Uint8Array, mimeType: AudioMimeType): Promise<string>;
   close?(): void | Promise<void>;
 }
 
@@ -16,11 +17,11 @@ export class OpenAITranscriber implements Transcriber {
     this.client = new OpenAI({ apiKey, defaultHeaders: { "User-Agent": userAgent } });
   }
 
-  async transcribe(audio: Uint8Array, mimeType: "audio/mp4"): Promise<string> {
+  async transcribe(audio: Uint8Array, mimeType: AudioMimeType): Promise<string> {
     if (audio.byteLength < 1_024 || audio.byteLength > 512 * 1_024) {
       throw new Error("Voice recordings must be between 1 KiB and 512 KiB");
     }
-    const file = await toFile(audio, "watch-prompt.m4a", { type: mimeType });
+    const file = await toFile(audio, mimeType === "audio/aac" ? "watch-prompt.aac" : "watch-prompt.m4a", { type: mimeType });
     const response = await this.client.audio.transcriptions.create({
       file,
       model: this.model,

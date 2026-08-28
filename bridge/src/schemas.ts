@@ -22,7 +22,7 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     kind: z.literal("transcription.create"),
     requestId: safeId,
     audioBase64: base64.max(700_000),
-    mimeType: z.literal("audio/mp4"),
+    mimeType: z.enum(["audio/mp4", "audio/aac"]),
     threadId: safeId.nullable(),
   }).strict(),
   z.object({

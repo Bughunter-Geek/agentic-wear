@@ -257,19 +257,28 @@ export class AppServerClient {
 
   async monitorTerminals(signal: AbortSignal, intervalMs = 20_000): Promise<void> {
     let previous = snapshot(await this.listSessions());
+    let previousObservedAt = Date.now();
     while (!signal.aborted) {
       await delay(intervalMs, signal);
       if (signal.aborted) return;
       try {
+        const observedAt = Date.now();
         const sessions = await this.listSessions();
         for (const session of sessions) {
           const before = previous.get(session.id);
           const mayHaveFinished = session.status !== "active" && (
             before === undefined || before.status === "active" || session.updatedAt > before.updatedAt
           );
-          if (mayHaveFinished) await this.emitLatestTerminal(session);
+          if (mayHaveFinished) {
+            // An idle thread can be updated by a rename, a child-agent event, or
+            // other metadata. Only replay a terminal turn that actually ended
+            // after our preceding observation; otherwise an old interrupted
+            // turn would become a false fresh alert.
+            await this.emitLatestTerminal(session, before?.updatedAt ?? previousObservedAt);
+          }
         }
         previous = snapshot(sessions);
+        previousObservedAt = observedAt;
       } catch (error) {
         console.error(JSON.stringify({ level: "error", message: "terminal monitor retrying", error: safeError(error) }));
       }
@@ -431,7 +440,7 @@ export class AppServerClient {
     }
   }
 
-  private async emitLatestTerminal(session: SessionView): Promise<void> {
+  private async emitLatestTerminal(session: SessionView, newerThanMs: number): Promise<void> {
     const raw = await this.request("thread/turns/list", {
       threadId: session.id,
       limit: 1,
@@ -439,7 +448,7 @@ export class AppServerClient {
       itemsView: "notLoaded",
     });
     const turn = turnListResponseSchema.parse(raw).data[0];
-    if (!turn || turn.status === "inProgress") return;
+    if (!turn || turn.status === "inProgress" || !isTerminalNewerThan(turn.completedAt, newerThanMs)) return;
     const kind = `terminal.${turn.status}` as TerminalEvent["kind"];
     const detail = turn.status === "completed"
       ? "The agent finished its full response."
@@ -453,7 +462,7 @@ export class AppServerClient {
       threadId: session.id,
       title: session.title,
       detail,
-      occurredAt: turn.completedAt ? turn.completedAt * 1_000 : Date.now(),
+      occurredAt: turn.completedAt! * 1_000,
     });
   }
 
@@ -540,6 +549,10 @@ export function parseTerminalNotification(method: string, params: unknown): z.in
 
 export function isTopLevelUserThread(thread: CodexThread): boolean {
   return thread.parentThreadId == null && thread.agentRole == null;
+}
+
+export function isTerminalNewerThan(completedAt: number | null | undefined, observedAtMs: number): boolean {
+  return completedAt != null && completedAt * 1_000 > observedAtMs;
 }
 
 function textInput(text: string): Record<string, unknown> {

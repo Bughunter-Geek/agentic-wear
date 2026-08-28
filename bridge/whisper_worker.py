@@ -22,7 +22,7 @@ def emit(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def decode_audio(encoded: str, ffmpeg_path: str):
+def decode_audio(encoded: str, mime_type: str, ffmpeg_path: str):
     import numpy as np
 
     try:
@@ -32,12 +32,14 @@ def decode_audio(encoded: str, ffmpeg_path: str):
     if not 1024 <= len(compressed) <= MAX_AUDIO_BYTES:
         raise ValueError("Voice recordings must be between 1 KiB and 512 KiB")
 
+    input_options = ["-f", "aac"] if mime_type == "audio/aac" else []
     result = subprocess.run(
         [
             ffmpeg_path,
             "-hide_banner",
             "-loglevel",
             "error",
+            *input_options,
             "-i",
             "pipe:0",
             "-f",
@@ -57,8 +59,10 @@ def decode_audio(encoded: str, ffmpeg_path: str):
         check=False,
     )
     compressed = b""
-    if result.returncode != 0 or len(result.stdout) < 1600:
-        raise ValueError("The recording did not contain usable speech audio")
+    if result.returncode != 0:
+        raise ValueError("The watch recording could not be decoded")
+    if len(result.stdout) < 1600:
+        raise ValueError("The recording ended before it captured audio frames")
     return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
 
 
@@ -108,7 +112,10 @@ def run(model: str, ffmpeg_path: str) -> None:
             encoded = payload.get("audioBase64")
             if not isinstance(encoded, str):
                 raise ValueError("Missing transcription audio")
-            audio = decode_audio(encoded, ffmpeg_path)
+            mime_type = payload.get("mimeType", "audio/mp4")
+            if mime_type not in ("audio/mp4", "audio/aac"):
+                raise ValueError("Unsupported transcription audio format")
+            audio = decode_audio(encoded, mime_type, ffmpeg_path)
             result = transcribe_audio(transcribe, audio, model)
             text = str(result.get("text", "")).strip()
             if not text:

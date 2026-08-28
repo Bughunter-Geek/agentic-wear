@@ -62,7 +62,7 @@ class AgenticWearRepository(private val context: Context) {
                 BridgePayload.CreateTranscription(
                     requestId = requestId,
                     audioBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
-                    mimeType = "audio/mp4",
+                    mimeType = "audio/aac",
                     threadId = threadId,
                 ),
             )

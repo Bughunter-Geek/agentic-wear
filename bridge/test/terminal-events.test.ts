@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isTopLevelUserThread, parseTerminalNotification } from "../src/app-server-client.js";
+import {
+  isTerminalNewerThan,
+  isTopLevelUserThread,
+  parseTerminalNotification,
+} from "../src/app-server-client.js";
 import type { CodexThread } from "../src/schemas.js";
 
 const completed = {
@@ -45,5 +49,12 @@ describe("terminal event classification", () => {
     expect(isTopLevelUserThread(root)).toBe(true);
     expect(isTopLevelUserThread({ ...root, id: "nested-thread", parentThreadId: root.id })).toBe(false);
     expect(isTopLevelUserThread({ ...root, id: "agent-thread", agentRole: "worker" })).toBe(false);
+  });
+
+  it("does not replay an old interrupted turn after an unrelated idle-thread update", () => {
+    const observedAtMs = 1_787_876_500_000;
+    expect(isTerminalNewerThan(1_787_876_400, observedAtMs)).toBe(false);
+    expect(isTerminalNewerThan(null, observedAtMs)).toBe(false);
+    expect(isTerminalNewerThan(1_787_876_600, observedAtMs)).toBe(true);
   });
 });

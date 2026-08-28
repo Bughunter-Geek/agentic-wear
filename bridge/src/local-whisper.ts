@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import type { Transcriber } from "./transcriber.js";
+import type { AudioMimeType, Transcriber } from "./transcriber.js";
 
 const defaultModel = "mlx-community/whisper-turbo";
 const installDirectory = join(homedir(), ".agentic-wear", "transcription");
@@ -34,8 +34,8 @@ export class LocalWhisperTranscriber implements Transcriber {
     await this.ensureWorker();
   }
 
-  async transcribe(audio: Uint8Array, mimeType: "audio/mp4"): Promise<string> {
-    if (mimeType !== "audio/mp4" || audio.byteLength < 1_024 || audio.byteLength > 512 * 1_024) {
+  async transcribe(audio: Uint8Array, mimeType: AudioMimeType): Promise<string> {
+    if (!isSupportedAudioMimeType(mimeType) || audio.byteLength < 1_024 || audio.byteLength > 512 * 1_024) {
       throw new Error("Voice recordings must be between 1 KiB and 512 KiB");
     }
     const worker = await this.ensureWorker();
@@ -46,7 +46,7 @@ export class LocalWhisperTranscriber implements Transcriber {
         rejectRequest(new Error("Local Whisper took too long to respond"));
       }, requestTimeoutMs);
       this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timeout });
-      worker.stdin.write(`${JSON.stringify({ id, audioBase64: Buffer.from(audio).toString("base64") })}\n`, (error) => {
+      worker.stdin.write(`${JSON.stringify({ id, audioBase64: Buffer.from(audio).toString("base64"), mimeType })}\n`, (error) => {
         if (!error) return;
         const pending = this.pending.get(id);
         if (!pending) return;
@@ -133,6 +133,10 @@ export class LocalWhisperTranscriber implements Transcriber {
     }
     this.pending.clear();
   }
+}
+
+export function isSupportedAudioMimeType(value: string): value is AudioMimeType {
+  return value === "audio/mp4" || value === "audio/aac";
 }
 
 export function localWhisperModel(): string {
