@@ -1,6 +1,11 @@
 package io.github.sirbughunter.agenticwear.data
 
 import io.github.sirbughunter.agenticwear.model.ModelOption
+import io.github.sirbughunter.agenticwear.model.ChatDisplayPolicy
+import io.github.sirbughunter.agenticwear.model.ChatMessage
+import io.github.sirbughunter.agenticwear.model.ChatMessageKind
+import io.github.sirbughunter.agenticwear.model.ChatPhase
+import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -35,7 +40,8 @@ class PayloadCodecPolicyTest {
     fun `reasoning effort values normalize to safe labels`() {
         assertEquals("xhigh", ReasoningEffortPolicy.normalize(" XHIGH "))
         assertEquals("medium", ReasoningEffortPolicy.normalize("not supported"))
-        assertEquals("Extra high", ReasoningEffortPolicy.label("xhigh"))
+        assertEquals("Extra High", ReasoningEffortPolicy.label("xhigh"))
+        assertEquals("Ultra", ReasoningEffortPolicy.label("ultra"))
     }
 
     @Test
@@ -46,5 +52,40 @@ class PayloadCodecPolicyTest {
             ReasoningEffortPolicy.options(model),
         )
         assertEquals(listOf("low", "medium", "high", "xhigh"), ReasoningEffortPolicy.FALLBACK_OPTIONS)
+    }
+
+    @Test
+    fun `changing model always selects that model's advertised default effort`() {
+        val model = ModelOption(
+            "gpt-5.6-sol",
+            "GPT-5.6-Sol",
+            "gpt-5.6-sol",
+            "high",
+            listOf("low", "high", "max"),
+        )
+
+        assertEquals("high", ReasoningEffortPolicy.defaultFor(model))
+        assertEquals("medium", ReasoningEffortPolicy.defaultFor(null))
+        assertEquals(
+            "low",
+            ReasoningEffortPolicy.defaultFor(model.copy(defaultReasoningEffort = "unsupported value")),
+        )
+    }
+
+    @Test
+    fun `only ordinary assistant updates auto-collapse`() {
+        val update = ChatMessage(
+            id = "message-1",
+            turnId = "turn-1",
+            role = ChatRole.ASSISTANT,
+            text = "Working",
+            phase = ChatPhase.COMMENTARY,
+        )
+
+        assertTrue(ChatDisplayPolicy.startsCollapsed(update, collapseUpdates = true))
+        assertFalse(ChatDisplayPolicy.startsCollapsed(update, collapseUpdates = false))
+        assertFalse(ChatDisplayPolicy.startsCollapsed(update.copy(phase = ChatPhase.FINAL_ANSWER), true))
+        assertFalse(ChatDisplayPolicy.startsCollapsed(update.copy(role = ChatRole.USER), true))
+        assertFalse(ChatDisplayPolicy.startsCollapsed(update.copy(kind = ChatMessageKind.PERMISSION), true))
     }
 }

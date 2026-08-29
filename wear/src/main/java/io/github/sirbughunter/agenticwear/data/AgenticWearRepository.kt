@@ -5,6 +5,7 @@ import android.content.Intent
 import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
+import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import java.io.File
@@ -162,13 +163,71 @@ class AgenticWearRepository(private val context: Context) {
     }
 
     suspend fun respondToApproval(approvalId: String, approve: Boolean) {
-        send(
-            BridgePayload.ApprovalResponse(
-                requestId = UUID.randomUUID().toString(),
-                approvalId = approvalId,
-                decision = if (approve) "accept" else "decline",
-            ),
-        )
+        val requestId = UUID.randomUUID().toString()
+        preferences.pending = true
+        preferences.pendingApprovalRequestId = requestId
+        preferences.lastError = null
+        try {
+            send(
+                BridgePayload.ApprovalResponse(
+                    requestId = requestId,
+                    approvalId = approvalId,
+                    decision = if (approve) "accept" else "decline",
+                ),
+            )
+            for (waitMillis in APPROVAL_REPLY_DELAYS_MS) {
+                delay(waitMillis)
+                refreshInboxBatch(notify = true)
+                if (preferences.pendingApprovalRequestId != requestId) break
+            }
+            if (preferences.pendingApprovalRequestId == requestId) {
+                preferences.pendingApprovalRequestId = null
+                preferences.pending = false
+                error("Codex did not acknowledge the permission decision. Keep the private bridge running, then retry.")
+            }
+            preferences.lastError?.let(::error)
+        } catch (error: Throwable) {
+            if (preferences.pendingApprovalRequestId == requestId) {
+                preferences.pendingApprovalRequestId = null
+            }
+            preferences.pending = false
+            if (preferences.lastError == null) preferences.lastError = error.message
+            throw error
+        } finally {
+            broadcastStateChanged()
+        }
+    }
+
+    suspend fun submitFeedback(
+        threadId: String,
+        turnId: String,
+        itemId: String,
+        rating: FeedbackRating,
+    ) {
+        val requestId = UUID.randomUUID().toString()
+        preferences.pendingFeedbackRequestId = requestId
+        preferences.lastError = null
+        try {
+            send(BridgePayload.SubmitFeedback(requestId, threadId, turnId, itemId, rating))
+            for (waitMillis in FEEDBACK_REPLY_DELAYS_MS) {
+                delay(waitMillis)
+                refreshInboxBatch(notify = true)
+                if (preferences.pendingFeedbackRequestId != requestId) break
+            }
+            if (preferences.pendingFeedbackRequestId == requestId) {
+                preferences.pendingFeedbackRequestId = null
+                error("Codex did not acknowledge the feedback. Keep the private bridge running, then retry.")
+            }
+            preferences.lastError?.let(::error)
+        } catch (error: Throwable) {
+            if (preferences.pendingFeedbackRequestId == requestId) {
+                preferences.pendingFeedbackRequestId = null
+            }
+            if (preferences.lastError == null) preferences.lastError = error.message
+            throw error
+        } finally {
+            broadcastStateChanged()
+        }
     }
 
     suspend fun refreshInbox(notify: Boolean = true): Int {
@@ -222,7 +281,10 @@ class AgenticWearRepository(private val context: Context) {
         preferences.transcript = null
         preferences.revisionBase = null
         preferences.chatSnapshot = null
+        preferences.chatFeedback = emptyMap()
         preferences.pendingTurnRequestId = null
+        preferences.pendingFeedbackRequestId = null
+        preferences.pendingApprovalRequestId = null
         preferences.lastAcceptedThreadId = null
         preferences.pending = false
         preferences.lastError = null
@@ -286,6 +348,9 @@ class AgenticWearRepository(private val context: Context) {
                 if (errorKind == "turn.error" && requestId == preferences.pendingTurnRequestId) {
                     preferences.pendingTurnRequestId = null
                 }
+                if (errorKind == "approval.error" && requestId == preferences.pendingApprovalRequestId) {
+                    preferences.pendingApprovalRequestId = null
+                }
                 val selectedSession = preferences.sessions.firstOrNull { it.id == preferences.selectedThreadId }
                     ?: preferences.sessions.firstOrNull()
                 val alert = PayloadCodec.decodeRequestError(
@@ -318,8 +383,47 @@ class AgenticWearRepository(private val context: Context) {
                 }
             }
             "approval.accepted" -> {
-                preferences.pending = false
-                preferences.lastError = null
+                if (payload.optString("requestId") == preferences.pendingApprovalRequestId) {
+                    preferences.pendingApprovalRequestId = null
+                    preferences.pending = false
+                    preferences.lastError = null
+                    val approvalId = payload.optString("approvalId")
+                    preferences.chatSnapshot?.let { snapshot ->
+                        preferences.chatSnapshot = snapshot.copy(
+                            messages = snapshot.messages.map { message ->
+                                if (message.approvalId == approvalId) {
+                                    message.copy(canControl = false, resolved = true)
+                                } else {
+                                    message
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+            "feedback.accepted" -> {
+                if (payload.optString("requestId") == preferences.pendingFeedbackRequestId) {
+                    preferences.pendingFeedbackRequestId = null
+                    val itemId = payload.optString("itemId")
+                    val rating = when (payload.optString("rating")) {
+                        "liked" -> FeedbackRating.LIKED
+                        "disliked" -> FeedbackRating.DISLIKED
+                        else -> null
+                    }
+                    if (itemId.isNotBlank() && rating != null) {
+                        val updated = LinkedHashMap(preferences.chatFeedback)
+                        updated.remove(itemId)
+                        updated[itemId] = rating
+                        preferences.chatFeedback = updated
+                    }
+                    preferences.lastError = null
+                }
+            }
+            "feedback.error" -> {
+                if (payload.optString("requestId") == preferences.pendingFeedbackRequestId) {
+                    preferences.pendingFeedbackRequestId = null
+                    preferences.lastError = payload.optString("message", "Could not send feedback").take(180)
+                }
             }
         }
     }
@@ -334,6 +438,8 @@ class AgenticWearRepository(private val context: Context) {
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
         private val TURN_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 600, 900, 1_200, 1_600, 2_000, 2_500, 3_000, 2_500)
         private val CHAT_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500)
+        private val FEEDBACK_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 3_000)
+        private val APPROVAL_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 3_000)
         private val inboxRefreshMutex = Mutex()
     }
 }

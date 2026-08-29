@@ -4,6 +4,8 @@ import { AppServerClient } from "../src/app-server-client.js";
 type ClientInternals = {
   request: (method: string, params: unknown) => Promise<unknown>;
   handleNotification: (method: string, params: unknown) => Promise<void>;
+  handleServerRequest: (id: string | number, method: string, params: unknown) => Promise<void>;
+  write: (message: Record<string, unknown>) => void;
   emitRecentTerminals: (
     session: {
       id: string;
@@ -127,28 +129,146 @@ describe("AppServerClient session delivery", () => {
     }]);
   });
 
-  it("queues input for a session owned by another Codex client without competing for its writer", async () => {
+  it("rejoins and starts an idle session owned by another Codex client", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
     internals.request = vi.fn((method: string, params: unknown) => {
       requests.push({ method, params: params as Record<string, unknown> });
-      if (method === "thread/queue/add") return Promise.resolve({ queuedSubmission: { id: "queued-1" } });
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
-    await expect(target.submitTurn("thread-1", "Please continue.", "/tmp")).resolves.toEqual({
+    await expect(target.submitTurn("thread-1", "Please continue.", "/tmp", "gpt-5.6-sol", "high")).resolves.toEqual({
       threadId: "thread-1",
       created: false,
     });
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.method).toBe("thread/queue/add");
-    expect(requests[0]?.params).toMatchObject({
+    expect(requests).toHaveLength(3);
+    expect(requests[0]).toEqual({
+      method: "thread/resume",
+      params: { threadId: "thread-1", excludeTurns: true },
+    });
+    expect(requests[1]).toEqual({
+      method: "thread/settings/update",
+      params: {
+        threadId: "thread-1",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    });
+    expect(requests[2]?.method).toBe("turn/start");
+    expect(requests[2]?.params).toMatchObject({
       threadId: "thread-1",
       input: [{ type: "text", text: "Please continue." }],
+      model: "gpt-5.6-sol",
+      effort: "high",
     });
-    expect(requests[0]?.params.clientUserMessageId).toEqual(expect.any(String));
+  });
+
+  it("does not start a foreign-thread prompt when its sticky settings update fails", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.reject(new Error("settings denied"));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Do not send this.", "/tmp", "gpt-5.6-sol", "max"))
+      .rejects.toThrow("settings denied");
+    expect(internals.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not interrupt an active session owned by another Codex client", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("active") });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Wait for the next turn.", "/tmp", "gpt-5.6-sol", "high"))
+      .rejects.toThrow("session is busy");
+    expect(internals.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the owning client's model when Auto is selected", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      requests.push({ method, params: params as Record<string, unknown> });
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Use Auto.", "/tmp", null, "medium"))
+      .resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(requests[1]?.params).toEqual({ threadId: "thread-1", effort: "medium" });
+    expect(requests[2]?.params).not.toHaveProperty("model");
+  });
+
+  it("preserves user and assistant roles plus Markdown in chat snapshots", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-1",
+            items: [
+              {
+                id: "user-1",
+                type: "userMessage",
+                content: [{ type: "text", text: "Please keep **this** formatting.\n\n- One\n- Two" }],
+              },
+              {
+                id: "assistant-1",
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "## Done\n\nUsed `code` and **bold**.",
+              },
+            ],
+          }],
+          nextCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    const snapshot = await target.chatSnapshot("thread-1");
+
+    expect(snapshot.messages).toEqual([
+      {
+        id: "user-1",
+        turnId: "turn-1",
+        role: "user",
+        kind: "message",
+        text: "Please keep **this** formatting.\n\n- One\n- Two",
+        phase: "unknown",
+        approvalId: null,
+        canControl: false,
+        resolved: false,
+      },
+      {
+        id: "assistant-1",
+        turnId: "turn-1",
+        role: "assistant",
+        kind: "message",
+        text: "## Done\n\nUsed `code` and **bold**.",
+        phase: "final_answer",
+        approvalId: null,
+        canControl: false,
+        resolved: false,
+      },
+    ]);
   });
 
   it("returns only the newest five assistant paragraphs in chronological order", async () => {
@@ -217,6 +337,129 @@ describe("AppServerClient session delivery", () => {
     expect(snapshot.paragraphs.at(-1)?.text).toBe("Working safely");
     expect(outputThreads).toEqual(["thread-1"]);
     expect(methods).toEqual(["thread/read", "thread/turns/list"]);
+  });
+
+  it("uploads explicit thumbs feedback without logs and tags the exact response", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string, params: unknown) => {
+      expect(method).toBe("feedback/upload");
+      expect(params).toEqual({
+        classification: "bad_result",
+        threadId: "thread-1",
+        includeLogs: false,
+        tags: {
+          turn_id: "turn-1",
+          item_id: "assistant-1",
+          source: "agentic-wear",
+        },
+      });
+      return Promise.resolve({ threadId: "feedback-1" });
+    });
+
+    await expect(target.submitFeedback("thread-1", "turn-1", "assistant-1", "disliked"))
+      .resolves.toBeUndefined();
+  });
+
+  it("grants the exact requested permission profile for only the current turn", async () => {
+    const approvals: Array<{ approvalId: string; canControl: boolean }> = [];
+    const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async (event) => {
+      approvals.push({ approvalId: event.approvalId, canControl: event.canControl });
+    });
+    const internals = target as unknown as ClientInternals;
+    const writes: Array<Record<string, unknown>> = [];
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active") });
+      if (method === "thread/turns/list") return Promise.resolve({ data: [], nextCursor: null });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    internals.write = vi.fn((message: Record<string, unknown>) => writes.push(message));
+    const permissions = {
+      network: { enabled: true },
+      fileSystem: {
+        read: ["/tmp/readable"],
+        write: ["/tmp/writable"],
+        entries: [{ path: { type: "special", value: { kind: "tmpdir" } }, access: "write" }],
+      },
+    };
+
+    await target.chatSnapshot("thread-1");
+    await internals.handleServerRequest(41, "item/permissions/requestApproval", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "permission-1",
+      environmentId: null,
+      startedAtMs: 1_787_900_000_000,
+      cwd: "/tmp",
+      reason: "Allow this turn to write its test artifact?",
+      permissions,
+    });
+    const permissionSnapshot = await target.chatSnapshot("thread-1");
+    target.respondToApproval("permission-1", "accept");
+
+    expect(approvals).toEqual([{ approvalId: "permission-1", canControl: true }]);
+    expect(permissionSnapshot.messages).toEqual([expect.objectContaining({
+      id: "permission-1",
+      turnId: "turn-1",
+      role: "assistant",
+      kind: "permission",
+      text: "Allow this turn to write its test artifact?",
+      approvalId: "permission-1",
+      canControl: true,
+      resolved: false,
+    })]);
+    expect(writes).toEqual([{ id: 41, result: { permissions, scope: "turn" } }]);
+  });
+
+  it("declines permission requests with an empty one-turn grant", async () => {
+    const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
+    const internals = target as unknown as ClientInternals;
+    const writes: Array<Record<string, unknown>> = [];
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active") });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    internals.write = vi.fn((message: Record<string, unknown>) => writes.push(message));
+
+    await internals.handleServerRequest(42, "item/permissions/requestApproval", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "permission-2",
+      environmentId: null,
+      startedAtMs: 1_787_900_000_000,
+      cwd: "/tmp",
+      reason: null,
+      permissions: { network: { enabled: true }, fileSystem: null },
+    });
+    target.respondToApproval("permission-2", "decline");
+
+    expect(writes).toEqual([{ id: 42, result: { permissions: {}, scope: "turn" } }]);
+  });
+
+  it("keeps permission requests from another client's thread alert-only", async () => {
+    const approvals: Array<{ approvalId: string; canControl: boolean }> = [];
+    const target = new AppServerClient(new Set(), async () => {}, async (event) => {
+      approvals.push({ approvalId: event.approvalId, canControl: event.canControl });
+    });
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active") });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await internals.handleServerRequest(43, "item/permissions/requestApproval", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "permission-3",
+      environmentId: null,
+      startedAtMs: 1_787_900_000_000,
+      cwd: "/tmp",
+      reason: "Allow access?",
+      permissions: { network: { enabled: true }, fileSystem: null },
+    });
+
+    expect(approvals).toEqual([{ approvalId: "permission-3", canControl: false }]);
+    expect(() => target.respondToApproval("permission-3", "accept")).toThrow("no longer active");
   });
 
   it("finds a completed response hidden beneath a newer interrupted turn", async () => {

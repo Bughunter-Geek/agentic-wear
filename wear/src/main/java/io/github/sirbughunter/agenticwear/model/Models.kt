@@ -45,11 +45,19 @@ object ReasoningEffortPolicy {
         return if (advertised.isEmpty()) FALLBACK_OPTIONS else advertised
     }
 
+    fun defaultFor(model: ModelOption?): String {
+        val options = options(model)
+        val advertised = model?.defaultReasoningEffort?.let(::normalize)
+        return advertised?.takeIf(options::contains)
+            ?: DEFAULT.takeIf(options::contains)
+            ?: options.first()
+    }
+
     fun label(value: String): String = when (normalize(value)) {
         "low" -> "Low"
         "medium" -> "Medium"
         "high" -> "High"
-        "xhigh" -> "Extra high"
+        "xhigh" -> "Extra High"
         "max" -> "Max"
         "ultra" -> "Ultra"
         else -> normalize(value)
@@ -94,11 +102,37 @@ data class Transcript(
 
 enum class ChatPhase { COMMENTARY, FINAL_ANSWER, UNKNOWN }
 
+enum class ChatRole { USER, ASSISTANT }
+
+enum class ChatMessageKind { MESSAGE, PERMISSION }
+
+enum class FeedbackRating { LIKED, DISLIKED }
+
 data class ChatParagraph(
     val id: String,
     val text: String,
     val phase: ChatPhase,
 )
+
+data class ChatMessage(
+    val id: String,
+    val turnId: String,
+    val role: ChatRole,
+    val text: String,
+    val phase: ChatPhase,
+    val kind: ChatMessageKind = ChatMessageKind.MESSAGE,
+    val approvalId: String? = null,
+    val canControl: Boolean = false,
+    val resolved: Boolean = false,
+)
+
+object ChatDisplayPolicy {
+    fun startsCollapsed(message: ChatMessage, collapseUpdates: Boolean): Boolean =
+        collapseUpdates &&
+            message.kind == ChatMessageKind.MESSAGE &&
+            message.role == ChatRole.ASSISTANT &&
+            message.phase == ChatPhase.COMMENTARY
+}
 
 data class ChatSnapshot(
     val threadId: String,
@@ -107,6 +141,15 @@ data class ChatSnapshot(
     val paragraphs: List<ChatParagraph>,
     val generatedAtMillis: Long,
     val requestId: String? = null,
+    val messages: List<ChatMessage> = paragraphs.map { paragraph ->
+        ChatMessage(
+            id = paragraph.id,
+            turnId = paragraph.id,
+            role = ChatRole.ASSISTANT,
+            text = paragraph.text,
+            phase = paragraph.phase,
+        )
+    },
 )
 
 sealed interface BridgePayload {
@@ -131,6 +174,13 @@ sealed interface BridgePayload {
         override val requestId: String,
         val approvalId: String,
         val decision: String,
+    ) : BridgePayload
+    data class SubmitFeedback(
+        override val requestId: String,
+        val threadId: String,
+        val turnId: String,
+        val itemId: String,
+        val rating: FeedbackRating,
     ) : BridgePayload
     data class WatchChat(
         override val requestId: String,

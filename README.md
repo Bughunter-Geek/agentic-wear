@@ -11,13 +11,14 @@ It is not affiliated with or endorsed by OpenAI. “Codex” is used only to des
 - Free multilingual Whisper on the private Mac bridge by default; hosted GPT Transcribe and Wear OS device speech are optional fallbacks.
 - Warmed Local Whisper inference and active foreground transcript retrieval for lower first-request and delivery latency.
 - Recent Codex session picker with exact session titles and state.
-- A crown-scrollable live-session view containing only the latest five assistant paragraphs and newly streamed output.
+- A crown-scrollable, role-aware live-session view with recent watch/user messages, streamed Codex output, structured Markdown, and smoothly collapsible intermediate updates.
+- Accessible like/dislike controls that submit Codex feedback for the exact response without attaching local logs.
 - Acknowledged prompt delivery into new or selected Codex sessions, plus steering when the active Codex turn explicitly allows it.
 - Smart voice revisions that replace conflicting older requirements while preserving unrelated parts of the unsent draft.
 - Exactly one continuous one-second vibration per completion, permission, or error alert.
 - Visually distinct mint, amber, and red alert states.
 - Exact completion time and session name in every alert.
-- Alert-only approvals for existing sessions; accept/decline controls only for sessions created by the watch.
+- Alert-only approvals for existing sessions; distinct in-chat permission cards plus exact accept/decline and one-turn permission controls only for sessions created by the watch.
 - End-to-end encrypted watch↔bridge payloads through a small Cloudflare Durable Object relay.
 - Endpoint-authenticated pairing: the relay never receives the human-readable pairing code and cannot silently replace either endpoint key.
 - A background macOS bridge that reconnects automatically with `launchd`.
@@ -39,6 +40,8 @@ Every watch is authenticated to one private bridge. Local transcription uses tha
 Smart revision is deliberately separate from transcription. Whisper still runs locally without per-minute billing; when the user chooses **Revise** and dictates a correction, the private bridge submits the old draft and correction as one low-effort, ephemeral Codex editing turn. That action uses the bridge owner's Codex allowance. The original draft is restored if reconciliation fails.
 
 The bridge connects to the managed Codex App Server over its local Unix WebSocket. This lets it observe sessions run through that same managed daemon, including Codex remote-control sessions from an iPhone. It is not a direct iPhone-to-watch connection, and it cannot observe unrelated ChatGPT conversations or a different Codex host. Agentic Wear uses experimental App Server surfaces that are available in Codex CLI 0.147.0; later Codex updates may require a bridge compatibility update.
+
+For an idle session owned by another Codex client, the bridge rejoins the shared daemon thread, updates its sticky model and reasoning effort, waits for acknowledgement, and starts the watch turn on that same live thread. Connected clients therefore receive the normal turn notifications; if the session is busy or settings cannot be applied, the prompt is not sent. Pressing a live-chat thumb sends a `good_result` or `bad_result` report through Codex App Server with the thread, turn, and response IDs; Agentic Wear explicitly disables log attachment.
 
 See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Roadmap](ROADMAP.md), [Privacy](PRIVACY.md), and [Security](SECURITY.md) before running a public deployment.
 

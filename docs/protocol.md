@@ -50,6 +50,7 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 | `transcription.create` | Send one bounded AAC/M4A recording of up to four minutes, plus an optional bounded previous draft for an explicit semantic revision. |
 | `turn.submit` | Send up to 12,000 characters of reviewed text to a new or selected session, with an optional bridge-advertised model and reasoning effort. |
 | `approval.respond` | Accept or decline a controllable watch-owned approval. |
+| `feedback.submit` | Like or dislike one exact Codex response; includes thread, turn, and item IDs but no log files. |
 | `chat.watch` / `.unwatch` | Start or stop a 90-second renewable live-view subscription for one selected session. |
 
 ## Bridge to watch
@@ -59,9 +60,10 @@ The bridge rejects envelopes older than 24 hours or more than five minutes in th
 | `sessions.snapshot` | Recent session title, time, status, ownership, and the current bridge model catalog. |
 | `transcription.ready` / `.error` | Return transcript or safe failure. |
 | `turn.accepted` / `.error` | Confirm prompt handoff or failure. |
-| `chat.snapshot` / `.error` | Return at most five assistant paragraphs or an actionable live-view failure. |
+| `chat.snapshot` / `.error` | Return a bounded role-aware message history with Markdown preserved, or an actionable live-view failure. |
 | `approval.request` | Alert with optional watch-owned controls. |
 | `approval.accepted` / `.error` | Confirm approval response or failure. |
+| `feedback.accepted` / `.error` | Confirm that Codex accepted the response feedback, or return a safe failure. |
 | `terminal.completed` | Top-level user turn completed successfully; requires `turnScope: "topLevel"`. |
 | `terminal.failed` / `.interrupted` | Final unsuccessful top-level turn states; requires the same scope. |
 
@@ -70,9 +72,15 @@ alert is deduplicated by its authenticated envelope or terminal event ID.
 
 Message IDs and terminal event IDs are idempotency keys. The watch acknowledges inbox envelopes only after successful decryption and handling.
 
-Chat snapshots contain assistant text only. Reasoning, tool output, and command/file payloads never enter the watch chat cache. The bridge retrieves full history one turn at a time, retains a bounded local assistant-message cache, then sends only the latest five cleaned paragraphs. Agent-message deltas update that cache while the renewable watch subscription is active.
+Chat snapshots contain at most twelve recent user and assistant messages with their roles, turn IDs, message IDs, phase, and original Markdown line breaks. Active approval requests may appear as a typed `permission` message with a bounded reason, approval ID, control eligibility, and resolved state. Reasoning, tool output, command/file output, and hidden instructions never enter the watch chat cache. The bridge retrieves full history one turn at a time and updates its bounded assistant-message cache from deltas while the renewable watch subscription is active. A temporary five-paragraph assistant-only field remains in the payload for pre-0.4.7 watch compatibility.
 
-`turn.accepted` is a transaction acknowledgement: the watch retains the editable draft until the matching request ID is accepted. An active session uses `turn/steer` only when Codex reports direct-input support and the bridge knows the exact active turn ID. Codex 0.147 exposes no supported queue request, so busy non-steerable sessions fail with a retryable explanation instead of silently dropping or misrouting text.
+The watch labels commentary-phase assistant messages as `UPDATE`. They are collapsed by default, expand with an animated tap transition, and can be left expanded globally through the persisted Settings preference. Final answers are always fully rendered. Permission messages use their own `PERMISSION` label and never inherit update styling.
+
+Feedback is an explicit user action. The bridge maps thumbs-up/down to Codex App Server's `good_result`/`bad_result` classifications, tags the exact turn and item, and sets `includeLogs: false`.
+
+`turn.accepted` is a transaction acknowledgement: the watch retains the editable draft until the matching request ID is accepted. An active watch-owned session uses `turn/steer` only when Codex reports direct-input support and the bridge knows the exact active turn ID. For an idle session owned by another Codex client, the bridge rejoins the shared daemon thread, waits for `thread/settings/update` to apply the selected model and effort, then calls `turn/start` on that same thread. A settings failure prevents sending. A busy cross-client session returns a retryable error rather than being interrupted. The generated 0.147 schema advertises `thread/queue/add`, but the shipping 0.147 runtime rejects that method, so Agentic Wear does not depend on it.
+
+Command, file-change, and permission-profile approvals remain controllable only for watch-owned sessions. Permission acceptance returns the exact requested profile with `scope: "turn"`; decline returns an empty one-turn grant. Existing sessions owned by another client stay alert-only.
 
 The watch caps compressed recording files below 1.3 MB. The encrypted transport independently caps audio, ciphertext, WebSocket messages, and HTTP request bodies at each hop. Watch-to-bridge audio remains live-only and is never stored in the relay inbox.
 

@@ -7,10 +7,12 @@ import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
+import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
+import org.json.JSONArray
 import org.json.JSONObject
 
 class AppPreferences(context: Context) {
@@ -31,6 +33,10 @@ class AppPreferences(context: Context) {
     var approvalMode: ApprovalMode
         get() = enumValue(prefs.getString(KEY_APPROVAL_MODE, null), ApprovalMode.ALERT_ONLY)
         set(value) = prefs.edit { putString(KEY_APPROVAL_MODE, value.name) }
+
+    var collapseUpdates: Boolean
+        get() = prefs.getBoolean(KEY_COLLAPSE_UPDATES, true)
+        set(value) = prefs.edit { putBoolean(KEY_COLLAPSE_UPDATES, value) }
 
     /** Null means use the model selected by Codex on the bridge. */
     var selectedModel: String?
@@ -81,9 +87,40 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_CHAT_SNAPSHOT, null)?.let(PayloadCodec::chatSnapshotFromJson)
         set(value) = prefs.edit { putString(KEY_CHAT_SNAPSHOT, value?.let(PayloadCodec::chatSnapshotToJson)) }
 
+    var chatFeedback: Map<String, FeedbackRating>
+        get() = runCatching {
+            val data = JSONArray(prefs.getString(KEY_CHAT_FEEDBACK, "[]").orEmpty())
+            buildMap {
+                for (index in 0 until minOf(data.length(), MAX_CHAT_FEEDBACK)) {
+                    val item = data.optJSONObject(index) ?: continue
+                    val itemId = item.optString("itemId").takeIf(::isSafeModel) ?: continue
+                    val rating = runCatching { FeedbackRating.valueOf(item.optString("rating")) }.getOrNull()
+                        ?: continue
+                    put(itemId, rating)
+                }
+            }
+        }.getOrDefault(emptyMap())
+        set(value) = prefs.edit {
+            val data = JSONArray()
+            value.entries.toList().takeLast(MAX_CHAT_FEEDBACK).forEach { (itemId, rating) ->
+                if (isSafeModel(itemId)) {
+                    data.put(JSONObject().put("itemId", itemId).put("rating", rating.name))
+                }
+            }
+            putString(KEY_CHAT_FEEDBACK, data.toString())
+        }
+
     var pendingTurnRequestId: String?
         get() = prefs.getString(KEY_PENDING_TURN_REQUEST, null)
         set(value) = prefs.edit { putString(KEY_PENDING_TURN_REQUEST, value) }
+
+    var pendingFeedbackRequestId: String?
+        get() = prefs.getString(KEY_PENDING_FEEDBACK_REQUEST, null)
+        set(value) = prefs.edit { putString(KEY_PENDING_FEEDBACK_REQUEST, value) }
+
+    var pendingApprovalRequestId: String?
+        get() = prefs.getString(KEY_PENDING_APPROVAL_REQUEST, null)
+        set(value) = prefs.edit { putString(KEY_PENDING_APPROVAL_REQUEST, value) }
 
     var lastAcceptedThreadId: String?
         get() = prefs.getString(KEY_LAST_ACCEPTED_THREAD, null)
@@ -134,6 +171,7 @@ class AppPreferences(context: Context) {
         private const val KEY_SELECTED_THREAD = "selected_thread"
         private const val KEY_ENGINE = "transcription_engine"
         private const val KEY_APPROVAL_MODE = "approval_mode"
+        private const val KEY_COLLAPSE_UPDATES = "collapse_updates"
         private const val KEY_MODEL = "model"
         private const val KEY_REASONING_EFFORT = "reasoning_effort"
         private const val KEY_SESSIONS = "sessions"
@@ -143,11 +181,15 @@ class AppPreferences(context: Context) {
         private const val KEY_TRANSCRIPT = "transcript"
         private const val KEY_REVISION_BASE = "revision_base"
         private const val KEY_CHAT_SNAPSHOT = "chat_snapshot"
+        private const val KEY_CHAT_FEEDBACK = "chat_feedback"
         private const val KEY_PENDING_TURN_REQUEST = "pending_turn_request"
+        private const val KEY_PENDING_FEEDBACK_REQUEST = "pending_feedback_request"
+        private const val KEY_PENDING_APPROVAL_REQUEST = "pending_approval_request"
         private const val KEY_LAST_ACCEPTED_THREAD = "last_accepted_thread"
         private const val KEY_PENDING = "pending"
         private const val KEY_LAST_ERROR = "last_error"
         private const val KEY_HANDLED_IDS = "handled_ids"
+        private const val MAX_CHAT_FEEDBACK = 100
     }
 }
 

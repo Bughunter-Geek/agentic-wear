@@ -17,6 +17,9 @@ import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
+import io.github.sirbughunter.agenticwear.model.ChatMessage
+import io.github.sirbughunter.agenticwear.model.ChatRole
+import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
@@ -54,6 +57,8 @@ data class WearUiState(
     val latestAlert: AgentAlert? = null,
     val transcript: Transcript? = null,
     val chat: ChatSnapshot? = null,
+    val chatFeedback: Map<String, FeedbackRating> = emptyMap(),
+    val feedbackPendingMessageId: String? = null,
     val pending: Boolean = false,
     val recording: Boolean = false,
     val transcribing: Boolean = false,
@@ -62,6 +67,7 @@ data class WearUiState(
     val error: String? = null,
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
+    val collapseUpdates: Boolean = true,
     val selectedModel: String? = null,
     val reasoningEffort: String = ReasoningEffortPolicy.DEFAULT,
     val relayUrl: String = "",
@@ -157,30 +163,22 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setApprovalMode(mode: ApprovalMode) {
         preferences.approvalMode = mode
-        reload()
+        _state.update { current -> current.copy(approvalMode = mode) }
+    }
+
+    fun setCollapseUpdates(enabled: Boolean) {
+        preferences.collapseUpdates = enabled
+        _state.update { current -> current.copy(collapseUpdates = enabled) }
     }
 
     fun setModel(model: String?) {
         val selected = model?.trim()?.takeIf { it.isNotEmpty() }
-        preferences.selectedModel = selected
         val modelOption = _state.value.models.firstOrNull { it.model == selected }
-        val availableEfforts = ReasoningEffortPolicy.options(modelOption)
-        if (_state.value.reasoningEffort !in availableEfforts) {
-            preferences.reasoningEffort = modelOption?.defaultReasoningEffort ?: ReasoningEffortPolicy.DEFAULT
-        }
-        if (_state.value.demo) {
-            _state.update { current ->
-                current.copy(
-                    selectedModel = selected,
-                    reasoningEffort = if (current.reasoningEffort in availableEfforts) {
-                        current.reasoningEffort
-                    } else {
-                        modelOption?.defaultReasoningEffort ?: ReasoningEffortPolicy.DEFAULT
-                    },
-                )
-            }
-        } else {
-            reload()
+        val defaultEffort = ReasoningEffortPolicy.defaultFor(modelOption)
+        preferences.selectedModel = selected
+        preferences.reasoningEffort = defaultEffort
+        _state.update { current ->
+            current.copy(selectedModel = selected, reasoningEffort = defaultEffort)
         }
     }
 
@@ -189,7 +187,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val normalized = ReasoningEffortPolicy.normalize(effort)
         if (normalized in ReasoningEffortPolicy.options(modelOption)) {
             preferences.reasoningEffort = normalized
-            if (_state.value.demo) _state.update { current -> current.copy(reasoningEffort = normalized) } else reload()
+            _state.update { current -> current.copy(reasoningEffort = normalized) }
         }
     }
 
@@ -340,6 +338,44 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun respondToChatPermission(message: ChatMessage, approve: Boolean) {
+        val approvalId = message.approvalId ?: return
+        if (message.resolved || !message.canControl) return
+        launchTask {
+            repository.respondToApproval(approvalId, approve)
+            reload(WearScreen.CHAT)
+        }
+    }
+
+    fun rateChatMessage(message: ChatMessage, rating: FeedbackRating) {
+        val current = _state.value
+        val chat = current.chat ?: return
+        if (message.role != ChatRole.ASSISTANT ||
+            current.feedbackPendingMessageId != null ||
+            current.chatFeedback[message.id] == rating
+        ) return
+        _state.update { state -> state.copy(feedbackPendingMessageId = message.id, error = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                repository.submitFeedback(chat.threadId, message.turnId, message.id, rating)
+            }.onSuccess {
+                _state.update { state ->
+                    state.copy(
+                        chatFeedback = preferences.chatFeedback,
+                        feedbackPendingMessageId = null,
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { state ->
+                    state.copy(
+                        feedbackPendingMessageId = null,
+                        error = (error.message ?: "Could not send feedback").take(180),
+                    )
+                }
+            }
+        }
+    }
+
     fun onUpdateAction() {
         when (_state.value.appUpdate.stage) {
             UpdateStage.IDLE, UpdateStage.CURRENT, UpdateStage.ERROR -> checkForUpdate(silent = false)
@@ -396,7 +432,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 displayName = "GPT-5.6-Sol",
                 model = "gpt-5.6-sol",
                 defaultReasoningEffort = "low",
-                supportedReasoningEfforts = listOf("low", "medium", "high", "xhigh", "max"),
+                supportedReasoningEfforts = listOf("low", "medium", "high", "xhigh", "max", "ultra"),
             ),
             ModelOption(
                 id = "gpt-5.6-terra",
@@ -409,7 +445,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val normalized = stateName.lowercase()
         val updatePermissionDemo = normalized == "update-permission"
         val homeErrorDemo = normalized == "home-error"
-        val chatDemo = normalized == "chat" || normalized == "chat-error"
+        val chatDemo = normalized in setOf("chat", "chat-error", "chat-permission")
         val alert = when (normalized) {
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
             "complete" -> AgentAlert("demo-complete", AlertKind.COMPLETE, "demo-build", sessions[0].title, "All checks passed. Release APK is ready for review.", now)
@@ -424,7 +460,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
                 "transcript" -> WearScreen.TRANSCRIPT
-                "chat", "chat-error" -> WearScreen.CHAT
+                "chat", "chat-error", "chat-permission" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
                 else -> WearScreen.HOME
@@ -448,11 +484,49 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                         ),
                         io.github.sirbughunter.agenticwear.model.ChatParagraph(
                             "demo-chat-2",
-                            "The prompt is accepted, the draft remains recoverable, and only the latest five assistant paragraphs stay on the watch.",
+                            "The prompt is accepted and the draft remains recoverable.",
                             io.github.sirbughunter.agenticwear.model.ChatPhase.FINAL_ANSWER,
                         ),
                     ),
                     generatedAtMillis = now,
+                    messages = listOf(
+                        ChatMessage(
+                            id = "demo-user-1",
+                            turnId = "demo-turn-1",
+                            role = ChatRole.USER,
+                            text = "Please **ship this carefully** and keep my message visible on the watch.",
+                            phase = io.github.sirbughunter.agenticwear.model.ChatPhase.UNKNOWN,
+                        ),
+                        ChatMessage(
+                            id = "demo-chat-1",
+                            turnId = "demo-turn-1",
+                            role = ChatRole.ASSISTANT,
+                            text = "I’ve isolated the delivery race and am validating:\n\n- Model sync\n- Permission handling",
+                            phase = io.github.sirbughunter.agenticwear.model.ChatPhase.COMMENTARY,
+                        ),
+                        ChatMessage(
+                            id = "demo-chat-2",
+                            turnId = "demo-turn-1",
+                            role = ChatRole.ASSISTANT,
+                            text = "## Ready for testing\n\nThe prompt is **accepted**, the draft stays recoverable, and `Markdown` renders cleanly.",
+                            phase = io.github.sirbughunter.agenticwear.model.ChatPhase.FINAL_ANSWER,
+                        ),
+                    ) + if (normalized == "chat-permission") {
+                        listOf(
+                            ChatMessage(
+                                id = "demo-permission-1",
+                                turnId = "demo-turn-2",
+                                role = ChatRole.ASSISTANT,
+                                text = "Allow Gradle to access the network for this turn?",
+                                phase = io.github.sirbughunter.agenticwear.model.ChatPhase.UNKNOWN,
+                                kind = io.github.sirbughunter.agenticwear.model.ChatMessageKind.PERMISSION,
+                                approvalId = "demo-permission-1",
+                                canControl = true,
+                            ),
+                        )
+                    } else {
+                        emptyList()
+                    },
                 )
             } else null,
             pending = normalized == "home-transcribing",
@@ -464,7 +538,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 else -> null
             },
             voiceLevel = if (normalized == "home-speaking") 0.72f else 0f,
-            approvalMode = if (normalized == "approval") ApprovalMode.ALLOW_CONTROLS else ApprovalMode.ALERT_ONLY,
+            approvalMode = if (normalized == "approval" || normalized == "chat-permission") {
+                ApprovalMode.ALLOW_CONTROLS
+            } else {
+                ApprovalMode.ALERT_ONLY
+            },
+            collapseUpdates = preferences.collapseUpdates,
             selectedModel = if (normalized == "transcript") models.first().model else null,
             reasoningEffort = if (normalized == "transcript") "high" else ReasoningEffortPolicy.DEFAULT,
             relayUrl = "https://relay.example.workers.dev",
@@ -823,6 +902,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         _state.value = restored.copy(
             appUpdate = current.appUpdate,
             showInstallPermissionPrompt = current.showInstallPermissionPrompt,
+            feedbackPendingMessageId = current.feedbackPendingMessageId,
             recording = current.recording && !transcriptReady,
             transcribing = current.transcribing && !transcriptReady && !transcriptionFailed,
             transcriptionElapsedMillis = elapsedMillis,
@@ -847,10 +927,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             latestAlert = preferences.latestAlert,
             transcript = transcript,
             chat = preferences.chatSnapshot,
+            chatFeedback = preferences.chatFeedback,
             pending = preferences.pending,
             error = preferences.lastError,
             transcriptionEngine = preferences.transcriptionEngine,
             approvalMode = preferences.approvalMode,
+            collapseUpdates = preferences.collapseUpdates,
             selectedModel = preferences.selectedModel,
             reasoningEffort = preferences.reasoningEffort,
             relayUrl = preferences.relayUrl,

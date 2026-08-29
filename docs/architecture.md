@@ -2,7 +2,7 @@
 
 ## Wear app
 
-The standalone Wear OS app records tap-to-toggle audio, encrypts bridge requests, displays session/alert state, and fetches an encrypted inbox after a high-priority FCM wake. Its live-session screen stores only the newest five assistant paragraphs, polls the encrypted inbox while visible, and keeps genuine terminal alerts eligible even in the foreground. A foreground session silently consumes alerts that predate the moment the app became visible, while completions that occur afterward remain eligible. Every completion, permission, or failure alert uses one continuous one-second vibration and a visually distinct state.
+The standalone Wear OS app records tap-to-toggle audio, encrypts bridge requests, displays session/alert state, and fetches an encrypted inbox after a high-priority FCM wake. Its live-session screen stores a bounded recent history of user and assistant messages, preserves Markdown structure, auto-collapses intermediate updates unless disabled in Settings, and surfaces typed permission cards without confusing them with agent updates. It polls the encrypted inbox while visible and keeps genuine terminal alerts eligible even in the foreground. A foreground session silently consumes alerts that predate the moment the app became visible, while completions that occur afterward remain eligible. Every completion, permission, or failure alert uses one continuous one-second vibration and a visually distinct state.
 
 Android Keystore holds the non-exportable P-256 watch key and the AES key that protects the relay credential at rest.
 
@@ -22,8 +22,9 @@ The bridge:
 - Subscribes to loaded sessions and reconciles their persisted terminal turns every 20 seconds.
 - Emits one idempotent event per final turn status.
 - Uses a persistent local MLX Whisper worker for audio by default, keeping the multilingual model warm between prompts.
-- Maintains a bounded cache for a watched session and streams assistant-message deltas without forwarding reasoning or tool output.
-- Sends reviewed prompts only after Codex acknowledges the target thread, and steers an active turn only when the daemon explicitly permits direct input.
+- Maintains a bounded, role-aware cache for a watched session and streams assistant-message deltas without forwarding reasoning or tool output.
+- Rejoins idle tasks owned by another Codex client, applies selected sticky model settings, and starts the turn through the shared daemon so every connected client receives live updates. Busy cross-client tasks remain untouched; active watch-owned turns are steered only when the daemon explicitly permits direct input.
+- Routes explicit response feedback through Codex App Server without attaching local logs.
 - Reconciles an explicitly requested correction through one low-effort ephemeral Codex turn, restoring the prior draft on failure.
 - Supports hosted GPT Transcribe only as an explicit deployment-owner opt-in.
 - Stores long-lived credentials in macOS Keychain.

@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -63,10 +62,24 @@ export type ChatParagraph = {
   phase: "commentary" | "final_answer" | "unknown";
 };
 
+export type ChatMessage = {
+  id: string;
+  turnId: string;
+  role: "user" | "assistant";
+  kind: "message" | "permission";
+  text: string;
+  phase: ChatParagraph["phase"];
+  approvalId: string | null;
+  canControl: boolean;
+  resolved: boolean;
+};
+
 export type ChatSnapshot = {
   threadId: string;
   title: string;
   status: SessionView["status"];
+  messages: ChatMessage[];
+  /** Kept temporarily so pre-0.4.7 watches still receive assistant text. */
   paragraphs: ChatParagraph[];
 };
 
@@ -78,9 +91,13 @@ type PendingRequest = {
 
 type PendingApproval = {
   rpcId: string | number;
-  method: "command" | "file";
   threadId: string;
-};
+} & ({
+  method: "command" | "file";
+} | {
+  method: "permissions";
+  requestedPermissions: GrantedPermissionProfile;
+});
 
 type EphemeralRevision = {
   text: string;
@@ -91,8 +108,14 @@ type EphemeralRevision = {
 
 type CachedChatMessage = {
   id: string;
+  turnId: string;
+  role: ChatMessage["role"];
+  kind: ChatMessage["kind"];
   text: string;
   phase: ChatParagraph["phase"];
+  approvalId: string | null;
+  canControl: boolean;
+  resolved: boolean;
 };
 
 type CachedChat = {
@@ -104,6 +127,33 @@ type CachedChat = {
 
 const responseWithThreadSchema = z.object({ thread: threadSchema }).passthrough();
 const threadStartedSchema = z.object({ thread: threadSchema }).passthrough();
+const permissionPathSchema = z.string().min(1).max(4_096);
+const fileSystemPathSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("path"), path: permissionPathSchema }).strict(),
+  z.object({ type: z.literal("glob_pattern"), pattern: permissionPathSchema }).strict(),
+  z.object({
+    type: z.literal("special"),
+    value: z.object({
+      kind: z.enum(["root", "minimal", "project_roots", "tmpdir", "slash_tmp", "unknown"]),
+      path: permissionPathSchema.optional(),
+      subpath: permissionPathSchema.nullable().optional(),
+    }).strict(),
+  }).strict(),
+]);
+const additionalFileSystemPermissionsSchema = z.object({
+  read: z.array(permissionPathSchema).max(128).nullable().optional(),
+  write: z.array(permissionPathSchema).max(128).nullable().optional(),
+  globScanMaxDepth: z.number().int().positive().max(1_024).nullable().optional(),
+  entries: z.array(z.object({
+    path: fileSystemPathSchema,
+    access: z.enum(["read", "write", "deny"]),
+  }).strict()).max(128).nullable().optional(),
+}).strict();
+const permissionProfileSchema = z.object({
+  network: z.object({ enabled: z.boolean().nullable().optional() }).strict().nullable().optional(),
+  fileSystem: additionalFileSystemPermissionsSchema.nullable().optional(),
+}).strict();
+type GrantedPermissionProfile = z.infer<typeof permissionProfileSchema>;
 const approvalParamsSchema = z.object({
   threadId: z.string().min(1).max(128),
   turnId: z.string().min(1).max(128),
@@ -114,6 +164,7 @@ const approvalParamsSchema = z.object({
   command: z.string().nullable().optional(),
   cwd: z.string().nullable().optional(),
   availableDecisions: z.array(z.string()).optional(),
+  permissions: permissionProfileSchema.optional(),
 }).passthrough();
 
 export class AppServerClient {
@@ -130,6 +181,7 @@ export class AppServerClient {
   private readonly deliveredTerminalEvents = new Set<string>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
+  private readonly pendingPermissionMessages = new Map<string, { threadId: string; message: CachedChatMessage }>();
   private modelCache: ModelView[] | null = null;
   private stopping = false;
 
@@ -219,7 +271,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.2" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.7" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -311,16 +363,21 @@ export class AppServerClient {
       this.subscriptions.add(thread.id);
       created = true;
     } else if (!this.watchOwnedThreadIds.has(threadId)) {
-      // Desktop and other Codex clients retain the only live writer for their
-      // threads. The persisted queue is the supported cross-client handoff:
-      // the owning client starts it immediately when idle, or after its active
-      // turn finishes. Resuming here would compete for the writer lock.
-      await this.request("thread/queue/add", {
+      // Rejoin the managed daemon's shared thread before starting the turn so
+      // every connected Codex client receives the same live notifications.
+      // The generated protocol advertises a queue surface that Codex 0.147's
+      // runtime does not accept, so a busy foreign thread must be retried once
+      // it is idle rather than silently dropping or misrouting the prompt.
+      thread = await this.resumeThread(threadId);
+      if (thread.status.type === "active") {
+        throw new Error("That Codex session is busy. Wait for its current turn to finish, then retry from the watch.");
+      }
+      const stickySettings: Record<string, unknown> = {
         threadId,
-        input: [textInput(text)],
-        clientUserMessageId: randomUUID(),
-      });
-      return { threadId, created: false };
+        effort,
+      };
+      if (model !== null) stickySettings.model = model;
+      await this.request("thread/settings/update", stickySettings);
     } else {
       thread = await this.readThread(threadId, true);
       if (thread.status.type === "active") {
@@ -340,13 +397,14 @@ export class AppServerClient {
         thread = await this.resumeThread(thread.id);
       }
     }
-    await this.request("turn/start", {
+    const turnParams: Record<string, unknown> = {
       threadId: thread.id,
       input: [textInput(text)],
-      model,
       effort,
       responsesapiClientMetadata: { source: "agentic-wear" },
-    });
+    };
+    if (model !== null) turnParams.model = model;
+    await this.request("turn/start", turnParams);
     return { threadId: thread.id, created };
   }
 
@@ -357,8 +415,8 @@ export class AppServerClient {
     const thread = await this.readThread(threadId, true);
     const turns: CachedChatMessage[][] = [];
     let cursor: string | null = null;
-    let paragraphTotal = 0;
-    for (let page = 0; page < MAX_CHAT_HISTORY_TURNS && paragraphTotal < MAX_CHAT_PARAGRAPHS; page += 1) {
+    let messageTotal = 0;
+    for (let page = 0; page < MAX_CHAT_HISTORY_TURNS && messageTotal < MAX_CHAT_MESSAGES; page += 1) {
       const raw = await this.request("thread/turns/list", {
         threadId,
         limit: 1,
@@ -368,14 +426,10 @@ export class AppServerClient {
       });
       const response = chatTurnListResponseSchema.parse(raw);
       const messages = response.data.flatMap((turn) => turn.items
-        .filter((item) => item.type === "agentMessage" && item.text?.trim())
-        .map((item) => ({
-          id: item.id,
-          text: item.text!,
-          phase: item.phase ?? "unknown" as const,
-        })));
+        .map((item) => chatMessageFromItem(turn.id, item))
+        .filter((message): message is CachedChatMessage => message !== null));
       turns.push(messages);
-      paragraphTotal += paragraphCount(messages);
+      messageTotal += messages.length;
       cursor = response.nextCursor ?? null;
       if (!cursor) break;
     }
@@ -386,9 +440,33 @@ export class AppServerClient {
       status: this.sessionView(thread).status,
       messages: turns.reverse().flat().slice(-MAX_CACHED_CHAT_MESSAGES),
     };
+    for (const pending of this.pendingPermissionMessages.values()) {
+      if (pending.threadId === threadId && !cache.messages.some(({ id }) => id === pending.message.id)) {
+        cache.messages.push({ ...pending.message });
+      }
+    }
+    cache.messages = cache.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
     this.chatCaches.set(threadId, cache);
     trimOldestMapEntry(this.chatCaches, MAX_CACHED_CHATS);
     return materializeChat(cache);
+  }
+
+  async submitFeedback(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    rating: "liked" | "disliked",
+  ): Promise<void> {
+    await this.request("feedback/upload", {
+      classification: rating === "liked" ? "good_result" : "bad_result",
+      threadId,
+      includeLogs: false,
+      tags: {
+        turn_id: turnId,
+        item_id: itemId,
+        source: "agentic-wear",
+      },
+    });
   }
 
   async reviseDraft(previousText: string, correction: string, defaultCwd: string): Promise<string> {
@@ -463,7 +541,14 @@ export class AppServerClient {
     const pending = this.approvals.get(approvalId);
     if (!pending) throw new Error("That approval is no longer active");
     if (!this.watchOwnedThreadIds.has(pending.threadId)) throw new Error("Desktop-owned approvals are alert-only");
-    this.write({ id: pending.rpcId, result: { decision } });
+    const result = pending.method === "permissions"
+      ? {
+          permissions: decision === "accept" ? pending.requestedPermissions : {},
+          scope: "turn",
+        }
+      : { decision };
+    this.write({ id: pending.rpcId, result });
+    this.resolveCachedPermission(approvalId);
     this.approvals.delete(approvalId);
   }
 
@@ -518,7 +603,7 @@ export class AppServerClient {
       const revision = this.ephemeralRevisions.get(event.threadId);
       if (revision) revision.text += event.delta;
       else {
-        this.updateCachedAgentMessage(event.threadId, event.itemId, event.delta);
+        this.updateCachedAgentMessage(event.threadId, event.turnId, event.itemId, event.delta);
         await this.onAgentOutput(event.threadId);
       }
       return;
@@ -531,6 +616,7 @@ export class AppServerClient {
         else if (!revision) {
           this.updateCachedAgentMessage(
             event.threadId,
+            event.turnId,
             event.item.id,
             event.item.text ?? "",
             event.item.phase ?? "unknown",
@@ -596,26 +682,45 @@ export class AppServerClient {
       const resolved = z.object({ requestId: z.union([z.string(), z.number()]) }).passthrough().safeParse(params);
       if (resolved.success) {
         for (const [approvalId, approval] of this.approvals) {
-          if (String(approval.rpcId) === String(resolved.data.requestId)) this.approvals.delete(approvalId);
+          if (String(approval.rpcId) === String(resolved.data.requestId)) {
+            this.resolveCachedPermission(approvalId);
+            this.approvals.delete(approvalId);
+          }
         }
       }
     }
   }
 
   private async handleServerRequest(id: string | number, method: string, params: unknown): Promise<void> {
-    const supported = method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval";
+    const permissionRequest = method === "item/permissions/requestApproval";
+    const supported = permissionRequest ||
+      method === "item/commandExecution/requestApproval" ||
+      method === "item/fileChange/requestApproval";
     const parsed = approvalParamsSchema.safeParse(params);
     if (!parsed.success) return;
     const thread = await this.readThread(parsed.data.threadId);
     const approvalId = parsed.data.approvalId ?? parsed.data.itemId;
-    const canControl = supported && this.watchOwnedThreadIds.has(parsed.data.threadId) &&
+    const requestedPermissions = permissionRequest
+      ? permissionProfileSchema.safeParse(parsed.data.permissions)
+      : null;
+    const grantedPermissions = requestedPermissions?.success === true ? requestedPermissions.data : null;
+    const canControl = supported && (!permissionRequest || grantedPermissions !== null) &&
+      this.watchOwnedThreadIds.has(parsed.data.threadId) &&
       (!parsed.data.availableDecisions || ["accept", "decline"].every((value) => parsed.data.availableDecisions?.includes(value)));
     if (canControl) {
-      this.approvals.set(approvalId, {
-        rpcId: id,
-        method: method.includes("fileChange") ? "file" : "command",
-        threadId: parsed.data.threadId,
-      });
+      const pending: PendingApproval = permissionRequest && grantedPermissions !== null
+        ? {
+            rpcId: id,
+            method: "permissions",
+            threadId: parsed.data.threadId,
+            requestedPermissions: grantedPermissions,
+          }
+        : {
+            rpcId: id,
+            method: method.includes("fileChange") ? "file" : "command",
+            threadId: parsed.data.threadId,
+          };
+      this.approvals.set(approvalId, pending);
       if (this.approvals.size > 100) this.approvals.delete(this.approvals.keys().next().value ?? "");
     }
     const detail = clean(
@@ -623,6 +728,31 @@ export class AppServerClient {
         (method.includes("fileChange") ? "Allow the proposed file changes?" : "The agent needs your permission."),
       260,
     );
+    if (supported) {
+      const permissionMessage: CachedChatMessage = {
+        id: approvalId,
+        turnId: parsed.data.turnId,
+        role: "assistant",
+        kind: "permission",
+        text: detail,
+        phase: "unknown",
+        approvalId,
+        canControl,
+        resolved: false,
+      };
+      this.pendingPermissionMessages.set(approvalId, {
+        threadId: parsed.data.threadId,
+        message: permissionMessage,
+      });
+      trimOldestMapEntry(this.pendingPermissionMessages, MAX_PENDING_PERMISSION_MESSAGES);
+      const cached = this.chatCaches.get(parsed.data.threadId);
+      if (cached) {
+        cached.messages = cached.messages.filter(({ id: cachedId }) => cachedId !== permissionMessage.id);
+        cached.messages.push(permissionMessage);
+        cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
+      }
+      await this.onAgentOutput(parsed.data.threadId);
+    }
     await this.onApproval({
       eventId: `approval:${parsed.data.threadId}:${parsed.data.turnId}:${approvalId}`,
       kind: "approval.request",
@@ -671,6 +801,7 @@ export class AppServerClient {
 
   private updateCachedAgentMessage(
     threadId: string,
+    turnId: string,
     itemId: string,
     text: string,
     phase: ChatParagraph["phase"] = "unknown",
@@ -683,7 +814,17 @@ export class AppServerClient {
       existing.text = boundedChatText(replace ? text : existing.text + text);
       if (phase !== "unknown") existing.phase = phase;
     } else if (text.trim()) {
-      cached.messages.push({ id: itemId, text: boundedChatText(text), phase });
+      cached.messages.push({
+        id: itemId,
+        turnId,
+        role: "assistant",
+        kind: "message",
+        text: boundedChatText(text),
+        phase,
+        approvalId: null,
+        canControl: false,
+        resolved: false,
+      });
     }
     cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
   }
@@ -691,6 +832,25 @@ export class AppServerClient {
   private updateCachedChatStatus(threadId: string, status: SessionView["status"]): void {
     const cached = this.chatCaches.get(threadId);
     if (cached) cached.status = status;
+  }
+
+  private resolveCachedPermission(approvalId: string): void {
+    const pending = this.pendingPermissionMessages.get(approvalId);
+    if (!pending) return;
+    this.pendingPermissionMessages.delete(approvalId);
+    const cached = this.chatCaches.get(pending.threadId);
+    const message = cached?.messages.find(({ id }) => id === pending.message.id);
+    if (message) {
+      message.canControl = false;
+      message.resolved = true;
+    }
+    void this.onAgentOutput(pending.threadId).catch((error: unknown) => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "permission chat refresh skipped",
+        error: safeError(error),
+      }));
+    });
   }
 
   private rejectRevision(threadId: string, error: Error): void {
@@ -848,12 +1008,9 @@ function clean(value: string, limit: number): string {
 }
 
 function splitParagraphs(message: CachedChatMessage): ChatParagraph[] {
+  if (message.role !== "assistant" || message.kind !== "message") return [];
   const parts = message.text.trim().split(/\n\s*\n+/u).map((part) => clean(part, 1_200)).filter(Boolean);
   return parts.map((text, index) => ({ id: `${message.id}:${index}`, text, phase: message.phase }));
-}
-
-function paragraphCount(messages: Array<{ text: string }>): number {
-  return messages.reduce((total, message) => total + message.text.trim().split(/\n\s*\n+/u).filter(Boolean).length, 0);
 }
 
 function materializeChat(cache: CachedChat): ChatSnapshot {
@@ -861,12 +1018,50 @@ function materializeChat(cache: CachedChat): ChatSnapshot {
     threadId: cache.threadId,
     title: cache.title,
     status: cache.status,
+    messages: cache.messages.slice(-MAX_CHAT_MESSAGES).map((message) => ({ ...message })),
     paragraphs: cache.messages.flatMap(splitParagraphs).slice(-MAX_CHAT_PARAGRAPHS),
   };
 }
 
 function boundedChatText(value: string): string {
-  return value.slice(-MAX_CACHED_CHAT_MESSAGE_CHARS);
+  return value.slice(0, MAX_CACHED_CHAT_MESSAGE_CHARS);
+}
+
+function chatMessageFromItem(
+  turnId: string,
+  item: z.infer<typeof chatTurnListResponseSchema>["data"][number]["items"][number],
+): CachedChatMessage | null {
+  if (item.type === "agentMessage" && item.text?.trim()) {
+    return {
+      id: item.id,
+      turnId,
+      role: "assistant",
+      kind: "message",
+      text: boundedChatText(item.text),
+      phase: item.phase ?? "unknown",
+      approvalId: null,
+      canControl: false,
+      resolved: false,
+    };
+  }
+  if (item.type !== "userMessage") return null;
+  const text = item.content
+    ?.filter((content) => content.type === "text" && content.text?.trim())
+    .map((content) => content.text!.trim())
+    .join("\n\n")
+    .trim();
+  if (!text) return null;
+  return {
+    id: item.id,
+    turnId,
+    role: "user",
+    kind: "message",
+    text: boundedChatText(text),
+    phase: "unknown",
+    approvalId: null,
+    canControl: false,
+    resolved: false,
+  };
 }
 
 function trimOldestMapEntry<Key, Value>(map: Map<Key, Value>, limit: number): void {
@@ -905,8 +1100,10 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 const MAX_APP_SERVER_MESSAGE_BYTES = 16 * 1_024 * 1_024;
 const MAX_CHAT_HISTORY_TURNS = 6;
 const MAX_CHAT_PARAGRAPHS = 5;
+const MAX_CHAT_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGE_CHARS = 24_000;
 const MAX_CACHED_CHATS = 20;
+const MAX_PENDING_PERMISSION_MESSAGES = 100;
 const MAX_TERMINAL_SCAN_TURNS = 8;
 const MAX_TERMINAL_SCAN_SESSIONS = 12;

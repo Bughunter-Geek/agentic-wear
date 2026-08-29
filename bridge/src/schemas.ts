@@ -56,6 +56,15 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({
     version: z.literal(1),
+    kind: z.literal("feedback.submit"),
+    requestId: safeId,
+    threadId: safeId,
+    turnId: safeId,
+    itemId: safeId,
+    rating: z.enum(["liked", "disliked"]),
+  }).strict(),
+  z.object({
+    version: z.literal(1),
     kind: z.literal("chat.watch"),
     requestId: safeId,
     threadId: safeId,
@@ -165,6 +174,10 @@ export const chatTurnListResponseSchema = z.object({
       type: z.string(),
       text: z.string().optional(),
       phase: z.enum(["commentary", "final_answer"]).nullable().optional(),
+      content: z.array(z.object({
+        type: z.string(),
+        text: z.string().optional(),
+      }).passthrough()).optional(),
     }).passthrough()),
   }).passthrough()),
   nextCursor: z.string().nullable().optional(),

@@ -15,7 +15,7 @@ must be dependable before it becomes broad.
 - [x] Follow agent output while a run is active without turning intermediate reasoning into completion alerts.
 - [x] Intervene with `turn/steer` when Codex marks the active turn as directly steerable.
 - [x] Keep completion, permission, interruption, and failure alerts deduplicated across the live view and background delivery.
-- [ ] Queue a follow-up for the next turn when the supported Codex App Server exposes a queue operation. Codex 0.147 exposes steering, but no queue request.
+- [x] Rejoin an idle cross-client task through the shared daemon, apply the watch-selected model and effort, and start the follow-up on the same live thread.
 
 ## Alpha 0.4 — semantic voice revisions (delivered)
 
@@ -26,7 +26,7 @@ must be dependable before it becomes broad.
 
 ## Later
 
-- Optional user-message context in the compact conversation view.
+- [x] User-message context, Markdown, and response feedback in the compact conversation view.
 - A recent-sessions tile backed by the watch's encrypted local cache.
 - An active-session complication that remains useful without holding a socket open.
 

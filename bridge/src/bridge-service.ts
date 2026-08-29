@@ -146,6 +146,22 @@ export class BridgeService {
             approvalId: payload.approvalId,
           });
           return;
+        case "feedback.submit":
+          await this.appServer.submitFeedback(
+            payload.threadId,
+            payload.turnId,
+            payload.itemId,
+            payload.rating,
+          );
+          await this.send({
+            version: 1,
+            kind: "feedback.accepted",
+            requestId: payload.requestId,
+            threadId: payload.threadId,
+            itemId: payload.itemId,
+            rating: payload.rating,
+          });
+          return;
       }
     } catch (error) {
       const kind = payload.kind === "transcription.create"
@@ -154,6 +170,8 @@ export class BridgeService {
           ? "chat.error"
         : payload.kind === "approval.respond"
           ? "approval.error"
+          : payload.kind === "feedback.submit"
+            ? "feedback.error"
           : "turn.error";
       await this.send({
         version: 1,
@@ -266,6 +284,9 @@ function publicError(error: unknown): string {
 function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string {
   const message = publicError(error);
   if (/timed out/iu.test(message)) {
+    if (kind === "feedback.submit") {
+      return "Codex did not acknowledge the feedback. Keep Codex and your private bridge running, then retry.";
+    }
     return kind === "chat.watch"
       ? "Codex did not return this chat in time. Keep Codex and your private bridge running, then retry."
       : "Codex did not acknowledge the prompt in time. Keep Codex and your private bridge running, then retry.";

@@ -6,7 +6,11 @@ import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatParagraph
 import io.github.sirbughunter.agenticwear.model.ChatPhase
+import io.github.sirbughunter.agenticwear.model.ChatMessage
+import io.github.sirbughunter.agenticwear.model.ChatMessageKind
+import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
+import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
@@ -46,6 +50,15 @@ object PayloadCodec {
             .put("requestId", payload.requestId)
             .put("approvalId", payload.approvalId)
             .put("decision", payload.decision)
+            .toString()
+        is BridgePayload.SubmitFeedback -> JSONObject()
+            .put("version", 1)
+            .put("kind", "feedback.submit")
+            .put("requestId", payload.requestId)
+            .put("threadId", payload.threadId)
+            .put("turnId", payload.turnId)
+            .put("itemId", payload.itemId)
+            .put("rating", payload.rating.name.lowercase())
             .toString()
         is BridgePayload.WatchChat -> JSONObject()
             .put("version", 1)
@@ -200,7 +213,7 @@ object PayloadCodec {
             for (index in 0 until minOf(paragraphsJson.length(), 5)) {
                 val item = paragraphsJson.optJSONObject(index) ?: continue
                 val id = item.optString("id").takeIf(::isSafeId) ?: continue
-                val text = clean(item.optString("text"), 1_200)
+                val text = cleanChatText(item.optString("text"), MAX_CHAT_MESSAGE_CHARS)
                 if (text.isEmpty()) continue
                 val phase = when (item.optString("phase")) {
                     "commentary" -> ChatPhase.COMMENTARY
@@ -209,6 +222,20 @@ object PayloadCodec {
                 }
                 add(ChatParagraph(id, text, phase))
             }
+        }
+        val messagesJson = json.optJSONArray("messages")
+        val messages = if (messagesJson == null) {
+            paragraphs.map { paragraph ->
+                ChatMessage(
+                    id = paragraph.id,
+                    turnId = paragraph.id,
+                    role = ChatRole.ASSISTANT,
+                    text = paragraph.text,
+                    phase = paragraph.phase,
+                )
+            }
+        } else {
+            decodeChatMessages(messagesJson)
         }
         val status = when (json.optString("status")) {
             "active" -> SessionStatus.ACTIVE
@@ -223,6 +250,7 @@ object PayloadCodec {
             paragraphs = paragraphs,
             generatedAtMillis = json.optLong("generatedAt", System.currentTimeMillis()),
             requestId = json.optString("requestId").takeIf(::isSafeId),
+            messages = messages,
         )
     }
 
@@ -245,6 +273,25 @@ object PayloadCodec {
                 }
             },
         )
+        .put(
+            "messages",
+            JSONArray().apply {
+                snapshot.messages.takeLast(MAX_CHAT_MESSAGES).forEach { message ->
+                    put(
+                        JSONObject()
+                            .put("id", message.id)
+                            .put("turnId", message.turnId)
+                            .put("role", message.role.name)
+                            .put("kind", message.kind.name)
+                            .put("text", message.text)
+                            .put("phase", message.phase.name)
+                            .put("approvalId", message.approvalId)
+                            .put("canControl", message.canControl)
+                            .put("resolved", message.resolved),
+                    )
+                }
+            },
+        )
         .toString()
 
     fun chatSnapshotFromJson(value: String): ChatSnapshot? = runCatching {
@@ -257,7 +304,7 @@ object PayloadCodec {
                 add(
                     ChatParagraph(
                         id = item.getString("id"),
-                        text = clean(item.getString("text"), 1_200),
+                        text = cleanChatText(item.getString("text"), MAX_CHAT_MESSAGE_CHARS),
                         phase = runCatching { ChatPhase.valueOf(item.getString("phase")) }.getOrDefault(ChatPhase.UNKNOWN),
                     ),
                 )
@@ -270,6 +317,16 @@ object PayloadCodec {
             paragraphs = paragraphs,
             generatedAtMillis = json.optLong("generatedAt"),
             requestId = json.optString("requestId").takeIf(::isSafeId),
+            messages = json.optJSONArray("messages")?.let(::decodeStoredChatMessages)
+                ?: paragraphs.map { paragraph ->
+                    ChatMessage(
+                        id = paragraph.id,
+                        turnId = paragraph.id,
+                        role = ChatRole.ASSISTANT,
+                        text = paragraph.text,
+                        phase = paragraph.phase,
+                    )
+                },
         )
     }.getOrNull()
 
@@ -388,13 +445,86 @@ object PayloadCodec {
         )
     }.getOrNull()
 
+    private fun decodeChatMessages(data: JSONArray): List<ChatMessage> = buildList {
+        for (index in 0 until minOf(data.length(), MAX_CHAT_MESSAGES)) {
+            val item = data.optJSONObject(index) ?: continue
+            val id = item.optString("id").takeIf(::isSafeId) ?: continue
+            val turnId = item.optString("turnId").takeIf(::isSafeId) ?: continue
+            val role = when (item.optString("role")) {
+                "user" -> ChatRole.USER
+                "assistant" -> ChatRole.ASSISTANT
+                else -> continue
+            }
+            val text = cleanChatText(item.optString("text"), MAX_CHAT_MESSAGE_CHARS)
+            if (text.isEmpty()) continue
+            val phase = when (item.optString("phase")) {
+                "commentary" -> ChatPhase.COMMENTARY
+                "final_answer" -> ChatPhase.FINAL_ANSWER
+                else -> ChatPhase.UNKNOWN
+            }
+            val kind = when (item.optString("kind")) {
+                "permission" -> ChatMessageKind.PERMISSION
+                else -> ChatMessageKind.MESSAGE
+            }
+            add(
+                ChatMessage(
+                    id = id,
+                    turnId = turnId,
+                    role = role,
+                    text = text,
+                    phase = phase,
+                    kind = kind,
+                    approvalId = item.optString("approvalId").takeIf(::isSafeId),
+                    canControl = item.optBoolean("canControl", false),
+                    resolved = item.optBoolean("resolved", false),
+                ),
+            )
+        }
+    }
+
+    private fun decodeStoredChatMessages(data: JSONArray): List<ChatMessage> = buildList {
+        for (index in 0 until minOf(data.length(), MAX_CHAT_MESSAGES)) {
+            val item = data.optJSONObject(index) ?: continue
+            val id = item.optString("id").takeIf(::isSafeId) ?: continue
+            val turnId = item.optString("turnId").takeIf(::isSafeId) ?: continue
+            val role = runCatching { ChatRole.valueOf(item.optString("role")) }.getOrNull() ?: continue
+            val text = cleanChatText(item.optString("text"), MAX_CHAT_MESSAGE_CHARS)
+            if (text.isEmpty()) continue
+            val phase = runCatching { ChatPhase.valueOf(item.optString("phase")) }.getOrDefault(ChatPhase.UNKNOWN)
+            val kind = runCatching { ChatMessageKind.valueOf(item.optString("kind")) }
+                .getOrDefault(ChatMessageKind.MESSAGE)
+            add(
+                ChatMessage(
+                    id = id,
+                    turnId = turnId,
+                    role = role,
+                    text = text,
+                    phase = phase,
+                    kind = kind,
+                    approvalId = item.optString("approvalId").takeIf(::isSafeId),
+                    canControl = item.optBoolean("canControl", false),
+                    resolved = item.optBoolean("resolved", false),
+                ),
+            )
+        }
+    }
+
     private fun clean(value: String, limit: Int): String = value.trim().replace(Regex("\\s+"), " ").take(limit)
+
+    private fun cleanChatText(value: String, limit: Int): String = value
+        .replace("\r\n", "\n")
+        .replace('\r', '\n')
+        .trim()
+        .take(limit)
 
     private fun isSafeId(value: String): Boolean = value.length in 1..128 &&
         value.all { it.isLetterOrDigit() || it in "-_.:" }
 
     private fun isSafeModelValue(value: String): Boolean = value.length in 1..128 &&
         value.all { it.isLetterOrDigit() || it in "-_.:/" }
+
+    private const val MAX_CHAT_MESSAGES = 12
+    private const val MAX_CHAT_MESSAGE_CHARS = 6_000
 }
 
 internal fun acceptsAlertEnvelope(kind: String, turnScope: String): Boolean = when (kind) {

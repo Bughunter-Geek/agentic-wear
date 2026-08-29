@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -43,6 +44,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -53,8 +55,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.ThumbDown
+import androidx.compose.material.icons.rounded.ThumbUp
+import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -75,11 +82,14 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -94,15 +104,13 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -113,7 +121,12 @@ import io.github.sirbughunter.agenticwear.BuildConfig
 import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
+import io.github.sirbughunter.agenticwear.model.ChatDisplayPolicy
+import io.github.sirbughunter.agenticwear.model.ChatMessage
+import io.github.sirbughunter.agenticwear.model.ChatMessageKind
 import io.github.sirbughunter.agenticwear.model.ChatPhase
+import io.github.sirbughunter.agenticwear.model.ChatRole
+import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
@@ -130,6 +143,41 @@ import kotlinx.coroutines.launch
 private val AgenticEaseOut = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
 private val AgenticEaseInOut = CubicBezierEasing(0.77f, 0f, 0.175f, 1f)
 private val SurfaceShape = RoundedCornerShape(24.dp)
+private const val SelectorMotionDurationMillis = 200
+private const val SelectorClosedScale = 0.95f
+private const val UpdateCollapseDurationMillis = 200
+
+private fun selectorEnterTransition(transformOrigin: TransformOrigin): EnterTransition =
+    fadeIn(tween(SelectorMotionDurationMillis, easing = AgenticEaseOut)) +
+        scaleIn(
+            animationSpec = tween(SelectorMotionDurationMillis, easing = AgenticEaseOut),
+            initialScale = SelectorClosedScale,
+            transformOrigin = transformOrigin,
+        )
+
+private fun selectorExitTransition(transformOrigin: TransformOrigin): ExitTransition =
+    fadeOut(tween(SelectorMotionDurationMillis, easing = AgenticEaseOut)) +
+        scaleOut(
+            animationSpec = tween(SelectorMotionDurationMillis, easing = AgenticEaseOut),
+            targetScale = SelectorClosedScale,
+            transformOrigin = transformOrigin,
+        )
+
+private fun selectorTransformOrigin(
+    triggerPosition: Offset,
+    triggerSize: IntSize,
+    containerSize: IntSize,
+): TransformOrigin {
+    if (containerSize.width <= 0 || containerSize.height <= 0) {
+        return TransformOrigin(0.5f, 0.5f)
+    }
+    val triggerCenterX = triggerPosition.x + triggerSize.width / 2f
+    val triggerCenterY = triggerPosition.y + triggerSize.height / 2f
+    return TransformOrigin(
+        pivotFractionX = (triggerCenterX / containerSize.width.toFloat()).coerceIn(0f, 1f),
+        pivotFractionY = (triggerCenterY / containerSize.height.toFloat()).coerceIn(0f, 1f),
+    )
+}
 
 @Composable
 fun AgenticWearApp(
@@ -189,6 +237,7 @@ fun AgenticWearApp(
                     onRevise = viewModel::reviseTranscript,
                     onModel = viewModel::setModel,
                     onEffort = viewModel::setReasoningEffort,
+                    onApprovalMode = viewModel::setApprovalMode,
                 )
                 WearScreen.CHAT -> ChatScreen(
                     state = state,
@@ -198,6 +247,8 @@ fun AgenticWearApp(
                         onPushToTalk()
                     },
                     onRetry = viewModel::retryChat,
+                    onRateMessage = viewModel::rateChatMessage,
+                    onPermissionResponse = viewModel::respondToChatPermission,
                 )
                 WearScreen.ALERT -> AlertScreen(
                     alert = state.latestAlert,
@@ -212,6 +263,7 @@ fun AgenticWearApp(
                     onBack = { viewModel.navigate(WearScreen.HOME) },
                     onEngine = viewModel::setTranscriptionEngine,
                     onApprovalMode = viewModel::setApprovalMode,
+                    onCollapseUpdates = viewModel::setCollapseUpdates,
                     onUpdate = viewModel::onUpdateAction,
                     onDisconnect = viewModel::disconnect,
                 )
@@ -701,15 +753,25 @@ private fun TranscriptScreen(
     onRevise: () -> Unit,
     onModel: (String?) -> Unit,
     onEffort: (String) -> Unit,
+    onApprovalMode: (ApprovalMode) -> Unit,
 ) {
     val transcript = state.transcript
     val scrollState = rememberScrollState()
     val rotaryFocusRequester = remember { FocusRequester() }
     val horizontalPadding = roundAwareHorizontalPadding()
-    var selectorOpen by rememberSaveable { mutableStateOf(false) }
+    var modelSelectorOpen by rememberSaveable { mutableStateOf(false) }
+    var approvalSelectorOpen by rememberSaveable { mutableStateOf(false) }
+    var selectorContainerSize by remember { mutableStateOf(IntSize.Zero) }
+    var modelSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
+    var approvalSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
+    val selectorOpen = modelSelectorOpen || approvalSelectorOpen
     val selectedModel = state.models.firstOrNull { it.model == state.selectedModel }
     val modelLabel = selectedModel?.displayName ?: state.selectedModel ?: "Auto"
-    Box(Modifier.fillMaxSize()) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onSizeChanged { selectorContainerSize = it },
+    ) {
         Column(
             Modifier
                 .fillMaxSize()
@@ -760,23 +822,50 @@ private fun TranscriptScreen(
                 )
             }
             Spacer(Modifier.height(10.dp))
+            Text(
+                state.selectedSession?.title ?: "New session",
+                color = Muted,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            )
+            Spacer(Modifier.height(4.dp))
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    state.selectedSession?.title ?: "New session",
-                    color = Muted,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(8.dp))
                 ReasoningControl(
                     effort = state.reasoningEffort,
                     modelLabel = modelLabel,
-                    onClick = { selectorOpen = true },
+                    onClick = {
+                        approvalSelectorOpen = false
+                        modelSelectorOpen = true
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .onGloballyPositioned { coordinates ->
+                            modelSelectorOrigin = selectorTransformOrigin(
+                                triggerPosition = coordinates.positionInRoot(),
+                                triggerSize = coordinates.size,
+                                containerSize = selectorContainerSize,
+                            )
+                        },
+                )
+                Spacer(Modifier.width(6.dp))
+                ApprovalModeControl(
+                    approvalMode = state.approvalMode,
+                    onClick = {
+                        modelSelectorOpen = false
+                        approvalSelectorOpen = true
+                    },
+                    modifier = Modifier.onGloballyPositioned { coordinates ->
+                        approvalSelectorOrigin = selectorTransformOrigin(
+                            triggerPosition = coordinates.positionInRoot(),
+                            triggerSize = coordinates.size,
+                            containerSize = selectorContainerSize,
+                        )
+                    },
                 )
             }
             if (transcript?.revised == true) {
@@ -815,15 +904,31 @@ private fun TranscriptScreen(
             Spacer(Modifier.height(48.dp))
         }
         AnimatedVisibility(
-            visible = selectorOpen,
-            enter = fadeIn(tween(180, easing = AgenticEaseOut)),
-            exit = fadeOut(tween(140, easing = AgenticEaseOut)),
+            visible = modelSelectorOpen,
+            modifier = Modifier.fillMaxSize(),
+            enter = selectorEnterTransition(modelSelectorOrigin),
+            exit = selectorExitTransition(modelSelectorOrigin),
         ) {
             ModelEffortOverlay(
                 state = state,
-                onDismiss = { selectorOpen = false },
+                onDismiss = { modelSelectorOpen = false },
                 onModel = onModel,
                 onEffort = onEffort,
+            )
+        }
+        AnimatedVisibility(
+            visible = approvalSelectorOpen,
+            modifier = Modifier.fillMaxSize(),
+            enter = selectorEnterTransition(approvalSelectorOrigin),
+            exit = selectorExitTransition(approvalSelectorOrigin),
+        ) {
+            ApprovalModeOverlay(
+                approvalMode = state.approvalMode,
+                onDismiss = { approvalSelectorOpen = false },
+                onApprovalMode = { approvalMode ->
+                    onApprovalMode(approvalMode)
+                    approvalSelectorOpen = false
+                },
             )
         }
     }
@@ -847,6 +952,7 @@ private fun ReasoningControl(
     )
     Row(
         modifier
+            .height(48.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(CircleShape)
             .background(Color(0xFF17171E).copy(alpha = 0.96f))
@@ -862,18 +968,27 @@ private fun ReasoningControl(
                 haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
                 onClick()
             }
-            .padding(start = 9.dp, end = 5.dp, top = 6.dp, bottom = 6.dp),
+            .padding(start = 6.dp, end = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = Icons.Rounded.GraphicEq,
-            contentDescription = null,
-            tint = Violet,
-            modifier = Modifier.size(16.dp),
-        )
-        Spacer(Modifier.width(6.dp))
+        Box(
+            Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(Violet.copy(alpha = 0.12f))
+                .border(1.dp, Violet.copy(alpha = 0.34f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Speed,
+                contentDescription = null,
+                tint = Violet,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Spacer(Modifier.width(5.dp))
         Text(effortLabel, color = Frost, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.width(1.dp))
+        Spacer(Modifier.weight(1f))
         Icon(
             imageVector = Icons.Rounded.KeyboardArrowDown,
             contentDescription = null,
@@ -882,6 +997,269 @@ private fun ReasoningControl(
         )
     }
 }
+
+@Composable
+private fun ApprovalModeControl(
+    approvalMode: ApprovalMode,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "approval mode control press",
+    )
+    val label = approvalMode.label
+    val accent = if (approvalMode == ApprovalMode.ALLOW_CONTROLS) Amber else Cyan
+    Box(
+        modifier
+            .size(48.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(CircleShape)
+            .background(Color(0xFF17171E).copy(alpha = 0.96f))
+            .border(1.dp, accent.copy(alpha = 0.42f), CircleShape)
+            .semantics {
+                contentDescription = "$label approval mode. Open approval mode controls"
+                stateDescription = label
+            }
+            .clickable(
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                onClick()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = if (approvalMode == ApprovalMode.ALLOW_CONTROLS) {
+                Icons.Rounded.TouchApp
+            } else {
+                Icons.Rounded.NotificationsActive
+            },
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+@Composable
+private fun ApprovalModeOverlay(
+    approvalMode: ApprovalMode,
+    onDismiss: () -> Unit,
+    onApprovalMode: (ApprovalMode) -> Unit,
+) {
+    val horizontalPadding = roundAwareHorizontalPadding(round = 34.dp, square = 20.dp)
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = 0.9f),
+                            Color(0xFF07070A).copy(alpha = 0.97f),
+                        ),
+                    ),
+                )
+                .pointerInput(onDismiss) {
+                    detectTapGestures(onTap = { onDismiss() })
+                },
+        )
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(top = 8.dp, bottom = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(Modifier.fillMaxWidth().height(44.dp)) {
+                Text(
+                    text = "Permissions",
+                    color = Frost,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.2).sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 60.dp)
+                        .align(Alignment.Center),
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = horizontalPadding - 6.dp)
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .clickable(role = Role.Button, onClick = onDismiss)
+                        .semantics { contentDescription = "Close approval mode controls" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.07f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = null,
+                            tint = Frost.copy(alpha = 0.78f),
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                }
+            }
+            Text(
+                "Choose how the next approval reaches your wrist",
+                color = Muted.copy(alpha = 0.86f),
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                modifier = Modifier.padding(horizontal = horizontalPadding),
+            )
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                ApprovalModeChoice(
+                    mode = ApprovalMode.ALERT_ONLY,
+                    selected = approvalMode == ApprovalMode.ALERT_ONLY,
+                    onClick = { onApprovalMode(ApprovalMode.ALERT_ONLY) },
+                )
+                Spacer(Modifier.height(7.dp))
+                ApprovalModeChoice(
+                    mode = ApprovalMode.ALLOW_CONTROLS,
+                    selected = approvalMode == ApprovalMode.ALLOW_CONTROLS,
+                    onClick = { onApprovalMode(ApprovalMode.ALLOW_CONTROLS) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApprovalModeChoice(
+    mode: ApprovalMode,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "approval mode choice press",
+    )
+    val accent = if (mode == ApprovalMode.ALLOW_CONTROLS) Amber else Cyan
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) accent.copy(alpha = 0.12f) else Color(0xFF17181D))
+            .border(
+                width = 1.dp,
+                color = if (selected) accent.copy(alpha = 0.82f) else Color.White.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(18.dp),
+            )
+            .semantics {
+                this.selected = selected
+                contentDescription = "${mode.label}. ${mode.description}"
+                stateDescription = if (selected) "Selected" else "Not selected"
+            }
+            .clickable(
+                interactionSource = interactions,
+                indication = null,
+                role = Role.RadioButton,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+                onClick()
+            }
+            .padding(horizontal = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (mode == ApprovalMode.ALLOW_CONTROLS) {
+                    Icons.Rounded.TouchApp
+                } else {
+                    Icons.Rounded.NotificationsActive
+                },
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Spacer(Modifier.width(9.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                mode.label,
+                color = Frost,
+                fontSize = 11.sp,
+                lineHeight = 13.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            Text(
+                mode.description,
+                color = Muted.copy(alpha = if (selected) 0.92f else 0.76f),
+                fontSize = 8.sp,
+                lineHeight = 10.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (selected) {
+            Spacer(Modifier.width(5.dp))
+            Box(
+                Modifier
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(accent),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = Ink,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+        }
+    }
+}
+
+private val ApprovalMode.label: String
+    get() = when (this) {
+        ApprovalMode.ALERT_ONLY -> "Alert only"
+        ApprovalMode.ALLOW_CONTROLS -> "Allow controls"
+    }
+
+private val ApprovalMode.description: String
+    get() = when (this) {
+        ApprovalMode.ALERT_ONLY -> "Notify here; decide in Codex"
+        ApprovalMode.ALLOW_CONTROLS -> "Decide for watch-owned sessions"
+    }
 
 @Composable
 private fun ModelEffortOverlay(
@@ -926,14 +1304,9 @@ private fun ModelEffortOverlay(
         ) {
             Box(Modifier.fillMaxWidth().height(44.dp)) {
                 Text(
-                    text = buildAnnotatedString {
-                        withStyle(SpanStyle(color = Violet, fontWeight = FontWeight.Bold)) {
-                            append(effortLabel)
-                        }
-                        withStyle(SpanStyle(color = Frost, fontWeight = FontWeight.SemiBold)) {
-                            append(" effort")
-                        }
-                    },
+                    text = effortLabel,
+                    color = Violet,
+                    fontWeight = FontWeight.Bold,
                     fontSize = 18.sp,
                     letterSpacing = (-0.25).sp,
                     textAlign = TextAlign.Center,
@@ -971,7 +1344,7 @@ private fun ModelEffortOverlay(
                 }
             }
             Text(
-                "Drag to tune the next turn",
+                "Drag to change effort level",
                 color = Muted.copy(alpha = 0.86f),
                 fontSize = 9.sp,
                 lineHeight = 12.sp,
@@ -1030,7 +1403,7 @@ private fun ModelEffortOverlay(
             }
             Spacer(Modifier.height(5.dp))
             BoxWithConstraints(Modifier.fillMaxWidth().height(54.dp)) {
-                val choiceWidth = 112.dp
+                val choiceWidth = 128.dp
                 val carouselPadding = ((maxWidth - choiceWidth) / 2).coerceAtLeast(0.dp)
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
@@ -1047,10 +1420,6 @@ private fun ModelEffortOverlay(
                             modifier = Modifier.width(choiceWidth).height(52.dp),
                             onClick = {
                                 onModel(option?.model)
-                                val available = ReasoningEffortPolicy.options(option)
-                                if (ReasoningEffortPolicy.normalize(state.reasoningEffort) !in available) {
-                                    onEffort(option?.defaultReasoningEffort ?: available.first())
-                                }
                                 scope.launch { modelListState.animateScrollToItem(index) }
                             },
                         )
@@ -1275,11 +1644,14 @@ private fun ChatScreen(
     onBack: () -> Unit,
     onReply: () -> Unit,
     onRetry: () -> Unit,
+    onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
+    onPermissionResponse: (ChatMessage, Boolean) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val rotaryFocusRequester = remember { FocusRequester() }
     val horizontalPadding = roundAwareHorizontalPadding(round = 27.dp, square = 18.dp)
     val chat = state.chat
+    val messages = chat?.messages.orEmpty()
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Live session", onBack)
         LazyColumn(
@@ -1296,11 +1668,14 @@ private fun ChatScreen(
                 end = horizontalPadding,
                 bottom = 42.dp,
             ),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             item {
                 Column(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 5.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 5.dp)
+                        .padding(bottom = 10.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
@@ -1328,57 +1703,574 @@ private fun ChatScreen(
                 }
             }
             state.error?.let { message ->
-                item { ErrorPill(message, Modifier.fillMaxWidth()) }
+                item {
+                    Box(Modifier.padding(bottom = 8.dp)) {
+                        ErrorPill(message, Modifier.fillMaxWidth())
+                    }
+                }
             }
-            if (chat?.paragraphs.isNullOrEmpty()) {
+            if (messages.isEmpty()) {
                 item {
                     EmptyState(
-                        "No assistant text yet",
+                        "No conversation yet",
                         "Tap Voice reply to start or continue this Codex session.",
                     )
                 }
             } else {
-                items(chat.paragraphs, key = { it.id }) { paragraph ->
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(SurfaceShape)
-                            .background(if (paragraph.phase == ChatPhase.FINAL_ANSWER) PanelRaised else Panel)
-                            .border(
-                                1.dp,
-                                if (paragraph.phase == ChatPhase.FINAL_ANSWER) Violet.copy(alpha = 0.48f) else Color(0xFF34384D),
-                                SurfaceShape,
-                            )
-                            .padding(horizontal = 13.dp, vertical = 10.dp),
-                    ) {
-                        Column {
-                            Text(
-                                if (paragraph.phase == ChatPhase.FINAL_ANSWER) "ANSWER" else "UPDATE",
-                                color = if (paragraph.phase == ChatPhase.FINAL_ANSWER) Violet else Cyan,
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 0.7.sp,
-                            )
-                            Spacer(Modifier.height(3.dp))
-                            Text(
-                                paragraph.text,
-                                color = Frost,
-                                fontSize = 12.sp,
-                                lineHeight = 16.sp,
-                            )
-                        }
-                    }
+                itemsIndexed(
+                    items = messages,
+                    key = { _, message -> message.id },
+                ) { index, message ->
+                    val nextMessage = messages.getOrNull(index + 1)
+                    val sameCluster = nextMessage != null &&
+                        nextMessage.turnId == message.turnId &&
+                        nextMessage.role == message.role &&
+                        nextMessage.kind == message.kind
+                    ChatMessageItem(
+                        message = message,
+                        feedback = state.chatFeedback[message.id],
+                        feedbackPending = state.feedbackPendingMessageId == message.id,
+                        feedbackEnabled = state.feedbackPendingMessageId == null,
+                        collapseUpdates = state.collapseUpdates,
+                        approvalMode = state.approvalMode,
+                        permissionPending = state.pending,
+                        onRateMessage = onRateMessage,
+                        onPermissionResponse = onPermissionResponse,
+                        modifier = Modifier.padding(bottom = if (sameCluster) 5.dp else 12.dp),
+                    )
                 }
             }
             item {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 ) {
                     ActionButton("Retry", false, onRetry, enabled = !state.pending)
                     ActionButton("Voice reply", true, onReply, enabled = !state.pending)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ChatMessageItem(
+    message: ChatMessage,
+    feedback: FeedbackRating?,
+    feedbackPending: Boolean,
+    feedbackEnabled: Boolean,
+    collapseUpdates: Boolean,
+    approvalMode: ApprovalMode,
+    permissionPending: Boolean,
+    onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
+    onPermissionResponse: (ChatMessage, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (message.kind == ChatMessageKind.PERMISSION) {
+        PermissionChatMessage(
+            message = message,
+            approvalMode = approvalMode,
+            pending = permissionPending,
+            onPermissionResponse = onPermissionResponse,
+            modifier = modifier,
+        )
+        return
+    }
+    when (message.role) {
+        ChatRole.USER -> UserChatMessage(message = message, modifier = modifier)
+        ChatRole.ASSISTANT -> AssistantChatMessage(
+            message = message,
+            feedback = feedback,
+            feedbackPending = feedbackPending,
+            feedbackEnabled = feedbackEnabled,
+            collapseUpdates = collapseUpdates,
+            onRateMessage = onRateMessage,
+            modifier = modifier,
+        )
+    }
+}
+
+@Composable
+private fun PermissionChatMessage(
+    message: ChatMessage,
+    approvalMode: ApprovalMode,
+    pending: Boolean,
+    onPermissionResponse: (ChatMessage, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val canRespond = message.canControl &&
+        !message.resolved &&
+        approvalMode == ApprovalMode.ALLOW_CONTROLS
+    val stateLabel = when {
+        message.resolved -> "Resolved"
+        pending && canRespond -> "Working…"
+        canRespond -> "Decision needed"
+        else -> "Alert only"
+    }
+    val stateColor = when {
+        message.resolved -> Mint
+        canRespond -> Amber
+        else -> Muted
+    }
+    val shape = RoundedCornerShape(18.dp)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(Color(0xFF2C251C))
+            .border(1.dp, Amber.copy(alpha = 0.66f), shape)
+            .semantics { stateDescription = stateLabel }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(Amber.copy(alpha = 0.14f))
+                    .border(1.dp, Amber.copy(alpha = 0.46f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Security,
+                    contentDescription = null,
+                    tint = Amber,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(Modifier.width(9.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "PERMISSION",
+                    color = Amber,
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.8.sp,
+                )
+                Text(
+                    stateLabel,
+                    color = stateColor,
+                    fontSize = 9.sp,
+                    lineHeight = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            if (message.resolved) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = Mint,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        MarkdownMessageText(
+            markdown = message.text,
+            color = Frost,
+            accent = Amber,
+            codeBackground = Ink.copy(alpha = 0.78f),
+            modifier = Modifier.fillMaxWidth(),
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+        )
+        if (canRespond) {
+            Spacer(Modifier.height(7.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                PermissionDecisionButton(
+                    label = "Decline",
+                    approve = false,
+                    enabled = !pending,
+                    onClick = { onPermissionResponse(message, false) },
+                    modifier = Modifier.weight(1f),
+                )
+                PermissionDecisionButton(
+                    label = "Allow",
+                    approve = true,
+                    enabled = !pending,
+                    onClick = { onPermissionResponse(message, true) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        } else if (!message.resolved) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Open Codex to decide",
+                color = Muted.copy(alpha = 0.9f),
+                fontSize = 9.sp,
+                lineHeight = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PermissionDecisionButton(
+    label: String,
+    approve: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val accent = if (approve) Amber else Coral
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.96f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "permission decision press",
+    )
+    Box(
+        modifier
+            .height(48.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(CircleShape)
+            .background(if (approve) accent else PanelRaised)
+            .border(1.dp, accent.copy(alpha = 0.82f), CircleShape)
+            .semantics { contentDescription = "$label this permission request" }
+            .clickable(
+                enabled = enabled,
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+                onClick()
+            }
+            .alpha(if (enabled) 1f else 0.52f),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = if (approve) Ink else Frost,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+@Composable
+private fun UserChatMessage(
+    message: ChatMessage,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(
+        topStart = 20.dp,
+        topEnd = 8.dp,
+        bottomEnd = 20.dp,
+        bottomStart = 20.dp,
+    )
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.86f)
+                .clip(shape)
+                .background(Color(0xFF292338))
+                .border(1.dp, Violet.copy(alpha = 0.46f), shape)
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+        ) {
+            Text(
+                "YOU",
+                color = Violet.copy(alpha = 0.92f),
+                fontSize = 8.sp,
+                lineHeight = 9.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 0.8.sp,
+                modifier = Modifier.align(Alignment.End),
+            )
+            Spacer(Modifier.height(3.dp))
+            MarkdownMessageText(
+                markdown = message.text,
+                color = Frost,
+                accent = Cyan,
+                codeBackground = Ink.copy(alpha = 0.78f),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AssistantChatMessage(
+    message: ChatMessage,
+    feedback: FeedbackRating?,
+    feedbackPending: Boolean,
+    feedbackEnabled: Boolean,
+    collapseUpdates: Boolean,
+    onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (message.phase == ChatPhase.COMMENTARY) {
+        UpdateChatMessage(
+            message = message,
+            collapseUpdates = collapseUpdates,
+            modifier = modifier,
+        )
+        return
+    }
+    AnswerChatMessage(
+        message = message,
+        feedback = feedback,
+        feedbackPending = feedbackPending,
+        feedbackEnabled = feedbackEnabled,
+        onRateMessage = onRateMessage,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun UpdateChatMessage(
+    message: ChatMessage,
+    collapseUpdates: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var collapsed by rememberSaveable(message.id, collapseUpdates) {
+        mutableStateOf(ChatDisplayPolicy.startsCollapsed(message, collapseUpdates))
+    }
+    val interactions = remember { MutableInteractionSource() }
+    val haptics = LocalHapticFeedback.current
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (collapsed) 0f else 180f,
+        animationSpec = tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut),
+        label = "update chevron",
+    )
+    val shape = RoundedCornerShape(
+        topStart = 8.dp,
+        topEnd = 20.dp,
+        bottomEnd = 20.dp,
+        bottomStart = 20.dp,
+    )
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(Panel)
+            .border(1.dp, Color(0xFF34384D), shape)
+            .semantics {
+                stateDescription = if (collapsed) "Collapsed" else "Expanded"
+            }
+            .clickable(
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                collapsed = !collapsed
+            }
+            .padding(start = 13.dp, end = 9.dp, top = 9.dp, bottom = 9.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "UPDATE",
+                color = Cyan.copy(alpha = 0.92f),
+                fontSize = 8.sp,
+                lineHeight = 9.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 0.8.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            Icon(
+                imageVector = Icons.Rounded.KeyboardArrowDown,
+                contentDescription = null,
+                tint = Muted,
+                modifier = Modifier
+                    .size(18.dp)
+                    .graphicsLayer { rotationZ = chevronRotation },
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        AnimatedContent(
+            targetState = collapsed,
+            modifier = Modifier.fillMaxWidth(),
+            transitionSpec = {
+                (fadeIn(tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut)) togetherWith
+                    fadeOut(tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut))).using(
+                    SizeTransform(clip = true) { _, _ ->
+                        tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut)
+                    },
+                )
+            },
+            contentAlignment = Alignment.TopStart,
+            label = "update body",
+        ) { showPreview ->
+            MarkdownMessageText(
+                markdown = message.text,
+                color = Frost,
+                accent = Cyan,
+                codeBackground = Ink.copy(alpha = 0.78f),
+                modifier = Modifier.fillMaxWidth().padding(end = 4.dp),
+                maxLines = if (showPreview) 2 else Int.MAX_VALUE,
+                overflow = if (showPreview) TextOverflow.Ellipsis else TextOverflow.Clip,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AnswerChatMessage(
+    message: ChatMessage,
+    feedback: FeedbackRating?,
+    feedbackPending: Boolean,
+    feedbackEnabled: Boolean,
+    onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(
+        topStart = 8.dp,
+        topEnd = 20.dp,
+        bottomEnd = 20.dp,
+        bottomStart = 20.dp,
+    )
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(PanelRaised)
+            .border(1.dp, Violet.copy(alpha = 0.48f), shape)
+            .padding(start = 13.dp, end = 9.dp, top = 9.dp, bottom = 4.dp),
+    ) {
+        Text(
+            if (message.phase == ChatPhase.FINAL_ANSWER) "ANSWER" else "CODEX",
+            color = Violet.copy(alpha = 0.92f),
+            fontSize = 8.sp,
+            lineHeight = 9.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.8.sp,
+        )
+        Spacer(Modifier.height(3.dp))
+        MarkdownMessageText(
+            markdown = message.text,
+            color = Frost,
+            accent = Violet,
+            codeBackground = Ink.copy(alpha = 0.78f),
+            modifier = Modifier.fillMaxWidth().padding(end = 4.dp),
+        )
+        Spacer(Modifier.height(2.dp))
+        ChatFeedbackControls(
+            selectedRating = feedback,
+            pending = feedbackPending,
+            enabled = feedbackEnabled,
+            onRate = { rating -> onRateMessage(message, rating) },
+        )
+    }
+}
+
+@Composable
+private fun ChatFeedbackControls(
+    selectedRating: FeedbackRating?,
+    pending: Boolean,
+    enabled: Boolean,
+    onRate: (FeedbackRating) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .semantics {
+                if (pending) stateDescription = "Sending feedback"
+            },
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (pending) {
+            Text(
+                "SENDING",
+                color = Muted.copy(alpha = 0.78f),
+                fontSize = 7.sp,
+                lineHeight = 8.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.7.sp,
+            )
+            Spacer(Modifier.width(2.dp))
+        }
+        ChatFeedbackButton(
+            rating = FeedbackRating.LIKED,
+            selected = selectedRating == FeedbackRating.LIKED,
+            pending = pending,
+            enabled = enabled,
+            onClick = { onRate(FeedbackRating.LIKED) },
+        )
+        ChatFeedbackButton(
+            rating = FeedbackRating.DISLIKED,
+            selected = selectedRating == FeedbackRating.DISLIKED,
+            pending = pending,
+            enabled = enabled,
+            onClick = { onRate(FeedbackRating.DISLIKED) },
+        )
+    }
+}
+
+@Composable
+private fun ChatFeedbackButton(
+    rating: FeedbackRating,
+    selected: Boolean,
+    pending: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val interactive = enabled && !pending
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && interactive) 0.94f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "chat feedback press",
+    )
+    val liked = rating == FeedbackRating.LIKED
+    val label = if (liked) "Like this Codex response" else "Dislike this Codex response"
+    val accent = if (liked) Cyan else Coral
+    Box(
+        Modifier
+            .size(48.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .semantics {
+                this.selected = selected
+                contentDescription = label
+                stateDescription = when {
+                    pending -> "Feedback sending"
+                    selected -> "Selected"
+                    else -> "Not selected"
+                }
+            }
+            .clickable(
+                enabled = interactive,
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+                onClick()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(if (selected) accent.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.04f))
+                .border(
+                    1.dp,
+                    if (selected) accent.copy(alpha = 0.78f) else Color.White.copy(alpha = 0.14f),
+                    CircleShape,
+                )
+                .alpha(if (interactive || selected) 1f else 0.5f),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (liked) Icons.Rounded.ThumbUp else Icons.Rounded.ThumbDown,
+                contentDescription = null,
+                tint = if (selected) accent else Muted,
+                modifier = Modifier.size(17.dp),
+            )
         }
     }
 }
@@ -1490,12 +2382,14 @@ private fun SettingsScreen(
     onBack: () -> Unit,
     onEngine: (TranscriptionEngine) -> Unit,
     onApprovalMode: (ApprovalMode) -> Unit,
+    onCollapseUpdates: (Boolean) -> Unit,
     onUpdate: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val listState = rememberLazyListState()
     val rotaryFocusRequester = remember { FocusRequester() }
     val horizontalPadding = roundAwareHorizontalPadding()
+    val haptics = LocalHapticFeedback.current
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Settings", onBack)
         LazyColumn(
@@ -1528,6 +2422,17 @@ private fun SettingsScreen(
                     subtitle = "Faster · limited language switching",
                     selected = state.transcriptionEngine == TranscriptionEngine.DEVICE_SPEECH,
                 ) { onEngine(TranscriptionEngine.DEVICE_SPEECH) }
+            }
+            item { SectionLabel("CHAT") }
+            item {
+                SettingChoice(
+                    title = "Collapse updates",
+                    subtitle = "Updates start collapsed; answers stay open",
+                    selected = state.collapseUpdates,
+                ) {
+                    haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+                    onCollapseUpdates(!state.collapseUpdates)
+                }
             }
             item { SectionLabel("APPROVALS") }
             item {
@@ -1798,7 +2703,15 @@ private fun ActionButton(
 
 @Composable
 private fun SettingChoice(title: String, subtitle: String, selected: Boolean, onClick: () -> Unit) {
-    TactileCard(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+    TactileCard(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics {
+                this.selected = selected
+                stateDescription = if (selected) "Selected" else "Not selected"
+            },
+    ) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(title, color = Frost, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)

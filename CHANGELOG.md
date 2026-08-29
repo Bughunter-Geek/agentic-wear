@@ -2,6 +2,30 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.4.7-alpha — 2026-08-29
+
+### Added
+
+- Adds watch-visible user messages and structured Markdown rendering to the live session, while keeping reasoning and tool payloads out of the watch cache.
+- Adds accessible like/dislike controls for completed Codex responses. Feedback uses Codex's supported feedback endpoint, tags the exact turn and response, and includes no local logs.
+- Adds a persistent permission mode beside model controls, shows live permission requests as distinct chat cards, and handles current App Server permission-profile requests with exact, one-turn grants for watch-owned sessions.
+
+### Fixed
+
+- Rejoins an idle iOS/Android-owned task through Codex's shared daemon, applies the watch-selected model and reasoning effort, and starts the turn on that same live thread so connected clients receive updates. A failed settings update prevents the prompt from being sent with stale settings.
+- Replaces the generated-but-unavailable `thread/queue/add` path with runtime-supported resume/start behavior; busy cross-client tasks now return an explicit retry message instead of interrupting the active turn.
+- Makes model selection atomic by resetting effort to the newly selected model's advertised default every time.
+- Stops flattening Markdown and paragraph spacing into one malformed line.
+
+### Refined
+
+- Replaces the model-control glyph with a native Codex-style gauge, adds a smooth 200 ms scale/fade transition, and avoids full-state reloads when changing model, effort, or permission mode.
+- Reworks live chat into round-safe user and Codex message treatments with bounded, role-aware history. Intermediate `UPDATE` cards smoothly auto-collapse by default while final answers remain fully rendered; Settings can disable that behavior.
+
+### Test status
+
+- This remains an Alpha candidate and is not 0.5. Cross-client model visibility and the minimized-watch notification path still require the user's physical Pixel Watch/iOS/Android acceptance test before any milestone promotion.
+
 ## 0.4.6-alpha — 2026-08-29
 
 ### Refined
