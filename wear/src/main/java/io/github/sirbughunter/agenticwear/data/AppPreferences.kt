@@ -26,6 +26,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_SELECTED_THREAD, null)
         set(value) = prefs.edit { putString(KEY_SELECTED_THREAD, value) }
 
+    var submitDraftAsNewSession: Boolean
+        get() = prefs.getBoolean(KEY_SUBMIT_DRAFT_AS_NEW_SESSION, false)
+        set(value) = prefs.edit { putBoolean(KEY_SUBMIT_DRAFT_AS_NEW_SESSION, value) }
+
     var transcriptionEngine: TranscriptionEngine
         get() = storedTranscriptionEngine(prefs.getString(KEY_ENGINE, null))
         set(value) = prefs.edit { putString(KEY_ENGINE, value.name) }
@@ -132,7 +136,7 @@ class AppPreferences(context: Context) {
 
     var lastError: String?
         get() = prefs.getString(KEY_LAST_ERROR, null)
-        set(value) = prefs.edit { putString(KEY_LAST_ERROR, value?.take(180)) }
+        set(value) = prefs.edit { putString(KEY_LAST_ERROR, value) }
 
     fun markEventHandled(eventId: String): Boolean {
         return claimHandledEvent(
@@ -169,6 +173,7 @@ class AppPreferences(context: Context) {
     companion object {
         private const val KEY_RELAY_URL = "relay_url"
         private const val KEY_SELECTED_THREAD = "selected_thread"
+        private const val KEY_SUBMIT_DRAFT_AS_NEW_SESSION = "submit_draft_as_new_session"
         private const val KEY_ENGINE = "transcription_engine"
         private const val KEY_APPROVAL_MODE = "approval_mode"
         private const val KEY_COLLAPSE_UPDATES = "collapse_updates"

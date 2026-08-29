@@ -129,6 +129,86 @@ describe("AppServerClient session delivery", () => {
     }]);
   });
 
+  it("reports realtime voice as unavailable when GPT-Live-1 is absent from the Codex catalog", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/realtime/listVoices") {
+        return Promise.resolve({
+          voices: { v1: ["cove"], v2: ["marin"], defaultV1: "cove", defaultV2: "marin" },
+        });
+      }
+      if (method === "model/list") {
+        return Promise.resolve({
+          data: [{
+            id: "gpt-5.6-terra",
+            model: "gpt-5.6-terra",
+            displayName: "GPT-5.6-Terra",
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [],
+          }],
+          nextCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.realtimeVoiceCapability()).resolves.toEqual({
+      available: false,
+      realtimeApiAvailable: true,
+      voices: { v1: ["cove"], v2: ["marin"], defaultV1: "cove", defaultV2: "marin" },
+      gptLiveModelAvailable: false,
+      blocker: "gpt_live_model_unavailable",
+    });
+    expect(internals.request).toHaveBeenCalledWith("thread/realtime/listVoices", {});
+  });
+
+  it("keeps realtime voice disabled when GPT-Live-1 is cataloged but no watch transport exists", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/realtime/listVoices") {
+        return Promise.resolve({
+          voices: { v1: ["cove"], v2: ["marin"], defaultV1: "cove", defaultV2: "marin" },
+        });
+      }
+      if (method === "model/list") {
+        return Promise.resolve({
+          data: [{
+            id: "gpt-live-1",
+            model: "gpt-live-1",
+            displayName: "GPT-Live-1",
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [],
+          }],
+          nextCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.realtimeVoiceCapability()).resolves.toMatchObject({
+      available: false,
+      realtimeApiAvailable: true,
+      gptLiveModelAvailable: true,
+      blocker: "watch_transport_not_implemented",
+    });
+  });
+
+  it("reports an unavailable realtime API without checking the model catalog", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.reject(new Error("unknown variant")));
+
+    await expect(target.realtimeVoiceCapability()).resolves.toMatchObject({
+      available: false,
+      realtimeApiAvailable: false,
+      gptLiveModelAvailable: false,
+      blocker: "realtime_api_unavailable",
+    });
+    expect(internals.request).toHaveBeenCalledTimes(1);
+  });
+
   it("rejoins and starts an idle session owned by another Codex client", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
@@ -180,6 +260,19 @@ describe("AppServerClient session delivery", () => {
     await expect(target.submitTurn("thread-1", "Do not send this.", "/tmp", "gpt-5.6-sol", "max"))
       .rejects.toThrow("settings denied");
     expect(internals.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a foreign prompt unsent when Codex reports another active writer", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/resume") return Promise.reject(new Error("active writer already attached"));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Do not queue this.", "/tmp"))
+      .rejects.toThrow("Your watch prompt was not queued or sent");
+    expect(internals.request).toHaveBeenCalledTimes(1);
   });
 
   it("does not interrupt an active session owned by another Codex client", async () => {
@@ -363,6 +456,7 @@ describe("AppServerClient session delivery", () => {
 
   it("grants the exact requested permission profile for only the current turn", async () => {
     const approvals: Array<{ approvalId: string; canControl: boolean }> = [];
+    const longReason = `Allow this turn to write its test artifact? ${"detail ".repeat(120)}`;
     const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async (event) => {
       approvals.push({ approvalId: event.approvalId, canControl: event.canControl });
     });
@@ -391,7 +485,7 @@ describe("AppServerClient session delivery", () => {
       environmentId: null,
       startedAtMs: 1_787_900_000_000,
       cwd: "/tmp",
-      reason: "Allow this turn to write its test artifact?",
+      reason: longReason,
       permissions,
     });
     const permissionSnapshot = await target.chatSnapshot("thread-1");
@@ -403,7 +497,7 @@ describe("AppServerClient session delivery", () => {
       turnId: "turn-1",
       role: "assistant",
       kind: "permission",
-      text: "Allow this turn to write its test artifact?",
+      text: longReason.trim(),
       approvalId: "permission-1",
       canControl: true,
       resolved: false,

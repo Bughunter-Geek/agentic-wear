@@ -54,6 +54,7 @@ data class WearUiState(
     val sessions: List<AgentSession> = emptyList(),
     val models: List<ModelOption> = emptyList(),
     val selectedThreadId: String? = null,
+    val submitDraftAsNewSession: Boolean = false,
     val latestAlert: AgentAlert? = null,
     val transcript: Transcript? = null,
     val chat: ChatSnapshot? = null,
@@ -143,6 +144,20 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun refreshInbox() = launchTask(showPending = false) {
         repository.refreshInboxAndSessions(notify = true, notifyAfterMillis = foregroundStartedAtMillis)
         reload()
+    }
+
+    fun refreshSessionsForRecovery() = refreshInbox()
+
+    /** Keeps the recorded draft and requires an explicit Send before creating a new thread. */
+    fun startNewSessionForRecovery() {
+        val current = _state.value
+        val recovered = recoverDraftForNewSession(current)
+        if (recovered === current) return
+        preferences.selectedThreadId = null
+        preferences.chatSnapshot = null
+        preferences.transcript = recovered.transcript
+        preferences.submitDraftAsNewSession = true
+        _state.value = recovered
     }
 
     fun selectSession(threadId: String) {
@@ -280,12 +295,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         launchTask {
             val current = _state.value
             val threadId = repository.submitTurn(
-                threadId = transcript.threadId ?: current.selectedSession?.id,
+                threadId = threadIdForDraftSubmission(current),
                 text = transcript.text,
                 model = current.selectedModel,
                 effort = current.reasoningEffort,
             )
             preferences.selectedThreadId = threadId
+            preferences.submitDraftAsNewSession = false
             repository.watchChat(threadId)
             reload(WearScreen.CHAT)
             startChatStream(threadId)
@@ -315,6 +331,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         deviceSpeech?.cancel()
         preferences.transcript = null
         preferences.revisionBase = null
+        preferences.submitDraftAsNewSession = false
         preferences.pending = false
         preferences.lastError = null
         _state.update(::resetForNewTranscription)
@@ -369,7 +386,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 _state.update { state ->
                     state.copy(
                         feedbackPendingMessageId = null,
-                        error = (error.message ?: "Could not send feedback").take(180),
+                        error = error.message ?: "Could not send feedback",
                     )
                 }
             }
@@ -452,14 +469,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             "error" -> AgentAlert("demo-error", AlertKind.ERROR, "demo-docs", sessions[2].title, "The agent stopped after a build error.", now)
             else -> null
         }
-        val transcript = if (normalized == "transcript") {
+        val transcript = if (normalized == "transcript" || normalized == "transcript-foreign-error") {
             Transcript("demo-transcript", "Make the completion state calmer and verify the release build.", "demo-build")
         } else null
         _state.value = WearUiState(
             screen = when (normalized) {
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
-                "transcript" -> WearScreen.TRANSCRIPT
+                "transcript", "transcript-foreign-error" -> WearScreen.TRANSCRIPT
                 "chat", "chat-error", "chat-permission" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
@@ -517,7 +534,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                                 id = "demo-permission-1",
                                 turnId = "demo-turn-2",
                                 role = ChatRole.ASSISTANT,
-                                text = "Allow Gradle to access the network for this turn?",
+                                text = "Allow Gradle to access the network, resolve dependencies, and download build metadata for this turn?",
                                 phase = io.github.sirbughunter.agenticwear.model.ChatPhase.UNKNOWN,
                                 kind = io.github.sirbughunter.agenticwear.model.ChatMessageKind.PERMISSION,
                                 approvalId = "demo-permission-1",
@@ -562,6 +579,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             error = when {
                 homeErrorDemo -> "I didn't catch enough audio. Tap and try again."
                 normalized == "chat-error" -> "That Codex session is no longer available on this bridge. Refresh Sessions and choose another one."
+                normalized == "transcript-foreign-error" -> "Codex still owns this session in another client. Agentic Wear did not queue or send your prompt; the complete draft remains on this watch."
                 else -> null
             },
             demo = true,
@@ -748,7 +766,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 runCatching { repository.refreshChatInbox() }
                     .onFailure { error ->
                         _state.update { current ->
-                            current.copy(error = (error.message ?: "Live chat refresh failed").take(180))
+                            current.copy(error = error.message ?: "Live chat refresh failed")
                         }
                     }
                 ticks += 1
@@ -850,7 +868,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun updateErrorMessage(error: Throwable): String =
-        (error.message ?: "Could not prepare the update").take(120)
+        error.message ?: "Could not prepare the update"
 
     private fun showError(error: Throwable) = showError(error.message ?: "Something went wrong")
 
@@ -866,7 +884,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 transcribing = false,
                 transcriptionElapsedMillis = null,
                 voiceLevel = 0f,
-                error = message.take(180),
+                error = message,
             )
         }
     }
@@ -924,6 +942,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             sessions = preferences.sessions,
             models = preferences.models,
             selectedThreadId = preferences.selectedThreadId,
+            submitDraftAsNewSession = preferences.submitDraftAsNewSession,
             latestAlert = preferences.latestAlert,
             transcript = transcript,
             chat = preferences.chatSnapshot,
@@ -966,6 +985,7 @@ internal fun resetForNewTranscription(current: WearUiState): WearUiState = curre
     transcriptionElapsedMillis = null,
     voiceLevel = 0f,
     error = null,
+    submitDraftAsNewSession = false,
 )
 
 internal fun shouldCancelRecordingWhenActivityStops(engine: TranscriptionEngine): Boolean =

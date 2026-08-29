@@ -2,6 +2,18 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6-alpha — 2026-08-29
+
+This is an explicitly unverified public Alpha prerelease. The physical minimized-watch acceptance test is still pending.
+
+- Adds a diagnostic-only Codex App Server realtime-voice capability check. The encrypted recording → local transcription → text-turn path remains unchanged unless `gpt-live-1` is actually present in the App Server model catalog and a reviewed watch transport is added.
+- Corrects foreign-session recovery: an active writer is reported as an unsent, unqueued draft instead of suggesting that restarting Codex will safely queue it. The watch can refresh the session list or explicitly preserve its draft for a new session; it never sends that draft to another thread silently.
+- Makes watch errors tap-to-open and scrollable, with complete TalkBack descriptions. Long permission requests retain their full accessible text rather than relying on clipped cards or ellipses. Removes the accidental 260-character bridge/watch error cap while whitespace-normalizing and redacting credential-shaped values before encryption.
+
+### Test status
+
+- Bridge and Wear unit/lint/build checks pass, and the 454 px Wear OS emulator verifies the full error dialog, scroll affordance, and draft-preserving recovery flow. Physical minimized-watch and notification delivery remain unverified for this prerelease.
+
 ## 0.4.7-alpha — 2026-08-29
 
 ### Added

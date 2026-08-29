@@ -132,6 +132,17 @@ export const modelListResponseSchema = z.object({
 
 export type CodexModel = z.infer<typeof modelListEntrySchema>;
 
+export const realtimeVoiceListResponseSchema = z.object({
+  voices: z.object({
+    v1: z.array(z.string().trim().min(1)).max(32),
+    v2: z.array(z.string().trim().min(1)).max(32),
+    defaultV1: z.string().trim().min(1).nullable(),
+    defaultV2: z.string().trim().min(1).nullable(),
+  }).strict(),
+}).strict();
+
+export type RealtimeVoiceListResponse = z.infer<typeof realtimeVoiceListResponseSchema>;
+
 export const turnCompletedSchema = z.object({
   threadId: safeId,
   turn: z.object({

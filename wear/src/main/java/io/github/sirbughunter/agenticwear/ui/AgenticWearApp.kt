@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -113,6 +114,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.wear.compose.foundation.requestFocusOnHierarchyActive
 import androidx.wear.compose.foundation.rotary.RotaryScrollableDefaults
@@ -238,6 +240,8 @@ fun AgenticWearApp(
                     onModel = viewModel::setModel,
                     onEffort = viewModel::setReasoningEffort,
                     onApprovalMode = viewModel::setApprovalMode,
+                    onRefreshSessions = viewModel::refreshSessionsForRecovery,
+                    onStartNewSession = viewModel::startNewSessionForRecovery,
                 )
                 WearScreen.CHAT -> ChatScreen(
                     state = state,
@@ -321,9 +325,11 @@ private fun InstallPermissionPrompt(
         Column(
             Modifier
                 .fillMaxWidth()
+                .height(220.dp)
                 .clip(SurfaceShape)
                 .background(Brush.linearGradient(listOf(PanelRaised, Panel)))
                 .border(1.dp, Violet.copy(alpha = 0.72f), SurfaceShape)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 15.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -754,6 +760,8 @@ private fun TranscriptScreen(
     onModel: (String?) -> Unit,
     onEffort: (String) -> Unit,
     onApprovalMode: (ApprovalMode) -> Unit,
+    onRefreshSessions: () -> Unit,
+    onStartNewSession: () -> Unit,
 ) {
     val transcript = state.transcript
     val scrollState = rememberScrollState()
@@ -823,11 +831,11 @@ private fun TranscriptScreen(
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                state.selectedSession?.title ?: "New session",
+                transcriptDestinationLabel(state),
                 color = Muted,
                 fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                lineHeight = 13.sp,
+                textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
             )
             Spacer(Modifier.height(4.dp))
@@ -877,9 +885,26 @@ private fun TranscriptScreen(
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            state.error?.let {
+            state.error?.let { error ->
                 Spacer(Modifier.height(7.dp))
-                ErrorPill(it, Modifier.fillMaxWidth())
+                ErrorPill(error, Modifier.fillMaxWidth())
+                val recoveryActions = recoveryActionsForError(error)
+                if (ErrorRecoveryAction.REFRESH_SESSIONS in recoveryActions) {
+                    Spacer(Modifier.height(7.dp))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        ActionButton("Refresh sessions", false, onRefreshSessions, enabled = !state.pending)
+                        Spacer(Modifier.height(6.dp))
+                        ActionButton("Start new", true, onStartNewSession, enabled = !state.pending)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Refresh confirms the selected session. Start new keeps this draft and sends nowhere until you tap Send.",
+                        color = Muted,
+                        fontSize = 9.sp,
+                        lineHeight = 12.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1819,7 +1844,10 @@ private fun PermissionChatMessage(
             .clip(shape)
             .background(Color(0xFF2C251C))
             .border(1.dp, Amber.copy(alpha = 0.66f), shape)
-            .semantics { stateDescription = stateLabel }
+            .semantics {
+                stateDescription = stateLabel
+                contentDescription = permissionRequestContentDescription(stateLabel, message.text)
+            }
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2352,8 +2380,6 @@ private fun AlertScreen(
             lineHeight = 18.sp,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
         )
         Spacer(Modifier.height(5.dp))
         Text(
@@ -2362,8 +2388,6 @@ private fun AlertScreen(
             fontSize = 11.sp,
             lineHeight = 14.sp,
             textAlign = TextAlign.Center,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
         )
         if (alert?.kind == AlertKind.PERMISSION && alert.canControl && approvalMode == ApprovalMode.ALLOW_CONTROLS) {
             Spacer(Modifier.height(14.dp))
@@ -2875,17 +2899,71 @@ private fun StatusDot(status: SessionStatus) {
 
 @Composable
 private fun ErrorPill(message: String, modifier: Modifier = Modifier) {
+    var detailsOpen by rememberSaveable(message) { mutableStateOf(false) }
+    val presentation = errorDetailPresentation(message)
     Text(
-        message,
+        presentation.compactLabel,
         color = Frost,
         fontSize = 10.sp,
         lineHeight = 13.sp,
-        maxLines = 4,
-        overflow = TextOverflow.Ellipsis,
         textAlign = TextAlign.Center,
-        modifier = modifier.clip(CircleShape).background(Color(0xFF5A2431)).border(1.dp, Coral, CircleShape)
+        modifier = modifier
+            .clip(CircleShape)
+            .background(Color(0xFF5A2431))
+            .border(1.dp, Coral, CircleShape)
+            .semantics { contentDescription = presentation.contentDescription }
+            .clickable(role = Role.Button) { detailsOpen = true }
             .padding(horizontal = 13.dp, vertical = 7.dp),
     )
+    if (detailsOpen) {
+        FullTextDetailDialog(
+            title = "Error details",
+            message = presentation.fullText,
+            onDismiss = { detailsOpen = false },
+        )
+    }
+}
+
+@Composable
+private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -> Unit) {
+    val scrollState = rememberScrollState()
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.82f)
+                .clip(SurfaceShape)
+                .background(Ink)
+                .border(1.dp, Coral.copy(alpha = 0.55f), SurfaceShape)
+                .padding(horizontal = 32.dp, vertical = 16.dp),
+        ) {
+            Text(title, color = Coral, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                message,
+                color = Frost,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.weight(1f).verticalScroll(scrollState),
+            )
+            detailScrollAffordance(scrollState.maxValue > 0)?.let { affordance ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    affordance,
+                    color = Mint,
+                    fontSize = 10.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription = "Swipe to read more. Full error text is scrollable."
+                        },
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            ActionButton("Close", true, onDismiss, enabled = true)
+        }
+    }
 }
 
 @Composable

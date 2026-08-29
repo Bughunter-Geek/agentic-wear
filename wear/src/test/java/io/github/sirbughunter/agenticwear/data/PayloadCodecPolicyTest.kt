@@ -37,6 +37,12 @@ class PayloadCodecPolicyTest {
     }
 
     @Test
+    fun `long safe request errors survive decoding without presentation truncation`() {
+        val detail = "The complete safe bridge diagnostic remains available. " + "detail ".repeat(120)
+        assertEquals(detail.trim(), fullAlertDetail(detail))
+    }
+
+    @Test
     fun `reasoning effort values normalize to safe labels`() {
         assertEquals("xhigh", ReasoningEffortPolicy.normalize(" XHIGH "))
         assertEquals("medium", ReasoningEffortPolicy.normalize("not supported"))

@@ -163,7 +163,7 @@ class VoiceSessionService : Service() {
         preferences.lastError = message
         _sessionState.value = VoiceSessionSnapshot(
             phase = VoiceSessionPhase.ERROR,
-            error = message.take(180),
+            error = message,
         )
         sendBroadcast(Intent(AgenticWearRepository.ACTION_STATE_CHANGED).setPackage(packageName))
         finishService(resetState = false)

@@ -146,7 +146,7 @@ object PayloadCodec {
         val eventId = json.optString("eventId").takeIf(::isSafeId) ?: return null
         val threadId = json.optString("threadId").takeIf(::isSafeId) ?: return null
         val title = clean(json.optString("title"), 100).ifEmpty { "Agent session" }
-        val detail = clean(json.optString("detail"), 260).ifEmpty {
+        val detail = fullAlertDetail(json.optString("detail")).ifEmpty {
             when (kind) {
                 AlertKind.COMPLETE -> "The agent finished its work."
                 AlertKind.PERMISSION -> "The agent needs your decision."
@@ -180,7 +180,7 @@ object PayloadCodec {
         val title = clean(json.optString("title"), 100).ifEmpty {
             clean(fallbackTitle.orEmpty(), 100).ifEmpty { "Agentic Wear request" }
         }
-        val detail = clean(json.optString("message"), 260)
+        val detail = fullAlertDetail(json.optString("message"))
             .ifEmpty { "The request could not be completed." }
         return AgentAlert(
             eventId = eventId,
@@ -438,7 +438,7 @@ object PayloadCodec {
             kind = AlertKind.valueOf(item.getString("kind")),
             threadId = item.getString("threadId"),
             title = clean(item.getString("title"), 100),
-            detail = clean(item.getString("detail"), 260),
+            detail = fullAlertDetail(item.getString("detail")),
             occurredAtMillis = item.getLong("occurredAt"),
             approvalId = item.optString("approvalId").takeIf(::isSafeId),
             canControl = item.optBoolean("canControl"),
@@ -509,7 +509,9 @@ object PayloadCodec {
         }
     }
 
-    private fun clean(value: String, limit: Int): String = value.trim().replace(Regex("\\s+"), " ").take(limit)
+    private fun clean(value: String, limit: Int): String = cleanFullText(value).take(limit)
+
+    private fun cleanFullText(value: String): String = fullAlertDetail(value)
 
     private fun cleanChatText(value: String, limit: Int): String = value
         .replace("\r\n", "\n")
@@ -526,6 +528,8 @@ object PayloadCodec {
     private const val MAX_CHAT_MESSAGES = 12
     private const val MAX_CHAT_MESSAGE_CHARS = 6_000
 }
+
+internal fun fullAlertDetail(value: String): String = value.trim().replace(Regex("\\s+"), " ")
 
 internal fun acceptsAlertEnvelope(kind: String, turnScope: String): Boolean = when (kind) {
     "terminal.completed", "terminal.failed", "terminal.interrupted", "terminal.blocked" ->

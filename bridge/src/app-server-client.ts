@@ -10,6 +10,7 @@ import {
   itemCompletedSchema,
   jsonRpcMessageSchema,
   modelListResponseSchema,
+  realtimeVoiceListResponseSchema,
   threadListResponseSchema,
   threadSchema,
   turnCompletedSchema,
@@ -17,6 +18,7 @@ import {
   turnStartedSchema,
   type CodexThread,
 } from "./schemas.js";
+import { sanitizePublicText } from "./public-text.js";
 
 export type SessionView = {
   id: string;
@@ -33,6 +35,19 @@ export type ModelView = {
   model: string;
   defaultReasoningEffort: string;
   supportedReasoningEfforts: string[];
+};
+
+/**
+ * Diagnostic only. Audio remains on the encrypted recording/transcription path
+ * until the watch has a separately reviewed full-duplex protocol.
+ */
+export type RealtimeVoiceCapability = {
+  /** Always false until a reviewed encrypted full-duplex watch transport exists. */
+  available: false;
+  realtimeApiAvailable: boolean;
+  voices: { v1: string[]; v2: string[]; defaultV1: string | null; defaultV2: string | null } | null;
+  gptLiveModelAvailable: boolean;
+  blocker: "realtime_api_unavailable" | "model_catalog_unavailable" | "gpt_live_model_unavailable" | "watch_transport_not_implemented";
 };
 
 export type TerminalEvent = {
@@ -339,6 +354,51 @@ export class AppServerClient {
     return this.modelCache;
   }
 
+  /**
+   * This is deliberately diagnostic-only. A voice list proves that the App
+   * Server has an experimental realtime surface, not that GPT-Live-1 is
+   * available to this subscription or that the watch can safely start a
+   * full-duplex transport.
+   */
+  async realtimeVoiceCapability(): Promise<RealtimeVoiceCapability> {
+    let voices: RealtimeVoiceCapability["voices"] = null;
+    try {
+      voices = realtimeVoiceListResponseSchema.parse(
+        await this.request("thread/realtime/listVoices", {}),
+      ).voices;
+    } catch {
+      return {
+        available: false,
+        realtimeApiAvailable: false,
+        voices: null,
+        gptLiveModelAvailable: false,
+        blocker: "realtime_api_unavailable",
+      };
+    }
+
+    try {
+      const gptLiveModelAvailable = (await this.listModels())
+        .some((model) => model.id === "gpt-live-1" || model.model === "gpt-live-1");
+      return {
+        // A catalog entry is necessary but not sufficient: no realtime watch
+        // transport is implemented or enabled by this diagnostic.
+        available: false,
+        realtimeApiAvailable: true,
+        voices,
+        gptLiveModelAvailable,
+        blocker: gptLiveModelAvailable ? "watch_transport_not_implemented" : "gpt_live_model_unavailable",
+      };
+    } catch {
+      return {
+        available: false,
+        realtimeApiAvailable: true,
+        voices,
+        gptLiveModelAvailable: false,
+        blocker: "model_catalog_unavailable",
+      };
+    }
+  }
+
   async submitTurn(
     threadId: string | null,
     text: string,
@@ -368,9 +428,16 @@ export class AppServerClient {
       // The generated protocol advertises a queue surface that Codex 0.147's
       // runtime does not accept, so a busy foreign thread must be retried once
       // it is idle rather than silently dropping or misrouting the prompt.
-      thread = await this.resumeThread(threadId);
+      try {
+        thread = await this.resumeThread(threadId);
+      } catch (error) {
+        if (isActiveWriterError(error)) {
+          throw new Error("That Codex session has another active writer. Your watch prompt was not queued or sent. Keep the draft, wait for the current turn to finish, then retry.");
+        }
+        throw error;
+      }
       if (thread.status.type === "active") {
-        throw new Error("That Codex session is busy. Wait for its current turn to finish, then retry from the watch.");
+        throw new Error("That Codex session is busy. Your watch prompt was not queued or sent. Keep the draft, wait for its current turn to finish, then retry.");
       }
       const stickySettings: Record<string, unknown> = {
         threadId,
@@ -647,7 +714,7 @@ export class AppServerClient {
       const detail = event.turn.status === "completed"
         ? "The agent finished its full response."
         : event.turn.status === "failed"
-          ? clean(event.turn.error?.message ?? "The agent stopped with an error.", 260)
+          ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
           : "The agent was interrupted before finishing.";
       await this.emitTerminal({
         eventId: `turn:${event.threadId}:${event.turn.id}:${event.turn.status}`,
@@ -723,10 +790,9 @@ export class AppServerClient {
       this.approvals.set(approvalId, pending);
       if (this.approvals.size > 100) this.approvals.delete(this.approvals.keys().next().value ?? "");
     }
-    const detail = clean(
+    const detail = sanitizePublicText(
       parsed.data.reason ?? parsed.data.command ??
         (method.includes("fileChange") ? "Allow the proposed file changes?" : "The agent needs your permission."),
-      260,
     );
     if (supported) {
       const permissionMessage: CachedChatMessage = {
@@ -876,7 +942,7 @@ export class AppServerClient {
       const detail = turn.status === "completed"
         ? "The agent finished its full response."
         : turn.status === "failed"
-          ? clean(turn.error?.message ?? "The agent stopped with an error.", 260)
+          ? sanitizePublicText(turn.error?.message ?? "The agent stopped with an error.")
           : "The agent was interrupted before finishing.";
       await this.emitTerminal({
         eventId: `turn:${session.id}:${turn.id}:${turn.status}`,
@@ -1076,6 +1142,11 @@ function cleanRevision(value: string): string {
   const cleaned = value.trim().replace(/^```(?:text)?\s*/u, "").replace(/\s*```$/u, "").trim();
   if (!cleaned) throw new Error("Smart revision returned an empty draft. Your original draft is still available.");
   return cleaned.slice(0, 12_000);
+}
+
+function isActiveWriterError(error: unknown): boolean {
+  return /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|owns this session(?: in another client)?|another (?:Codex )?client/iu
+    .test(error instanceof Error ? error.message : "");
 }
 
 function safeError(error: unknown): string {

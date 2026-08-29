@@ -14,6 +14,7 @@ import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
 import { type WatchPayload, type WireEnvelope } from "./schemas.js";
 import type { Transcriber } from "./transcriber.js";
 import { MAX_AUDIO_BYTES } from "./limits.js";
+import { sanitizePublicText } from "./public-text.js";
 
 type SendablePayload = Record<string, unknown> & { version: 1; kind: string };
 
@@ -62,6 +63,7 @@ export class BridgeService {
     try {
       if (this.controller.signal.aborted) throw abortError(this.controller.signal);
       await this.appServer.connect("stdio");
+      await this.reportRealtimeVoiceCapability();
       await this.sendSessions();
       const monitorTask = this.appServer.monitorTerminals(this.controller.signal).catch((error: unknown) => {
         this.fatalError = error instanceof Error ? error : new Error("Terminal monitor stopped");
@@ -218,6 +220,24 @@ export class BridgeService {
     await this.send({ version: 1, ...event });
   }
 
+  private async reportRealtimeVoiceCapability(): Promise<void> {
+    const capability = await this.appServer.realtimeVoiceCapability();
+    const messageByBlocker = {
+      realtime_api_unavailable: "Realtime voice is unavailable: this Codex App Server does not expose a compatible realtime API.",
+      model_catalog_unavailable: "Realtime voice is unavailable: the Codex model catalog could not be verified.",
+      gpt_live_model_unavailable: "Realtime voice is unavailable: GPT-Live-1 is not in this Codex App Server model catalog.",
+      watch_transport_not_implemented: "GPT-Live-1 is cataloged; realtime voice remains disabled pending a reviewed watch transport.",
+    } as const;
+    console.info(JSON.stringify({
+      level: capability.blocker === "watch_transport_not_implemented" ? "info" : "warn",
+      message: messageByBlocker[capability.blocker],
+      realtimeVoiceAvailable: capability.available,
+      realtimeApiAvailable: capability.realtimeApiAvailable,
+      gptLiveModelAvailable: capability.gptLiveModelAvailable,
+      realtimeVoiceBlocker: capability.blocker,
+    }));
+  }
+
   private async sendSessions(): Promise<void> {
     const sessions: SessionView[] = await this.appServer.listSessions();
     let models: ModelView[] = [];
@@ -276,12 +296,12 @@ export class BridgeService {
   }
 }
 
-function publicError(error: unknown): string {
+export function publicError(error: unknown): string {
   const message = error instanceof Error ? error.message : "The request could not be completed";
-  return message.trim().replace(/\s+/gu, " ").slice(0, 260) || "The request could not be completed";
+  return sanitizePublicText(message) || "The request could not be completed";
 }
 
-function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string {
+export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string {
   const message = publicError(error);
   if (/timed out/iu.test(message)) {
     if (kind === "feedback.submit") {
@@ -300,11 +320,11 @@ function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string 
   if (/not connected|socket closed|app server closed/iu.test(message)) {
     return "The private bridge lost its Codex connection. Restart Codex and the Agentic Wear bridge, then retry.";
   }
-  if (/active writer/iu.test(message)) {
-    return "Codex still owns this session in another client. Update and restart Codex, then retry so Agentic Wear can queue the prompt safely.";
+  if (/active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|session is busy|another (?:Codex )?client|owns this session/iu.test(message)) {
+    return "Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft, refresh sessions, then retry after its turn finishes. If it stays busy, start a new session; Send remains explicit.";
   }
   if (/unknown variant [`']thread\/queue\/add|queued submission operation failed/iu.test(message)) {
-    return "This Codex version cannot receive queued watch prompts yet. Update and restart Codex on the bridge host, then retry.";
+    return "This Codex App Server does not support queued watch prompts. Agentic Wear did not queue or send your prompt; keep the draft and retry after the current turn finishes.";
   }
   return message;
 }

@@ -332,7 +332,6 @@ class AgenticWearRepository(private val context: Context) {
             }
             "chat.error" -> {
                 preferences.lastError = payload.optString("message", "Could not load this Codex chat")
-                    .take(180)
             }
             "transcription.error", "turn.error", "approval.error", "bridge.error" -> {
                 val errorKind = payload.optString("kind")
@@ -422,7 +421,7 @@ class AgenticWearRepository(private val context: Context) {
             "feedback.error" -> {
                 if (payload.optString("requestId") == preferences.pendingFeedbackRequestId) {
                     preferences.pendingFeedbackRequestId = null
-                    preferences.lastError = payload.optString("message", "Could not send feedback").take(180)
+                    preferences.lastError = payload.optString("message", "Could not send feedback")
                 }
             }
         }
