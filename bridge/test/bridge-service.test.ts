@@ -56,6 +56,11 @@ describe("publicRequestError", () => {
       .toBe("The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.");
   });
 
+  it("states that a failed send was not queued instead of calling it a chat-load error", () => {
+    expect(publicRequestError(new Error("thread not found"), "turn.submit"))
+      .toBe("Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry.");
+  });
+
   it("does not expose an internal cancelled task id after retries", () => {
     expect(publicRequestError(new Error("bs1 was cancelled"), "chat.watch"))
       .toBe("Codex briefly cancelled the chat-history sync after the bridge retried it. Agentic Wear kept your selection and draft; refresh sessions and retry.");

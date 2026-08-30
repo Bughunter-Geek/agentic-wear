@@ -321,9 +321,15 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
     return "Codex is signed out on the bridge host. Sign in there, then retry.";
   }
   if (/not found|no rollout/iu.test(message)) {
+    if (kind === "turn.submit") {
+      return "Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry.";
+    }
     return "The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.";
   }
   if (/cancel(?:led|ed)/iu.test(message)) {
+    if (kind === "turn.submit") {
+      return "Codex cancelled session synchronization after the bridge retried it. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry.";
+    }
     return "Codex briefly cancelled the chat-history sync after the bridge retried it. Agentic Wear kept your selection and draft; refresh sessions and retry.";
   }
   if (/not connected|socket closed|app server closed/iu.test(message)) {

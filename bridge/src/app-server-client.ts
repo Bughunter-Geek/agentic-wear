@@ -454,20 +454,34 @@ export class AppServerClient {
       // It never resumes or steals the thread's writer: an idle queue starts
       // automatically, while an active queue waits for the owning client to
       // finish. This keeps the same chat readable on iOS, Android, and Desktop.
-      thread = await this.readThread(threadId, true);
-      const stickySettings: Record<string, unknown> = {
-        threadId: thread.id,
-        effort,
-      };
-      if (model !== null) stickySettings.model = model;
-      await this.request("thread/settings/update", stickySettings);
+      thread = await this.retryTransientThreadOperation(threadId, async () => {
+        const current = await this.readThread(threadId, true);
+        // A mobile/Desktop-owned thread is intentionally visible as notLoaded
+        // on this connection. App Server rejects settings updates for that
+        // state even though thread/queue/add is the supported cross-client
+        // handoff. Do not let a redundant sticky-settings write prevent the
+        // user's message from reaching the queue.
+        if (current.status.type === "notLoaded") return current;
+        const stickySettings: Record<string, unknown> = {
+          threadId: current.id,
+          effort,
+        };
+        if (model !== null) stickySettings.model = model;
+        await this.request("thread/settings/update", stickySettings);
+        return current;
+      });
     }
 
-    queuedSubmissionResponseSchema.parse(await this.request("thread/queue/add", {
-      threadId: thread.id,
-      input: [textInput(text)],
-      clientUserMessageId: messageId,
-    }));
+    // The watch request UUID is the App Server idempotency key. Retrying a
+    // transient pre-acceptance cancellation therefore cannot create a second
+    // queued message.
+    await this.retryTransientThreadOperation(thread.id, async () => {
+      queuedSubmissionResponseSchema.parse(await this.request("thread/queue/add", {
+        threadId: thread.id,
+        input: [textInput(text)],
+        clientUserMessageId: messageId,
+      }));
+    });
     return { threadId: thread.id, created: threadId === null };
   }
 
@@ -475,22 +489,26 @@ export class AppServerClient {
     const cached = this.chatCaches.get(threadId);
     if (cached && !forceRefresh) return materializeChat(cached);
 
-    for (let attempt = 1; attempt <= CHAT_LOAD_ATTEMPTS; attempt += 1) {
+    return this.retryTransientThreadOperation(threadId, () => this.loadFreshChatSnapshot(threadId));
+  }
+
+  private async retryTransientThreadOperation<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; attempt <= THREAD_SYNC_ATTEMPTS; attempt += 1) {
       try {
-        return await this.loadFreshChatSnapshot(threadId);
+        return await operation();
       } catch (error) {
-        const finalAttempt = attempt === CHAT_LOAD_ATTEMPTS;
+        const finalAttempt = attempt === THREAD_SYNC_ATTEMPTS;
         if (!isTransientThreadAvailabilityError(error) || finalAttempt) throw error;
         // Mobile and Desktop writers can briefly publish the state row before
         // the rollout becomes readable by the shared daemon. Refresh the
-        // session registry and retry instead of telling the watch the chat was
-        // permanently removed.
+        // session registry and retry instead of treating the cross-client
+        // handoff as a permanent failure.
         this.threadCache.delete(threadId);
         await this.listSessions().catch(() => []);
-        await handoffDelay(CHAT_LOAD_RETRY_MS * attempt);
+        await handoffDelay(THREAD_SYNC_RETRY_MS * attempt);
       }
     }
-    throw new Error("Codex did not return this chat");
+    throw new Error("Codex did not synchronize this session");
   }
 
   private async loadFreshChatSnapshot(threadId: string): Promise<ChatSnapshot> {
@@ -1215,8 +1233,8 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 const MAX_APP_SERVER_MESSAGE_BYTES = 16 * 1_024 * 1_024;
 const UNSUBSCRIBE_ATTEMPTS = 3;
 const UNSUBSCRIBE_RETRY_MS = 200;
-const CHAT_LOAD_ATTEMPTS = 5;
-const CHAT_LOAD_RETRY_MS = 250;
+const THREAD_SYNC_ATTEMPTS = 7;
+const THREAD_SYNC_RETRY_MS = 250;
 const MAX_CHAT_HISTORY_TURNS = 6;
 const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CHAT_MESSAGES = 12;

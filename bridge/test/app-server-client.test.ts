@@ -85,7 +85,6 @@ describe("AppServerClient session delivery", () => {
     internals.request = vi.fn((method: string, params: unknown) => {
       methods.push(method);
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
-      if (method === "thread/settings/update") return Promise.resolve({});
       if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
@@ -95,7 +94,72 @@ describe("AppServerClient session delivery", () => {
       created: false,
     });
 
-    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
+    expect(methods).toEqual(["thread/read", "thread/queue/add"]);
+  });
+
+  it("retries transient synchronization before queueing an existing session exactly once", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    let readAttempts = 0;
+    let queuedParams: Record<string, unknown> | null = null;
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") {
+        readAttempts += 1;
+        if (readAttempts === 1) return Promise.reject(new Error("No rollout found for thread thread-1"));
+        return Promise.resolve({ thread: thread("notLoaded") });
+      }
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/queue/add") {
+        queuedParams = params as Record<string, unknown>;
+        return Promise.resolve(queuedResponse(params));
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Continue safely.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "low",
+      "watch-request-1",
+    )).resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(readAttempts).toBe(2);
+    expect(methods.filter((method) => method === "thread/queue/add")).toHaveLength(1);
+    expect(queuedParams).toMatchObject({
+      threadId: "thread-1",
+      clientUserMessageId: "watch-request-1",
+    });
+  });
+
+  it("reuses the watch idempotency key when queue serialization is cancelled", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const queueIds: unknown[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/queue/add") {
+        queueIds.push((params as Record<string, unknown>).clientUserMessageId);
+        if (queueIds.length === 1) return Promise.reject(new Error("bs1 was cancelled"));
+        return Promise.resolve(queuedResponse(params));
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Continue once.",
+      "/tmp",
+      null,
+      "medium",
+      "watch-request-2",
+    )).resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(queueIds).toEqual(["watch-request-2", "watch-request-2"]);
   });
 
   it("applies the selected model and reasoning effort before queueing", async () => {

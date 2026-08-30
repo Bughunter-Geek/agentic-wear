@@ -6,6 +6,8 @@ Every public build remains an Alpha GitHub Pre-release until the project is expl
 
 - Loads watch chat history through Codex's bounded summary view instead of serializing reasoning, command output, file changes, and tool payloads that the watch discards. This prevents large cross-client chats from exceeding the daemon transport limit or surfacing internal cancellations such as `bs1 was cancelled`.
 - Retries transient App Server history cancellations and replaces internal task identifiers with actionable recovery text if bounded retries are exhausted.
+- Queues messages directly into mobile/Desktop-owned `notLoaded` sessions instead of first attempting a settings update that App Server rejects as `thread not found`. Transient synchronization and queue cancellations retry with the same watch request UUID, preserving exactly-once submission.
+- Distinguishes a pre-queue send failure from a chat-history failure so the watch never claims a message was sent when App Server did not accept it.
 
 ## 0.6.2-alpha — 2026-08-30
 
