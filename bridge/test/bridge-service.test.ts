@@ -50,4 +50,9 @@ describe("publicRequestError", () => {
     expect(publicRequestError(new Error("Invalid request: unknown variant `thread/queue/add`"), "turn.submit"))
       .toBe("This Codex App Server does not support queued watch prompts. Agentic Wear did not queue or send your prompt; keep the draft and retry after the current turn finishes.");
   });
+
+  it("does not mislabel a delayed rollout as a permanently removed chat", () => {
+    expect(publicRequestError(new Error("No rollout found for thread"), "chat.watch"))
+      .toBe("The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.");
+  });
 });

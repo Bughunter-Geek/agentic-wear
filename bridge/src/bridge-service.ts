@@ -321,7 +321,7 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
     return "Codex is signed out on the bridge host. Sign in there, then retry.";
   }
   if (/not found|no rollout/iu.test(message)) {
-    return "That Codex session is no longer available on this bridge. Refresh Sessions and choose another one.";
+    return "The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.";
   }
   if (/not connected|socket closed|app server closed/iu.test(message)) {
     return "The private bridge lost its Codex connection. Restart Codex and the Agentic Wear bridge, then retry.";

@@ -2,6 +2,20 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.2-alpha — 2026-08-30
+
+This is a public Alpha prerelease for remote OTA testing. The fix is locally validated; physical Pixel Watch and cross-device acceptance remain pending.
+
+- Retries transient Codex rollout synchronization before reporting that a listed chat cannot be loaded, covering the short handoff window between mobile, Desktop, and the shared bridge.
+- Extends the watch's chat-response window and correlates snapshots and errors with the selected thread and latest request, preventing a delayed error from an older refresh from replacing a usable chat.
+- Keeps the selected session and draft intact when synchronization is still unavailable, and offers a refresh action instead of incorrectly telling the user that the chat was permanently removed.
+- Opens changed error details at the beginning of the message so the complete recovery guidance remains readable on the round display.
+
+### Test status
+
+- All 77 bridge tests, TypeScript checks, Oxlint, Wear unit tests, release lint, R8, and release assembly pass.
+- The affected shared-daemon session was independently confirmed as listed and readable after the transient failure. Physical OTA acceptance remains unverified for this Alpha.
+
 ## 0.6.1-alpha — 2026-08-30
 
 This is a public Alpha prerelease for immediate OTA testing. Cross-device behavior is validated against independent clients on the shared Codex daemon; physical iOS, Android, and Pixel Watch acceptance remains pending.

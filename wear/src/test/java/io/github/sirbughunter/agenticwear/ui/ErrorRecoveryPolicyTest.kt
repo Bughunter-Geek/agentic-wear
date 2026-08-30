@@ -63,6 +63,14 @@ class ErrorRecoveryPolicyTest {
     }
 
     @Test
+    fun `temporarily unavailable chats offer refresh without discarding the selection`() {
+        assertEquals(
+            setOf(ErrorRecoveryAction.REFRESH_SESSIONS),
+            recoveryActionsForError("The bridge could not load this session after resyncing"),
+        )
+    }
+
+    @Test
     fun `starting fresh preserves the draft and never selects another session`() {
         val draft = Transcript("request-1", "Keep this prompt", "foreign-thread")
         val recovered = recoverDraftForNewSession(

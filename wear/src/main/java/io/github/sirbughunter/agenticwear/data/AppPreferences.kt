@@ -118,6 +118,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_PENDING_TURN_REQUEST, null)
         set(value) = prefs.edit { putString(KEY_PENDING_TURN_REQUEST, value) }
 
+    var pendingChatRequestId: String?
+        get() = prefs.getString(KEY_PENDING_CHAT_REQUEST, null)
+        set(value) = prefs.edit { putString(KEY_PENDING_CHAT_REQUEST, value) }
+
     var pendingFeedbackRequestId: String?
         get() = prefs.getString(KEY_PENDING_FEEDBACK_REQUEST, null)
         set(value) = prefs.edit { putString(KEY_PENDING_FEEDBACK_REQUEST, value) }
@@ -188,6 +192,7 @@ class AppPreferences(context: Context) {
         private const val KEY_CHAT_SNAPSHOT = "chat_snapshot"
         private const val KEY_CHAT_FEEDBACK = "chat_feedback"
         private const val KEY_PENDING_TURN_REQUEST = "pending_turn_request"
+        private const val KEY_PENDING_CHAT_REQUEST = "pending_chat_request"
         private const val KEY_PENDING_FEEDBACK_REQUEST = "pending_feedback_request"
         private const val KEY_PENDING_APPROVAL_REQUEST = "pending_approval_request"
         private const val KEY_LAST_ACCEPTED_THREAD = "last_accepted_thread"

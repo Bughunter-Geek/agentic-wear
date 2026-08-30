@@ -475,6 +475,25 @@ export class AppServerClient {
     const cached = this.chatCaches.get(threadId);
     if (cached && !forceRefresh) return materializeChat(cached);
 
+    for (let attempt = 1; attempt <= CHAT_LOAD_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.loadFreshChatSnapshot(threadId);
+      } catch (error) {
+        const finalAttempt = attempt === CHAT_LOAD_ATTEMPTS;
+        if (!isTransientThreadAvailabilityError(error) || finalAttempt) throw error;
+        // Mobile and Desktop writers can briefly publish the state row before
+        // the rollout becomes readable by the shared daemon. Refresh the
+        // session registry and retry instead of telling the watch the chat was
+        // permanently removed.
+        this.threadCache.delete(threadId);
+        await this.listSessions().catch(() => []);
+        await handoffDelay(CHAT_LOAD_RETRY_MS * attempt);
+      }
+    }
+    throw new Error("Codex did not return this chat");
+  }
+
+  private async loadFreshChatSnapshot(threadId: string): Promise<ChatSnapshot> {
     const thread = await this.readThread(threadId, true);
     const turns: CachedChatMessage[][] = [];
     let cursor: string | null = null;
@@ -1171,6 +1190,11 @@ function safeError(error: unknown): string {
   return (error instanceof Error ? error.message : "Unknown error").slice(0, 400);
 }
 
+function isTransientThreadAvailabilityError(error: unknown): boolean {
+  return /not found|no rollout|not available|temporarily unavailable/iu
+    .test(error instanceof Error ? error.message : "");
+}
+
 function handoffDelay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -1193,6 +1217,8 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 const MAX_APP_SERVER_MESSAGE_BYTES = 16 * 1_024 * 1_024;
 const UNSUBSCRIBE_ATTEMPTS = 3;
 const UNSUBSCRIBE_RETRY_MS = 200;
+const CHAT_LOAD_ATTEMPTS = 5;
+const CHAT_LOAD_RETRY_MS = 250;
 const MAX_CHAT_HISTORY_TURNS = 6;
 const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CHAT_MESSAGES = 12;

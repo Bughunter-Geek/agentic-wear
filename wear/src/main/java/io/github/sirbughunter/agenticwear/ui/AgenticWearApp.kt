@@ -2945,6 +2945,7 @@ private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -
     }
 
     LaunchedEffect(Unit) { visible = true }
+    LaunchedEffect(message) { scrollState.scrollTo(0) }
     LaunchedEffect(closing) {
         if (closing) {
             delay(DetailOverlayMotionDurationMillis.toLong())

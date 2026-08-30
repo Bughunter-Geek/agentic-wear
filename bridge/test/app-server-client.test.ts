@@ -571,6 +571,35 @@ describe("AppServerClient session delivery", () => {
     ]);
   });
 
+  it("retries a transient missing rollout before declaring a listed chat unavailable", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    let historyAttempts = 0;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") {
+        historyAttempts += 1;
+        if (historyAttempts === 1) return Promise.reject(new Error("No rollout found for thread thread-1"));
+        return Promise.resolve({
+          data: [{
+            id: "turn-1",
+            items: [{ id: "assistant-1", type: "agentMessage", phase: "final_answer", text: "Recovered" }],
+          }],
+          nextCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toEqual(expect.objectContaining({
+      threadId: "thread-1",
+      messages: [expect.objectContaining({ text: "Recovered" })],
+    }));
+    expect(historyAttempts).toBe(2);
+    expect(internals.request).toHaveBeenCalledWith("thread/list", expect.objectContaining({ limit: 50 }));
+  });
+
   it("returns only the newest five assistant paragraphs in chronological order", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;

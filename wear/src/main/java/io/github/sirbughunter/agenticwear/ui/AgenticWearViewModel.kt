@@ -578,7 +578,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             showInstallPermissionPrompt = updatePermissionDemo,
             error = when {
                 homeErrorDemo -> "I didn't catch enough audio. Tap and try again."
-                normalized == "chat-error" -> "That Codex session is no longer available on this bridge. Refresh Sessions and choose another one."
+                normalized == "chat-error" -> "The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears."
                 normalized == "transcript-foreign-error" -> "Codex still owns this session in another client. Agentic Wear did not queue or send your prompt; the complete draft remains on this watch. Refresh sessions to re-check ownership, then retry only after the other client finishes. If it remains busy, choose Start new; your draft will stay on this watch and nothing is created or sent until you explicitly tap Send."
                 else -> null
             },

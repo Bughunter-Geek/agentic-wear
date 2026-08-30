@@ -30,7 +30,7 @@ internal fun permissionRequestContentDescription(stateLabel: String, messageText
 
 internal fun recoveryActionsForError(message: String?): Set<ErrorRecoveryAction> {
     if (message.isNullOrBlank()) return emptySet()
-    return if (
+    if (
         Regex(
             "active writer|actively writing this session|active session in another client|" +
                 "session is (currently )?active in another client|owns this session in another client|" +
@@ -38,10 +38,12 @@ internal fun recoveryActionsForError(message: String?): Set<ErrorRecoveryAction>
             RegexOption.IGNORE_CASE,
         ).containsMatchIn(message)
     ) {
-        setOf(ErrorRecoveryAction.REFRESH_SESSIONS, ErrorRecoveryAction.START_NEW_SESSION)
-    } else {
-        emptySet()
+        return setOf(ErrorRecoveryAction.REFRESH_SESSIONS, ErrorRecoveryAction.START_NEW_SESSION)
     }
+    return if (
+        Regex("could not load this session|not synced|no longer available", RegexOption.IGNORE_CASE)
+            .containsMatchIn(message)
+    ) setOf(ErrorRecoveryAction.REFRESH_SESSIONS) else emptySet()
 }
 
 internal fun recoverDraftForNewSession(state: WearUiState): WearUiState {

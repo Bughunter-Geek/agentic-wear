@@ -141,6 +141,7 @@ class AgenticWearRepository(private val context: Context) {
     suspend fun watchChat(threadId: String): ChatSnapshot? {
         require(threadId.isNotBlank()) { "Choose a Codex session first" }
         val requestId = UUID.randomUUID().toString()
+        preferences.pendingChatRequestId = requestId
         preferences.lastError = null
         send(BridgePayload.WatchChat(requestId, threadId))
         for (waitMillis in CHAT_REPLY_DELAYS_MS) {
@@ -151,7 +152,9 @@ class AgenticWearRepository(private val context: Context) {
                 ?.let { return it }
             if (preferences.lastError != null) break
         }
-        return preferences.chatSnapshot?.takeIf { it.threadId == threadId && it.requestId == requestId }
+        val snapshot = preferences.chatSnapshot?.takeIf { it.threadId == threadId && it.requestId == requestId }
+        if (preferences.pendingChatRequestId == requestId) preferences.pendingChatRequestId = null
+        return snapshot
     }
 
     suspend fun refreshChatInbox() {
@@ -283,6 +286,7 @@ class AgenticWearRepository(private val context: Context) {
         preferences.chatSnapshot = null
         preferences.chatFeedback = emptyMap()
         preferences.pendingTurnRequestId = null
+        preferences.pendingChatRequestId = null
         preferences.pendingFeedbackRequestId = null
         preferences.pendingApprovalRequestId = null
         preferences.lastAcceptedThreadId = null
@@ -317,8 +321,24 @@ class AgenticWearRepository(private val context: Context) {
                 preferences.lastError = null
             }
             "chat.snapshot" -> {
-                PayloadCodec.decodeChatSnapshot(payload)?.let { preferences.chatSnapshot = it }
-                preferences.lastError = null
+                PayloadCodec.decodeChatSnapshot(payload)?.let { snapshot ->
+                    if (
+                        shouldAcceptChatSnapshot(
+                            selectedThreadId = preferences.selectedThreadId,
+                            pendingRequestId = preferences.pendingChatRequestId,
+                            currentGeneratedAtMillis = preferences.chatSnapshot?.generatedAtMillis,
+                            incomingThreadId = snapshot.threadId,
+                            incomingRequestId = snapshot.requestId,
+                            incomingGeneratedAtMillis = snapshot.generatedAtMillis,
+                        )
+                    ) {
+                        preferences.chatSnapshot = snapshot
+                        if (snapshot.requestId == preferences.pendingChatRequestId) {
+                            preferences.pendingChatRequestId = null
+                        }
+                        preferences.lastError = null
+                    }
+                }
             }
             "terminal.completed", "terminal.failed", "terminal.interrupted", "terminal.blocked",
             "approval.request" -> PayloadCodec.decodeAlert(payload)?.let { alert ->
@@ -331,7 +351,18 @@ class AgenticWearRepository(private val context: Context) {
                 }
             }
             "chat.error" -> {
-                preferences.lastError = payload.optString("message", "Could not load this Codex chat")
+                val requestId = payload.optString("requestId")
+                if (
+                    shouldAcceptChatError(
+                        selectedThreadId = preferences.selectedThreadId,
+                        pendingRequestId = preferences.pendingChatRequestId,
+                        incomingThreadId = payload.optString("threadId"),
+                        incomingRequestId = requestId,
+                    )
+                ) {
+                    preferences.pendingChatRequestId = null
+                    preferences.lastError = payload.optString("message", "Could not load this Codex chat")
+                }
             }
             "transcription.error", "turn.error", "approval.error", "bridge.error" -> {
                 val errorKind = payload.optString("kind")
@@ -436,7 +467,7 @@ class AgenticWearRepository(private val context: Context) {
         private const val MAX_RECORDING_BYTES = 1_300_000
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
         private val TURN_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 600, 900, 1_200, 1_600, 2_000, 2_500, 3_000, 2_500)
-        private val CHAT_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500)
+        private val CHAT_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 2_500, 3_000)
         private val FEEDBACK_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 3_000)
         private val APPROVAL_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 3_000)
         private val inboxRefreshMutex = Mutex()
@@ -450,3 +481,26 @@ private data class InboxRefreshResult(
 
 internal fun transcriptionReplyDelaysMs(): LongArray =
     longArrayOf(150, 200, 250, 350, 500, 700, 1_000, 500, 700, 900, 1_200, 1_600, 2_000)
+
+internal fun shouldAcceptChatSnapshot(
+    selectedThreadId: String?,
+    pendingRequestId: String?,
+    currentGeneratedAtMillis: Long?,
+    incomingThreadId: String,
+    incomingRequestId: String?,
+    incomingGeneratedAtMillis: Long,
+): Boolean {
+    if (selectedThreadId == null || incomingThreadId != selectedThreadId) return false
+    if (currentGeneratedAtMillis != null && incomingGeneratedAtMillis < currentGeneratedAtMillis) return false
+    return incomingRequestId == null || pendingRequestId == null || incomingRequestId == pendingRequestId
+}
+
+internal fun shouldAcceptChatError(
+    selectedThreadId: String?,
+    pendingRequestId: String?,
+    incomingThreadId: String,
+    incomingRequestId: String,
+): Boolean = selectedThreadId != null &&
+    incomingThreadId == selectedThreadId &&
+    pendingRequestId != null &&
+    incomingRequestId == pendingRequestId
