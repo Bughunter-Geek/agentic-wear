@@ -1,5 +1,26 @@
-import { describe, expect, it } from "vitest";
-import { publicError, publicRequestError } from "../src/bridge-service.js";
+import { describe, expect, it, vi } from "vitest";
+import { BridgeService, publicError, publicRequestError } from "../src/bridge-service.js";
+
+describe("BridgeService App Server transport", () => {
+  it("connects to the shared Desktop daemon rather than a private stdio server", async () => {
+    const stopAfterConnect = new Error("stop after transport assertion");
+    const connect = vi.fn(async () => { throw stopAfterConnect; });
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      relay: {
+        status: vi.fn().mockResolvedValue({ paired: true, watchPublicKey: "watch-public-key" }),
+        runSocket: vi.fn().mockResolvedValue(undefined),
+      },
+      appServer: { connect, close: vi.fn() },
+      controller: new AbortController(),
+      transcriber: {},
+      assertWatchPublicKey: vi.fn(),
+    });
+
+    await expect((service as unknown as BridgeService).run()).rejects.toBe(stopAfterConnect);
+    expect(connect).toHaveBeenCalledWith("daemon");
+  });
+});
 
 describe("publicRequestError", () => {
   it("preserves a long safe error while redacting credential-shaped values", () => {

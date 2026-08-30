@@ -19,6 +19,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -64,6 +66,8 @@ import androidx.compose.material.icons.rounded.ThumbDown
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -115,6 +119,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.wear.compose.foundation.requestFocusOnHierarchyActive
 import androidx.wear.compose.foundation.rotary.RotaryScrollableDefaults
@@ -140,6 +145,7 @@ import java.util.Date
 import kotlin.math.roundToInt
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.Text
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val AgenticEaseOut = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
@@ -2927,41 +2933,104 @@ private fun ErrorPill(message: String, modifier: Modifier = Modifier) {
 @Composable
 private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -> Unit) {
     val scrollState = rememberScrollState()
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.82f)
-                .clip(SurfaceShape)
-                .background(Ink)
-                .border(1.dp, Coral.copy(alpha = 0.55f), SurfaceShape)
-                .padding(horizontal = 32.dp, vertical = 16.dp),
+    val canScrollForward by remember { derivedStateOf { scrollState.canScrollForward } }
+    val round = LocalConfiguration.current.isScreenRound
+    var visible by remember { mutableStateOf(false) }
+    var closing by remember { mutableStateOf(false) }
+    val dismiss = {
+        if (!closing) {
+            closing = true
+            visible = false
+        }
+    }
+
+    LaunchedEffect(Unit) { visible = true }
+    LaunchedEffect(closing) {
+        if (closing) {
+            delay(DetailOverlayMotionDurationMillis.toLong())
+            onDismiss()
+        }
+    }
+
+    Dialog(
+        onDismissRequest = dismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(tween(DetailOverlayMotionDurationMillis, easing = AgenticEaseOut)) +
+                scaleIn(
+                    animationSpec = tween(DetailOverlayMotionDurationMillis, easing = AgenticEaseOut),
+                    initialScale = 0.97f,
+                ) +
+                slideInVertically(
+                    animationSpec = tween(DetailOverlayMotionDurationMillis, easing = AgenticEaseOut),
+                    initialOffsetY = { it / 16 },
+                ),
+            exit = fadeOut(tween(DetailOverlayMotionDurationMillis, easing = AgenticEaseInOut)) +
+                scaleOut(
+                    animationSpec = tween(DetailOverlayMotionDurationMillis, easing = AgenticEaseInOut),
+                    targetScale = 0.97f,
+                ) +
+                slideOutVertically(
+                    animationSpec = tween(DetailOverlayMotionDurationMillis, easing = AgenticEaseInOut),
+                    targetOffsetY = { it / 16 },
+                ),
         ) {
-            Text(title, color = Coral, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                message,
-                color = Frost,
-                fontSize = 12.sp,
-                lineHeight = 16.sp,
-                modifier = Modifier.weight(1f).verticalScroll(scrollState),
-            )
-            detailScrollAffordance(scrollState.maxValue > 0)?.let { affordance ->
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    affordance,
-                    color = Mint,
-                    fontSize = 10.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics {
-                            contentDescription = "Swipe to read more. Full error text is scrollable."
-                        },
-                )
+            // An opaque full-screen layer prevents the underlying assistant orb or
+            // recovery actions from visually or semantically competing with Close.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Ink)
+                    .semantics { contentDescription = "$title. Full-screen dialog." },
+            ) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(
+                            start = if (round) 52.dp else 28.dp,
+                            end = if (round) 52.dp else 28.dp,
+                            top = if (round) 40.dp else 20.dp,
+                            bottom = if (round) 44.dp else 20.dp,
+                        ),
+                ) {
+                    Text(
+                        title,
+                        color = Coral,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        message,
+                        color = Frost,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.weight(1f).verticalScroll(scrollState),
+                    )
+                    detailScrollAffordance(canScrollForward)?.let { affordance ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            affordance,
+                            color = Mint,
+                            fontSize = 10.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics {
+                                    contentDescription = "Swipe to read more. Full error text is scrollable."
+                                },
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        ActionButton("Close", true, dismiss, enabled = true)
+                    }
+                }
             }
-            Spacer(Modifier.height(12.dp))
-            ActionButton("Close", true, onDismiss, enabled = true)
         }
     }
 }

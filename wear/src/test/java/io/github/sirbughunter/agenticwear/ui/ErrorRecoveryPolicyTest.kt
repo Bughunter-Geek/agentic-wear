@@ -32,9 +32,15 @@ class ErrorRecoveryPolicyTest {
     }
 
     @Test
-    fun `detail scroll affordance appears only when the full error needs scrolling`() {
-        assertNull(detailScrollAffordance(isScrollable = false))
-        assertEquals("Swipe to read more ↓", detailScrollAffordance(isScrollable = true))
+    fun `detail scroll affordance appears only while additional error text remains`() {
+        assertNull(detailScrollAffordance(hasMoreContent = false))
+        assertEquals("Swipe to read more ↓", detailScrollAffordance(hasMoreContent = true))
+        assertNull(detailScrollAffordance(hasMoreContent = false))
+    }
+
+    @Test
+    fun `detail overlay motion stays within the restrained round-watch budget`() {
+        assertEquals(200, DetailOverlayMotionDurationMillis)
     }
 
     @Test

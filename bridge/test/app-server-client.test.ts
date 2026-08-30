@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { AppServerClient } from "../src/app-server-client.js";
+import { AppServerClient, supportsThreadQueue } from "../src/app-server-client.js";
 
 type ClientInternals = {
   request: (method: string, params: unknown) => Promise<unknown>;
   handleNotification: (method: string, params: unknown) => Promise<void>;
   handleServerRequest: (id: string | number, method: string, params: unknown) => Promise<void>;
   write: (message: Record<string, unknown>) => void;
+  controlledThreads: Set<string>;
+  controlledTurnIds: Map<string, string>;
   emitRecentTerminals: (
     session: {
       id: string;
@@ -27,16 +29,30 @@ type ClientInternals = {
   }) => Promise<void>;
 };
 
-function thread(status: "notLoaded" | "idle" | "active" = "idle") {
+function thread(
+  status: "notLoaded" | "idle" | "active" = "idle",
+  canAcceptDirectInput = status !== "notLoaded",
+) {
   return {
     id: "thread-1",
     preview: "Watch session",
     name: "Watch session",
     updatedAt: 1_787_900_000,
     status: { type: status },
-    canAcceptDirectInput: status !== "notLoaded",
+    canAcceptDirectInput,
     parentThreadId: null,
     agentRole: null,
+  };
+}
+
+function queuedResponse(params: unknown) {
+  const clientUserMessageId = (params as { clientUserMessageId?: string }).clientUserMessageId ?? "watch-request";
+  return {
+    queuedSubmission: {
+      id: "queued-1",
+      clientUserMessageId,
+      input: [],
+    },
   };
 }
 
@@ -45,6 +61,13 @@ function client(): AppServerClient {
 }
 
 describe("AppServerClient session delivery", () => {
+  it("requires the App Server release that provides cross-client queueing", () => {
+    expect(supportsThreadQueue("codex_cli_rs/0.149.0")).toBe(false);
+    expect(supportsThreadQueue("codex_cli_rs/0.150.0-alpha.12.2")).toBe(true);
+    expect(supportsThreadQueue("codex_cli_rs/1.0.0")).toBe(true);
+    expect(supportsThreadQueue("unknown")).toBe(false);
+  });
+
   it("does not resume a thread again when thread/started already proves it is loaded", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
@@ -55,15 +78,15 @@ describe("AppServerClient session delivery", () => {
     expect(internals.request).not.toHaveBeenCalled();
   });
 
-  it("performs one resume before starting a turn in an unloaded session", async () => {
+  it("queues an unloaded session without resuming or acquiring its writer", async () => {
     const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
-    internals.request = vi.fn((method: string) => {
+    internals.request = vi.fn((method: string, params: unknown) => {
       methods.push(method);
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
-      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
-      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -72,31 +95,58 @@ describe("AppServerClient session delivery", () => {
       created: false,
     });
 
-    expect(methods).toEqual(["thread/read", "thread/resume", "turn/start"]);
+    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
   });
 
-  it("forwards the selected model and reasoning effort when starting a turn", async () => {
+  it("applies the selected model and reasoning effort before queueing", async () => {
     const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
     const internals = target as unknown as ClientInternals;
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
     internals.request = vi.fn((method: string, params: unknown) => {
       requests.push({ method, params: params as Record<string, unknown> });
       if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
-      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
     await expect(target.submitTurn("thread-1", "Use the selected settings.", "/tmp", "gpt-5.6-terra", "xhigh"))
       .resolves.toEqual({ threadId: "thread-1", created: false });
 
-    expect(requests.at(-1)).toMatchObject({
-      method: "turn/start",
+    expect(requests[1]).toMatchObject({
+      method: "thread/settings/update",
       params: {
         threadId: "thread-1",
         model: "gpt-5.6-terra",
         effort: "xhigh",
       },
     });
+    expect(requests.at(-1)?.method).toBe("thread/queue/add");
+  });
+
+  it("forwards the watch request ID as the App Server user-message idempotency key", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      requests.push({ method, params: params as Record<string, unknown> });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.submitTurn(
+      "thread-1",
+      "Send this once.",
+      "/tmp",
+      null,
+      "medium",
+      "watch-request-1",
+    );
+
+    expect(requests.find(({ method }) => method === "thread/queue/add")?.params)
+      .toMatchObject({ clientUserMessageId: "watch-request-1" });
   });
 
   it("normalizes the model catalog into watch-safe picker entries", async () => {
@@ -209,50 +259,233 @@ describe("AppServerClient session delivery", () => {
     expect(internals.request).toHaveBeenCalledTimes(1);
   });
 
-  it("rejoins and starts an idle session owned by another Codex client", async () => {
+  it("queues an idle foreign session without resume, start, or steer", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
     internals.request = vi.fn((method: string, params: unknown) => {
       requests.push({ method, params: params as Record<string, unknown> });
-      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
       if (method === "thread/settings/update") return Promise.resolve({});
-      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
-    await expect(target.submitTurn("thread-1", "Please continue.", "/tmp", "gpt-5.6-sol", "high")).resolves.toEqual({
+    await expect(target.submitTurn(
+      "thread-1",
+      "Please continue.",
+      "/tmp",
+      "gpt-5.6-sol",
+      "high",
+      "watch-request-idle",
+    )).resolves.toEqual({
       threadId: "thread-1",
       created: false,
     });
 
-    expect(requests).toHaveLength(3);
-    expect(requests[0]).toEqual({
-      method: "thread/resume",
-      params: { threadId: "thread-1", excludeTurns: true },
-    });
-    expect(requests[1]).toEqual({
-      method: "thread/settings/update",
-      params: {
-        threadId: "thread-1",
-        model: "gpt-5.6-sol",
-        effort: "high",
-      },
-    });
-    expect(requests[2]?.method).toBe("turn/start");
-    expect(requests[2]?.params).toMatchObject({
+    expect(requests.map(({ method }) => method)).toEqual([
+      "thread/read",
+      "thread/settings/update",
+      "thread/queue/add",
+    ]);
+    expect(requests[1]?.params).toEqual({
       threadId: "thread-1",
-      input: [{ type: "text", text: "Please continue." }],
       model: "gpt-5.6-sol",
       effort: "high",
     });
+    expect(requests[2]?.params).toEqual({
+      threadId: "thread-1",
+      clientUserMessageId: "watch-request-idle",
+      input: [{ type: "text", text: "Please continue.", text_elements: [] }],
+    });
+  });
+
+  it("queues behind an active foreign writer even when direct steering is unavailable", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active", false) });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Run after the current turn.", "/tmp")).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+    });
+    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
+    expect(methods).not.toContain("thread/resume");
+    expect(methods).not.toContain("turn/steer");
+    expect(methods).not.toContain("turn/start");
+  });
+
+  it("does not inspect or reuse a stale active turn ID when queueing", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    await internals.handleNotification("turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-stale" },
+    });
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active", true) });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Queue exactly once.", "/tmp"))
+      .resolves.toEqual({ threadId: "thread-1", created: false });
+    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
+  });
+
+  it("does not start or steer when queue insertion fails", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.reject(new Error("queue unavailable"));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "Do not duplicate this.", "/tmp"))
+      .rejects.toThrow("queue unavailable");
+    const methods = vi.mocked(internals.request).mock.calls.map(([method]) => method);
+    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
+  });
+
+  it("releases a newly created session before queueing its first message", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/start") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(null, "First watch message.", "/tmp", null, "low", "watch-new-1"))
+      .resolves.toEqual({ threadId: "thread-1", created: true });
+    expect(methods).toEqual([
+      "thread/start",
+      "thread/settings/update",
+      "thread/unsubscribe",
+      "thread/queue/add",
+    ]);
+  });
+
+  it("delivers the terminal event before releasing its thread subscription", async () => {
+    const order: string[] = [];
+    const target = new AppServerClient(new Set(["thread-1"]), async () => {
+      order.push("terminal");
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.controlledThreads.add("thread-1");
+    internals.controlledTurnIds.set("thread-1", "turn-1");
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/unsubscribe") {
+        order.push("unsubscribe");
+        return Promise.resolve({ status: "unsubscribed" });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await internals.handleNotification("turn/completed", {
+      threadId: "thread-1",
+      turn: {
+        id: "turn-1",
+        status: "completed",
+        completedAt: 1_787_900_010,
+        error: null,
+      },
+    });
+
+    expect(order).toEqual(["terminal", "unsubscribe"]);
+    expect(internals.controlledThreads.has("thread-1")).toBe(false);
+  });
+
+  it("makes unsubscribe failures visible and retries without duplicating a turn", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    internals.controlledThreads.add("thread-1");
+    internals.controlledTurnIds.set("thread-1", "turn-1");
+    internals.request = vi.fn((method: string) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/unsubscribe") return Promise.reject(new Error("writer lease retained"));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await internals.handleNotification("turn/completed", {
+      threadId: "thread-1",
+      turn: {
+        id: "turn-1",
+        status: "completed",
+        completedAt: 1_787_900_010,
+        error: null,
+      },
+    });
+
+    expect(methods).toEqual([
+      "thread/read",
+      "thread/unsubscribe",
+      "thread/unsubscribe",
+      "thread/unsubscribe",
+    ]);
+    expect(methods).not.toContain("turn/start");
+    expect(methods).not.toContain("turn/steer");
+    expect(internals.controlledThreads.has("thread-1")).toBe(true);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("subscription remains held"));
+    vi.restoreAllMocks();
+  });
+
+  it("best-effort releases retained thread subscriptions before close", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.controlledThreads.add("thread-1");
+    internals.request = vi.fn((method: string, params: unknown) => {
+      expect(method).toBe("thread/unsubscribe");
+      expect(params).toEqual({ threadId: "thread-1" });
+      return Promise.resolve({ status: "unsubscribed" });
+    });
+
+    await target.close();
+
+    expect(internals.request).toHaveBeenCalledTimes(1);
+    expect(internals.controlledThreads.size).toBe(0);
+  });
+
+  it("does not acquire ownership when another client's status notification is observed", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.reject(new Error("must remain observation-only")));
+
+    await internals.handleNotification("thread/status/changed", {
+      threadId: "thread-1",
+      status: { type: "active" },
+    });
+
+    expect(internals.request).not.toHaveBeenCalled();
+    expect(internals.controlledThreads.size).toBe(0);
   });
 
   it("does not start a foreign-thread prompt when its sticky settings update fails", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     internals.request = vi.fn((method: string) => {
-      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
       if (method === "thread/settings/update") return Promise.reject(new Error("settings denied"));
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
@@ -262,41 +495,15 @@ describe("AppServerClient session delivery", () => {
     expect(internals.request).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps a foreign prompt unsent when Codex reports another active writer", async () => {
-    const target = client();
-    const internals = target as unknown as ClientInternals;
-    internals.request = vi.fn((method: string) => {
-      if (method === "thread/resume") return Promise.reject(new Error("active writer already attached"));
-      return Promise.reject(new Error(`Unexpected method ${method}`));
-    });
-
-    await expect(target.submitTurn("thread-1", "Do not queue this.", "/tmp"))
-      .rejects.toThrow("Your watch prompt was not queued or sent");
-    expect(internals.request).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not interrupt an active session owned by another Codex client", async () => {
-    const target = client();
-    const internals = target as unknown as ClientInternals;
-    internals.request = vi.fn((method: string) => {
-      if (method === "thread/resume") return Promise.resolve({ thread: thread("active") });
-      return Promise.reject(new Error(`Unexpected method ${method}`));
-    });
-
-    await expect(target.submitTurn("thread-1", "Wait for the next turn.", "/tmp", "gpt-5.6-sol", "high"))
-      .rejects.toThrow("session is busy");
-    expect(internals.request).toHaveBeenCalledTimes(1);
-  });
-
   it("keeps the owning client's model when Auto is selected", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
     internals.request = vi.fn((method: string, params: unknown) => {
       requests.push({ method, params: params as Record<string, unknown> });
-      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
       if (method === "thread/settings/update") return Promise.resolve({});
-      if (method === "turn/start") return Promise.resolve({ turn: { id: "turn-1" } });
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -646,5 +853,49 @@ describe("AppServerClient session delivery", () => {
     await internals.emitRecentTerminals(session, 1_787_900_010_000);
 
     expect(events).toEqual(["turn:thread-1:turn-new:completed"]);
+  });
+
+  it("polling releases only the exact controlled turn after terminal delivery", async () => {
+    const order: string[] = [];
+    const target = new AppServerClient(new Set(), async (event) => {
+      order.push(`terminal:${event.eventId}`);
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.controlledThreads.add("thread-1");
+    internals.controlledTurnIds.set("thread-1", "turn-controlled");
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [
+            { id: "turn-controlled", status: "completed", completedAt: 1_787_900_020, error: null },
+            { id: "turn-older", status: "completed", completedAt: 1_787_900_010, error: null },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/unsubscribe") {
+        order.push("unsubscribe");
+        return Promise.resolve({ status: "unsubscribed" });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await internals.emitRecentTerminals({
+      id: "thread-1",
+      title: "Watch session",
+      updatedAt: 1_787_900_020_000,
+      status: "idle",
+      ownedByWear: true,
+      canAcceptDirectInput: true,
+    }, 1_787_900_000_000);
+
+    expect(order).toEqual([
+      "terminal:turn:thread-1:turn-older:completed",
+      "terminal:turn:thread-1:turn-controlled:completed",
+      "unsubscribe",
+    ]);
+    expect(internals.controlledThreads.has("thread-1")).toBe(false);
+    expect(internals.controlledTurnIds.has("thread-1")).toBe(false);
   });
 });

@@ -62,7 +62,12 @@ export class BridgeService {
     );
     try {
       if (this.controller.signal.aborted) throw abortError(this.controller.signal);
-      await this.appServer.connect("stdio");
+      // The Desktop-managed daemon owns the shared session registry. A private
+      // stdio App Server sees every Desktop-loaded thread as foreign, which
+      // makes an otherwise idle existing chat permanently unsendable from the
+      // watch. Connect through the control socket so ownership and idle state
+      // are evaluated by the same App Server as Desktop.
+      await this.appServer.connect("daemon");
       await this.reportRealtimeVoiceCapability();
       await this.sendSessions();
       const monitorTask = this.appServer.monitorTerminals(this.controller.signal).catch((error: unknown) => {
@@ -73,7 +78,7 @@ export class BridgeService {
       await monitorTask;
       if (this.fatalError) throw this.fatalError;
     } finally {
-      this.appServer.close();
+      await this.appServer.close();
       if (this.chatSyncTimer) clearTimeout(this.chatSyncTimer);
       this.chatSyncTimer = null;
       this.controller.abort();
@@ -117,6 +122,7 @@ export class BridgeService {
             this.config.defaultCwd,
             payload.model ?? null,
             payload.effort,
+            payload.requestId,
           );
           if (result.created) await this.persistOwnedThreads();
           await this.send({

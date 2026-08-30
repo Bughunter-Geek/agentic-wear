@@ -1,5 +1,7 @@
 package io.github.sirbughunter.agenticwear.ui
 
+internal const val DetailOverlayMotionDurationMillis = 200
+
 enum class ErrorRecoveryAction {
     REFRESH_SESSIONS,
     START_NEW_SESSION,
@@ -20,8 +22,8 @@ internal fun errorDetailPresentation(message: String): ErrorDetailPresentation {
     )
 }
 
-internal fun detailScrollAffordance(isScrollable: Boolean): String? =
-    if (isScrollable) "Swipe to read more ↓" else null
+internal fun detailScrollAffordance(hasMoreContent: Boolean): String? =
+    if (hasMoreContent) "Swipe to read more ↓" else null
 
 internal fun permissionRequestContentDescription(stateLabel: String, messageText: String): String =
     "Permission request. $stateLabel. $messageText"

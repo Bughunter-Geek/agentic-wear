@@ -2,6 +2,21 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.1-alpha — 2026-08-30
+
+This is a public Alpha prerelease for immediate OTA testing. Cross-device behavior is validated against independent clients on the shared Codex daemon; physical iOS, Android, and Pixel Watch acceptance remains pending.
+
+- Replaces thread takeover with Codex App Server 0.150's supported cross-client queue. Existing chats are never resumed, started, or steered by Agentic Wear; each watch prompt uses its request UUID as the queue idempotency key.
+- Connects the bridge to the shared remote-control daemon instead of a private App Server, so Desktop, iOS, Android, and Wear observe the same thread ownership and queued turns.
+- Releases newly created thread subscriptions before the first prompt is queued and retries bounded release failures, preventing Agentic Wear from leaving a writer that makes mobile chat history unloadable.
+- Keeps session polling observation-only and associates release with the exact bridge-controlled turn, preventing an older completion from releasing a newer turn or creating duplicate sends.
+- Replaces the clipped error sheet with an animated, round-safe full-screen detail view whose scroll hint disappears after the complete message is visible.
+
+### Test status
+
+- All 75 bridge tests, TypeScript checks, Oxlint, Wear unit tests, release lint, R8, and release assembly pass.
+- A live three-client shared-daemon test completed A → B → C continuations in one thread with distinct turns and no retained writer. Physical cross-device acceptance remains unverified for this Alpha.
+
 ## 0.6-alpha — 2026-08-29
 
 This is an explicitly unverified public Alpha prerelease. The physical minimized-watch acceptance test is still pending.

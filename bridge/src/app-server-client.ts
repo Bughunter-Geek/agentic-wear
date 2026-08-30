@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -142,6 +143,13 @@ type CachedChat = {
 
 const responseWithThreadSchema = z.object({ thread: threadSchema }).passthrough();
 const threadStartedSchema = z.object({ thread: threadSchema }).passthrough();
+const initializeResponseSchema = z.object({ userAgent: z.string().min(1).max(200) }).passthrough();
+const queuedSubmissionResponseSchema = z.object({
+  queuedSubmission: z.object({
+    id: z.string().min(1).max(128),
+    clientUserMessageId: z.string().min(1).max(128),
+  }).passthrough(),
+}).passthrough();
 const permissionPathSchema = z.string().min(1).max(4_096);
 const fileSystemPathSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("path"), path: permissionPathSchema }).strict(),
@@ -190,9 +198,14 @@ export class AppServerClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly threadCache = new Map<string, CodexThread>();
-  private readonly activeTurns = new Map<string, string>();
-  private readonly subscriptions = new Set<string>();
-  private readonly subscribing = new Set<string>();
+  // Threads for which this bridge successfully started or steered a turn. These
+  // are explicitly released after terminal delivery so mobile/desktop clients
+  // can take over without inheriting a bridge-held subscription.
+  private readonly controlledThreads = new Set<string>();
+  // Polling can observe more than one completed turn. Associate ownership with
+  // the exact turn we started or steered so an older completion can never
+  // release a newer in-progress turn.
+  private readonly controlledTurnIds = new Map<string, string>();
   private readonly deliveredTerminalEvents = new Set<string>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
@@ -213,10 +226,10 @@ export class AppServerClient {
     if (transport === "daemon") await this.openDaemonSocket();
     else this.openStdio();
     await this.initialize();
-    const sessions = await this.listSessions();
-    for (const session of sessions) {
-      if (session.status !== "notLoaded") await this.subscribeLoadedThread(session.id);
-    }
+    // Listing and reading are observation-only. Do not resume or subscribe to
+    // sessions at startup: doing so retains a cross-client lease that can make
+    // the same chat unloadable in mobile clients.
+    await this.listSessions();
   }
 
   private openStdio(): void {
@@ -285,7 +298,7 @@ export class AppServerClient {
   }
 
   private async initialize(): Promise<void> {
-    await this.request("initialize", {
+    const initialized = initializeResponseSchema.parse(await this.request("initialize", {
       clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.7" },
       capabilities: {
         // The fallback completion monitor intentionally uses
@@ -308,7 +321,10 @@ export class AppServerClient {
           "fs/changed",
         ],
       },
-    });
+    }));
+    if (!supportsThreadQueue(initialized.userAgent)) {
+      throw new Error(`Agentic Wear requires Codex App Server 0.150 or newer for safe cross-device queueing; connected server reported ${initialized.userAgent}`);
+    }
     this.notify("initialized", {});
   }
 
@@ -405,9 +421,10 @@ export class AppServerClient {
     defaultCwd: string,
     model: string | null = null,
     effort = "medium",
+    clientUserMessageId: string | null = null,
   ): Promise<{ threadId: string; created: boolean }> {
     let thread: CodexThread;
-    let created = false;
+    const messageId = clientUserMessageId ?? randomUUID();
     if (threadId === null) {
       const raw = await this.request("thread/start", {
         cwd: defaultCwd,
@@ -420,59 +437,38 @@ export class AppServerClient {
       thread = responseWithThreadSchema.parse(raw).thread;
       this.threadCache.set(thread.id, thread);
       this.watchOwnedThreadIds.add(thread.id);
-      this.subscriptions.add(thread.id);
-      created = true;
-    } else if (!this.watchOwnedThreadIds.has(threadId)) {
-      // Rejoin the managed daemon's shared thread before starting the turn so
-      // every connected Codex client receives the same live notifications.
-      // The generated protocol advertises a queue surface that Codex 0.147's
-      // runtime does not accept, so a busy foreign thread must be retried once
-      // it is idle rather than silently dropping or misrouting the prompt.
+      this.controlledThreads.add(thread.id);
+      const stickySettings: Record<string, unknown> = { threadId: thread.id, effort };
+      if (model !== null) stickySettings.model = model;
       try {
-        thread = await this.resumeThread(threadId);
+        await this.request("thread/settings/update", stickySettings);
       } catch (error) {
-        if (isActiveWriterError(error)) {
-          throw new Error("That Codex session has another active writer. Your watch prompt was not queued or sent. Keep the draft, wait for the current turn to finish, then retry.");
-        }
+        await this.releaseThread(thread.id);
         throw error;
       }
-      if (thread.status.type === "active") {
-        throw new Error("That Codex session is busy. Your watch prompt was not queued or sent. Keep the draft, wait for its current turn to finish, then retry.");
+      if (!await this.releaseThread(thread.id)) {
+        throw new Error("Codex created the new session but could not release its writer. The prompt was not queued; refresh Sessions before retrying.");
       }
+    } else {
+      // Queueing is the cross-client handoff primitive in App Server 0.150+.
+      // It never resumes or steals the thread's writer: an idle queue starts
+      // automatically, while an active queue waits for the owning client to
+      // finish. This keeps the same chat readable on iOS, Android, and Desktop.
+      thread = await this.readThread(threadId, true);
       const stickySettings: Record<string, unknown> = {
-        threadId,
+        threadId: thread.id,
         effort,
       };
       if (model !== null) stickySettings.model = model;
       await this.request("thread/settings/update", stickySettings);
-    } else {
-      thread = await this.readThread(threadId, true);
-      if (thread.status.type === "active") {
-        const activeTurnId = this.activeTurns.get(thread.id);
-        if (thread.canAcceptDirectInput !== true || !activeTurnId) {
-          throw new Error("That Codex session is busy and cannot accept steering yet. Wait for its current step to finish, then retry.");
-        }
-        await this.request("turn/steer", {
-          threadId: thread.id,
-          expectedTurnId: activeTurnId,
-          input: [textInput(text)],
-          responsesapiClientMetadata: { source: "agentic-wear" },
-        });
-        return { threadId: thread.id, created: false };
-      }
-      if (thread.status.type === "notLoaded" || thread.status.type === "systemError") {
-        thread = await this.resumeThread(thread.id);
-      }
     }
-    const turnParams: Record<string, unknown> = {
+
+    queuedSubmissionResponseSchema.parse(await this.request("thread/queue/add", {
       threadId: thread.id,
       input: [textInput(text)],
-      effort,
-      responsesapiClientMetadata: { source: "agentic-wear" },
-    };
-    if (model !== null) turnParams.model = model;
-    await this.request("turn/start", turnParams);
-    return { threadId: thread.id, created };
+      clientUserMessageId: messageId,
+    }));
+    return { threadId: thread.id, created: threadId === null };
   }
 
   async chatSnapshot(threadId: string, forceRefresh = false): Promise<ChatSnapshot> {
@@ -553,26 +549,30 @@ export class AppServerClient {
       ].join(" "),
     });
     const thread = responseWithThreadSchema.parse(raw).thread;
+    this.controlledThreads.add(thread.id);
     const revised = new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.ephemeralRevisions.delete(thread.id);
+        void this.releaseThread(thread.id);
         reject(new Error("Smart revision timed out. Your original draft is still available."));
       }, 45_000);
       timeout.unref();
       this.ephemeralRevisions.set(thread.id, { text: "", resolve, reject, timeout });
     });
     try {
-      await this.request("turn/start", {
+      const started = turnStartedSchema.parse(await this.request("turn/start", {
         threadId: thread.id,
         input: [textInput(`ORIGINAL DRAFT:\n${previousText}\n\nNEW CORRECTION:\n${correction}`)],
         effort: "low",
         responsesapiClientMetadata: { source: "agentic-wear-smart-revision" },
-      });
+      }));
+      this.controlledTurnIds.set(thread.id, started.turn.id);
       return cleanRevision(await revised);
     } catch (error) {
       const pending = this.ephemeralRevisions.get(thread.id);
       if (pending) clearTimeout(pending.timeout);
       this.ephemeralRevisions.delete(thread.id);
+      if (this.controlledThreads.has(thread.id)) await this.releaseThread(thread.id);
       throw error;
     }
   }
@@ -619,7 +619,11 @@ export class AppServerClient {
     this.approvals.delete(approvalId);
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    // Best effort while the transport can still receive RPC responses. Threads
+    // left in this set failed an earlier terminal release and get one final
+    // bounded retry before disconnecting.
+    for (const threadId of this.controlledThreads) await this.releaseThread(threadId);
     this.stopping = true;
     this.lines?.close();
     this.lines = null;
@@ -654,13 +658,11 @@ export class AppServerClient {
     if (method === "thread/started") {
       const event = threadStartedSchema.parse(params);
       this.threadCache.set(event.thread.id, event.thread);
-      this.subscriptions.add(event.thread.id);
       return;
     }
     if (method === "turn/started") {
       const event = turnStartedSchema.parse(params);
       if (event.threadId) {
-        this.activeTurns.set(event.threadId, event.turn.id);
         this.updateCachedChatStatus(event.threadId, "active");
       }
       return;
@@ -697,48 +699,48 @@ export class AppServerClient {
     const terminal = parseTerminalNotification(method, params);
     if (terminal) {
       const event = terminal;
-      this.activeTurns.delete(event.threadId);
+      const shouldRelease = this.controlledTurnIds.get(event.threadId) === event.turn.id;
       this.updateCachedChatStatus(event.threadId, event.turn.status === "failed" ? "error" : "idle");
-      const revision = this.ephemeralRevisions.get(event.threadId);
-      if (revision) {
-        clearTimeout(revision.timeout);
-        this.ephemeralRevisions.delete(event.threadId);
-        if (event.turn.status === "completed" && revision.text.trim()) revision.resolve(revision.text);
-        else revision.reject(new Error(event.turn.error?.message ?? "Smart revision did not produce an updated draft"));
-        return;
+      try {
+        const revision = this.ephemeralRevisions.get(event.threadId);
+        if (revision) {
+          clearTimeout(revision.timeout);
+          this.ephemeralRevisions.delete(event.threadId);
+          if (event.turn.status === "completed" && revision.text.trim()) revision.resolve(revision.text);
+          else revision.reject(new Error(event.turn.error?.message ?? "Smart revision did not produce an updated draft"));
+          return;
+        }
+        const thread = await this.readThread(event.threadId, true);
+        if (!isTopLevelUserThread(thread)) return;
+        const occurredAt = event.turn.completedAt ? event.turn.completedAt * 1_000 : Date.now();
+        const kind = `terminal.${event.turn.status}` as TerminalEvent["kind"];
+        const detail = event.turn.status === "completed"
+          ? "The agent finished its full response."
+          : event.turn.status === "failed"
+            ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
+            : "The agent was interrupted before finishing.";
+        await this.emitTerminal({
+          eventId: `turn:${event.threadId}:${event.turn.id}:${event.turn.status}`,
+          kind,
+          turnScope: "topLevel",
+          threadId: event.threadId,
+          title: threadTitle(thread),
+          detail,
+          occurredAt,
+        });
+      } finally {
+        if (shouldRelease) await this.releaseThread(event.threadId);
       }
-      const thread = await this.readThread(event.threadId, true);
-      if (!isTopLevelUserThread(thread)) return;
-      const occurredAt = event.turn.completedAt ? event.turn.completedAt * 1_000 : Date.now();
-      const kind = `terminal.${event.turn.status}` as TerminalEvent["kind"];
-      const detail = event.turn.status === "completed"
-        ? "The agent finished its full response."
-        : event.turn.status === "failed"
-          ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
-          : "The agent was interrupted before finishing.";
-      await this.emitTerminal({
-        eventId: `turn:${event.threadId}:${event.turn.id}:${event.turn.status}`,
-        kind,
-        turnScope: "topLevel",
-        threadId: event.threadId,
-        title: threadTitle(thread),
-        detail,
-        occurredAt,
-      });
       return;
     }
     if (method === "thread/name/updated" || method === "thread/status/changed") {
-      const update = z.object({
-        threadId: z.string(),
-        status: z.object({ type: z.enum(["notLoaded", "idle", "systemError", "active"]) }).optional(),
-      }).passthrough().safeParse(params);
+      const update = z.object({ threadId: z.string() }).passthrough().safeParse(params);
       if (update.success) {
-        if (update.data.status && update.data.status.type !== "notLoaded") {
-          await this.subscribeLoadedThread(update.data.threadId);
-        }
-        const thread = await this.readThread(update.data.threadId, true);
+        // A notification is not permission to acquire ownership. Refresh only
+        // chat state already requested by the watch.
         const cached = this.chatCaches.get(update.data.threadId);
         if (cached) {
+          const thread = await this.readThread(update.data.threadId, true);
           cached.title = threadTitle(thread);
           cached.status = this.sessionView(thread).status;
         }
@@ -842,27 +844,37 @@ export class AppServerClient {
     return thread;
   }
 
-  private async subscribeLoadedThread(threadId: string): Promise<void> {
-    if (this.subscriptions.has(threadId) || this.subscribing.has(threadId)) return;
-    this.subscribing.add(threadId);
-    try {
-      const thread = await this.readThread(threadId, true);
-      if (thread.status.type === "notLoaded" || thread.status.type === "systemError") {
-        await this.resumeThread(threadId);
-      } else {
-        this.subscriptions.add(threadId);
+  private async releaseThread(threadId: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= UNSUBSCRIBE_ATTEMPTS; attempt += 1) {
+      try {
+        const response = z.object({
+          status: z.enum(["notLoaded", "notSubscribed", "unsubscribed"]),
+        }).parse(await this.request("thread/unsubscribe", { threadId }));
+        this.controlledThreads.delete(threadId);
+        this.controlledTurnIds.delete(threadId);
+        console.info(JSON.stringify({
+          level: "info",
+          message: "Released App Server thread subscription",
+          threadId,
+          status: response.status,
+          attempt,
+        }));
+        return true;
+      } catch (error) {
+        const finalAttempt = attempt === UNSUBSCRIBE_ATTEMPTS;
+        console[finalAttempt ? "error" : "warn"](JSON.stringify({
+          level: finalAttempt ? "error" : "warn",
+          message: finalAttempt
+            ? "App Server thread subscription remains held after release retries"
+            : "Retrying App Server thread subscription release",
+          threadId,
+          attempt,
+          error: safeError(error),
+        }));
+        if (!finalAttempt) await handoffDelay(UNSUBSCRIBE_RETRY_MS);
       }
-    } finally {
-      this.subscribing.delete(threadId);
     }
-  }
-
-  private async resumeThread(threadId: string): Promise<CodexThread> {
-    const raw = await this.request("thread/resume", { threadId, excludeTurns: true });
-    const thread = responseWithThreadSchema.parse(raw).thread;
-    this.threadCache.set(thread.id, thread);
-    this.subscriptions.add(thread.id);
-    return thread;
+    return false;
   }
 
   private updateCachedAgentMessage(
@@ -953,6 +965,9 @@ export class AppServerClient {
         detail,
         occurredAt: turn.completedAt! * 1_000,
       });
+      if (this.controlledTurnIds.get(session.id) === turn.id) {
+        await this.releaseThread(session.id);
+      }
     }
   }
 
@@ -1061,6 +1076,14 @@ export function isTerminalNewerThan(completedAt: number | null | undefined, obse
   return completedAt != null && completedAt * 1_000 >= Math.floor(observedAtMs / 1_000) * 1_000;
 }
 
+export function supportsThreadQueue(userAgent: string): boolean {
+  const version = /(?:^|\D)(\d+)\.(\d+)\.(\d+)(?:\D|$)/u.exec(userAgent);
+  if (!version) return false;
+  const major = Number(version[1]);
+  const minor = Number(version[2]);
+  return major > 0 || minor >= 150;
+}
+
 function textInput(text: string): Record<string, unknown> {
   return { type: "text", text, text_elements: [] };
 }
@@ -1144,13 +1167,12 @@ function cleanRevision(value: string): string {
   return cleaned.slice(0, 12_000);
 }
 
-function isActiveWriterError(error: unknown): boolean {
-  return /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|owns this session(?: in another client)?|another (?:Codex )?client/iu
-    .test(error instanceof Error ? error.message : "");
-}
-
 function safeError(error: unknown): string {
   return (error instanceof Error ? error.message : "Unknown error").slice(0, 400);
+}
+
+function handoffDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -1169,6 +1191,8 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 const MAX_APP_SERVER_MESSAGE_BYTES = 16 * 1_024 * 1_024;
+const UNSUBSCRIBE_ATTEMPTS = 3;
+const UNSUBSCRIBE_RETRY_MS = 200;
 const MAX_CHAT_HISTORY_TURNS = 6;
 const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CHAT_MESSAGES = 12;
