@@ -495,32 +495,30 @@ export class AppServerClient {
 
   private async loadFreshChatSnapshot(threadId: string): Promise<ChatSnapshot> {
     const thread = await this.readThread(threadId, true);
-    const turns: CachedChatMessage[][] = [];
-    let cursor: string | null = null;
-    let messageTotal = 0;
-    for (let page = 0; page < MAX_CHAT_HISTORY_TURNS && messageTotal < MAX_CHAT_MESSAGES; page += 1) {
-      const raw = await this.request("thread/turns/list", {
-        threadId,
-        limit: 1,
-        sortDirection: "desc",
-        itemsView: "full",
-        cursor,
-      });
-      const response = chatTurnListResponseSchema.parse(raw);
-      const messages = response.data.flatMap((turn) => turn.items
+    // The full view contains reasoning, command output, file changes, and tool
+    // payloads that Agentic Wear intentionally discards. Long Codex chats can
+    // make those responses exceed the daemon transport limit or cancel the
+    // background serialization task. Summary is the supported bounded view of
+    // user/final-agent messages and keeps one refresh to one small RPC.
+    const raw = await this.request("thread/turns/list", {
+      threadId,
+      limit: MAX_CHAT_HISTORY_TURNS,
+      sortDirection: "desc",
+      itemsView: "summary",
+    });
+    const response = chatTurnListResponseSchema.parse(raw);
+    const messages = response.data
+      .slice()
+      .reverse()
+      .flatMap((turn) => turn.items
         .map((item) => chatMessageFromItem(turn.id, item))
         .filter((message): message is CachedChatMessage => message !== null));
-      turns.push(messages);
-      messageTotal += messages.length;
-      cursor = response.nextCursor ?? null;
-      if (!cursor) break;
-    }
 
     const cache: CachedChat = {
       threadId,
       title: threadTitle(thread),
       status: this.sessionView(thread).status,
-      messages: turns.reverse().flat().slice(-MAX_CACHED_CHAT_MESSAGES),
+      messages: messages.slice(-MAX_CACHED_CHAT_MESSAGES),
     };
     for (const pending of this.pendingPermissionMessages.values()) {
       if (pending.threadId === threadId && !cache.messages.some(({ id }) => id === pending.message.id)) {
@@ -1191,7 +1189,7 @@ function safeError(error: unknown): string {
 }
 
 function isTransientThreadAvailabilityError(error: unknown): boolean {
-  return /not found|no rollout|not available|temporarily unavailable/iu
+  return /not found|no rollout|not available|temporarily unavailable|cancel(?:led|ed)/iu
     .test(error instanceof Error ? error.message : "");
 }
 

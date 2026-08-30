@@ -323,6 +323,9 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
   if (/not found|no rollout/iu.test(message)) {
     return "The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.";
   }
+  if (/cancel(?:led|ed)/iu.test(message)) {
+    return "Codex briefly cancelled the chat-history sync after the bridge retried it. Agentic Wear kept your selection and draft; refresh sessions and retry.";
+  }
   if (/not connected|socket closed|app server closed/iu.test(message)) {
     return "The private bridge lost its Codex connection. Restart Codex and the Agentic Wear bridge, then retry.";
   }

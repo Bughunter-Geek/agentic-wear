@@ -55,4 +55,9 @@ describe("publicRequestError", () => {
     expect(publicRequestError(new Error("No rollout found for thread"), "chat.watch"))
       .toBe("The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.");
   });
+
+  it("does not expose an internal cancelled task id after retries", () => {
+    expect(publicRequestError(new Error("bs1 was cancelled"), "chat.watch"))
+      .toBe("Codex briefly cancelled the chat-history sync after the bridge retried it. Agentic Wear kept your selection and draft; refresh sessions and retry.");
+  });
 });

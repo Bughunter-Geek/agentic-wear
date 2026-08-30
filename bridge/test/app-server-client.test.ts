@@ -517,9 +517,15 @@ describe("AppServerClient session delivery", () => {
   it("preserves user and assistant roles plus Markdown in chat snapshots", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
-    internals.request = vi.fn((method: string) => {
+    internals.request = vi.fn((method: string, params: unknown) => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
       if (method === "thread/turns/list") {
+        expect(params).toEqual({
+          threadId: "thread-1",
+          limit: 6,
+          sortDirection: "desc",
+          itemsView: "summary",
+        });
         return Promise.resolve({
           data: [{
             id: "turn-1",
@@ -600,31 +606,52 @@ describe("AppServerClient session delivery", () => {
     expect(internals.request).toHaveBeenCalledWith("thread/list", expect.objectContaining({ limit: 50 }));
   });
 
+  it("retries a cancelled history serialization instead of leaking its internal task id", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    let historyAttempts = 0;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") {
+        historyAttempts += 1;
+        if (historyAttempts === 1) return Promise.reject(new Error("bs1 was cancelled"));
+        return Promise.resolve({
+          data: [{
+            id: "turn-1",
+            items: [{ id: "assistant-1", type: "agentMessage", phase: "final_answer", text: "Recovered" }],
+          }],
+          nextCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toEqual(expect.objectContaining({
+      messages: [expect.objectContaining({ text: "Recovered" })],
+    }));
+    expect(historyAttempts).toBe(2);
+  });
+
   it("returns only the newest five assistant paragraphs in chronological order", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
-    let page = 0;
     internals.request = vi.fn((method: string) => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("active") });
       if (method !== "thread/turns/list") return Promise.reject(new Error(`Unexpected method ${method}`));
-      page += 1;
-      if (page === 1) {
-        return Promise.resolve({
-          data: [{
+      return Promise.resolve({
+        data: [
+          {
             id: "turn-2",
             items: [{ id: "message-2", type: "agentMessage", phase: "final_answer", text: "Fourth\n\nFifth\n\nSixth" }],
-          }],
-          nextCursor: "older",
-        });
-      }
-      return Promise.resolve({
-        data: [{
-          id: "turn-1",
-          items: [
-            { id: "message-1", type: "agentMessage", phase: "commentary", text: "First\n\nSecond\n\nThird" },
-            { id: "tool-1", type: "commandExecution" },
-          ],
-        }],
+          },
+          {
+            id: "turn-1",
+            items: [
+              { id: "message-1", type: "agentMessage", phase: "commentary", text: "First\n\nSecond\n\nThird" },
+            ],
+          },
+        ],
         nextCursor: null,
       });
     });

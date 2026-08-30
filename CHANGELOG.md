@@ -2,6 +2,11 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## Unreleased
+
+- Loads watch chat history through Codex's bounded summary view instead of serializing reasoning, command output, file changes, and tool payloads that the watch discards. This prevents large cross-client chats from exceeding the daemon transport limit or surfacing internal cancellations such as `bs1 was cancelled`.
+- Retries transient App Server history cancellations and replaces internal task identifiers with actionable recovery text if bounded retries are exhausted.
+
 ## 0.6.2-alpha — 2026-08-30
 
 This is a public Alpha prerelease for remote OTA testing. The fix is locally validated; physical Pixel Watch and cross-device acceptance remain pending.
