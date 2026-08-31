@@ -4,6 +4,21 @@ Every public build remains an Alpha GitHub Pre-release until the project is expl
 
 ## Unreleased
 
+## 0.6.5-alpha — 2026-08-31
+
+This is a public Alpha prerelease for remote OTA testing. Automated checks pass; physical Pixel Watch acceptance of the owner-held model-routing flow remains pending.
+
+- Applies the Watch model and reasoning selection before adding or starting a prompt whenever the bridge can acquire the original session.
+- Keeps same-chat sends immediate when the owning client's persisted model and effort already match the Watch selection.
+- When an owner-held session has different settings, encrypts the exact prompt locally, acknowledges it as waiting instead of showing a false send error, and retries the original chat with the same request ID after ownership releases. No chat is forked.
+- Clears transcript review after every durable acceptance and shows waiting/started state as nonfatal status inside the live chat.
+- Prevents internal App Server cancellation task IDs from becoming foreign-session Watch alerts; controlled cancellations use generic interrupted wording.
+- Removes observation-only queue/history probes as evidence for a green Ready state.
+
+### Test status
+
+- All 93 bridge tests, 18 relay tests, and 52 Wear unit tests pass, along with TypeScript/Oxlint, debug lint, debug assembly, release R8/signing, APK metadata, checksum, and OTA-manifest verification. Physical Pixel Watch acceptance remains pending.
+
 ## 0.6.4-alpha — 2026-08-31
 
 This is a public Alpha prerelease for remote OTA testing. The retained-writer failure is reproduced and covered by regression tests; physical Pixel Watch acceptance remains pending.

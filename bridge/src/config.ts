@@ -11,6 +11,11 @@ const bridgeConfigSchema = z.object({
   watchPublicKey: z.string().min(32).max(1_024).nullable(),
   defaultCwd: z.string().min(1).max(4_096),
   watchOwnedThreadIds: z.array(z.string().min(1).max(128)).max(200),
+  pendingTurns: z.array(z.object({
+    id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u),
+    nonce: z.string().min(16).max(24).regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+    ciphertext: z.string().min(16).max(65_536).regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+  }).strict()).max(20).optional(),
 }).strict();
 
 export type BridgeConfig = z.infer<typeof bridgeConfigSchema>;

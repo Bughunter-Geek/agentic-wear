@@ -134,6 +134,14 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_LAST_ACCEPTED_THREAD, null)
         set(value) = prefs.edit { putString(KEY_LAST_ACCEPTED_THREAD, value) }
 
+    var lastAcceptedTurnRequestId: String?
+        get() = prefs.getString(KEY_LAST_ACCEPTED_TURN_REQUEST, null)
+        set(value) = prefs.edit { putString(KEY_LAST_ACCEPTED_TURN_REQUEST, value) }
+
+    var lastSendNotice: String?
+        get() = prefs.getString(KEY_LAST_SEND_NOTICE, null)
+        set(value) = prefs.edit { putString(KEY_LAST_SEND_NOTICE, value) }
+
     var pending: Boolean
         get() = prefs.getBoolean(KEY_PENDING, false)
         set(value) = prefs.edit { putBoolean(KEY_PENDING, value) }
@@ -196,6 +204,8 @@ class AppPreferences(context: Context) {
         private const val KEY_PENDING_FEEDBACK_REQUEST = "pending_feedback_request"
         private const val KEY_PENDING_APPROVAL_REQUEST = "pending_approval_request"
         private const val KEY_LAST_ACCEPTED_THREAD = "last_accepted_thread"
+        private const val KEY_LAST_ACCEPTED_TURN_REQUEST = "last_accepted_turn_request"
+        private const val KEY_LAST_SEND_NOTICE = "last_send_notice"
         private const val KEY_PENDING = "pending"
         private const val KEY_LAST_ERROR = "last_error"
         private const val KEY_HANDLED_IDS = "handled_ids"

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
+import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
 import { z } from "zod";
 import {
@@ -38,6 +39,15 @@ export type ModelView = {
   defaultReasoningEffort: string;
   supportedReasoningEfforts: string[];
 };
+
+export type TurnSubmissionResult = {
+  threadId: string;
+  created: boolean;
+  state: "running" | "queued" | "waiting";
+  selectionApplied: boolean;
+};
+
+type ThreadSettings = { model: string | null; effort: string | null };
 
 /**
  * Diagnostic only. Audio remains on the encrypted recording/transcription path
@@ -223,9 +233,9 @@ export class AppServerClient {
   private readonly deliveredTerminalEvents = new Set<string>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
-  // A thread is shown as Ready only after this bridge has successfully read
-  // its bounded history and probed the cross-client queue, or after it has
-  // started an exact Watch submission itself.
+  // A foreign notLoaded thread is shown as Ready only while this bridge has
+  // proved it can start an exact Watch submission. Observation-only history
+  // and queue probes do not prove that another client released its writer.
   private readonly watchReadyThreads = new Set<string>();
   private readonly pendingPermissionMessages = new Map<string, { threadId: string; message: CachedChatMessage }>();
   private modelCache: ModelView[] | null = null;
@@ -238,6 +248,7 @@ export class AppServerClient {
     private readonly onApproval: (event: ApprovalEvent) => Promise<void>,
     private readonly onFatal: (error: Error) => void = () => {},
     private readonly onAgentOutput: (threadId: string) => Promise<void> = () => Promise.resolve(),
+    private readonly readThreadSettings: (threadId: string) => ThreadSettings | null = readPersistedThreadSettings,
   ) {}
 
   async connect(transport: "daemon" | "stdio" = "daemon"): Promise<void> {
@@ -336,7 +347,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     const initialized = initializeResponseSchema.parse(await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.4" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.5" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -375,7 +386,12 @@ export class AppServerClient {
       useStateDbOnly: false,
     });
     const response = threadListResponseSchema.parse(raw);
-    for (const thread of response.data) this.threadCache.set(thread.id, thread);
+    for (const thread of response.data) {
+      this.threadCache.set(thread.id, thread);
+      if (thread.status.type === "notLoaded" && !this.controlledThreads.has(thread.id)) {
+        this.watchReadyThreads.delete(thread.id);
+      }
+    }
     return response.data.filter(isTopLevelUserThread).map((thread) => this.sessionView(thread));
   }
 
@@ -459,10 +475,10 @@ export class AppServerClient {
     model: string | null = null,
     effort = "medium",
     clientUserMessageId: string | null = null,
-  ): Promise<{ threadId: string; created: boolean }> {
+  ): Promise<TurnSubmissionResult> {
     let thread: CodexThread;
-    let dormantQueueNeedsWake = false;
-    let foreignTurnInProgress = false;
+    let startQueuedSubmission = false;
+    let waitForSelection = false;
     let previousTurnId: string | null = null;
     const messageId = clientUserMessageId ?? randomUUID();
     if (threadId === null) {
@@ -473,6 +489,7 @@ export class AppServerClient {
         serviceName: "Agentic Wear",
         ephemeral: false,
         model,
+        config: { model_reasoning_effort: effort },
       });
       thread = responseWithThreadSchema.parse(raw).thread;
       this.threadCache.set(thread.id, thread);
@@ -486,28 +503,57 @@ export class AppServerClient {
         await this.releaseThread(thread.id);
         throw error;
       }
-      if (!await this.releaseThread(thread.id)) {
-        throw new Error("Codex created the new session but could not release its writer. The prompt was not queued; refresh Sessions before retrying.");
+      try {
+        const started = turnStartedSchema.parse(await this.request("turn/start", {
+          threadId: thread.id,
+          input: [textInput(text)],
+          clientUserMessageId: messageId,
+          model,
+          effort,
+        }));
+        this.controlledTurnIds.set(thread.id, started.turn.id);
+        this.watchReadyThreads.add(thread.id);
+      } catch (error) {
+        await this.releaseThread(thread.id);
+        throw error;
       }
-      dormantQueueNeedsWake = true;
+      return {
+        threadId: thread.id,
+        created: true,
+        state: "running",
+        selectionApplied: true,
+      };
     } else {
-      // Queueing is the cross-client handoff primitive in App Server 0.150+.
-      // An active foreign turn keeps its writer and receives this submission
-      // afterward. A dormant notLoaded queue is woken below for this exact
-      // submission, then released at its terminal state.
       thread = await this.retryTransientThreadOperation(threadId, async () => {
         const current = await this.readThread(threadId, true);
-        // A mobile/Desktop-owned thread is intentionally visible as notLoaded
-        // on this connection. App Server rejects settings updates for that
-        // state even though thread/queue/add is the supported cross-client
-        // handoff. Do not let a redundant sticky-settings write prevent the
-        // user's message from reaching the queue.
         if (current.status.type === "notLoaded") {
-          dormantQueueNeedsWake = true;
           const latest = await this.latestTurn(current.id);
           previousTurnId = latest?.id ?? null;
-          foreignTurnInProgress = latest?.status === "inProgress";
+          const persisted = this.readThreadSettings(current.id);
+          const selectionAlreadyApplied = persisted !== null &&
+            (model === null || persisted.model === model) &&
+            persisted.effort === effort;
+          if (selectionAlreadyApplied) return current;
+          if (latest?.status === "inProgress") {
+            this.watchReadyThreads.delete(current.id);
+            return current;
+          }
+          if (!await this.acquireDormantThread(current.id, model, effort)) {
+            this.watchReadyThreads.delete(current.id);
+            return current;
+          }
+          startQueuedSubmission = true;
           return current;
+        }
+        if (current.status.type === "active") {
+          const persisted = this.readThreadSettings(current.id);
+          const selectionAlreadyApplied = persisted !== null &&
+            (model === null || persisted.model === model) &&
+            persisted.effort === effort;
+          if (!selectionAlreadyApplied) {
+            waitForSelection = true;
+            return current;
+          }
         }
         const stickySettings: Record<string, unknown> = {
           threadId: current.id,
@@ -517,6 +563,30 @@ export class AppServerClient {
         await this.request("thread/settings/update", stickySettings);
         return current;
       });
+    }
+
+    if (waitForSelection) {
+      return {
+        threadId: thread.id,
+        created: false,
+        state: "waiting",
+        selectionApplied: false,
+      };
+    }
+
+    if (thread.status.type === "notLoaded" && !startQueuedSubmission) {
+      const persisted = this.readThreadSettings(thread.id);
+      const selectionAlreadyApplied = persisted !== null &&
+        (model === null || persisted.model === model) &&
+        persisted.effort === effort;
+      if (!selectionAlreadyApplied) {
+        return {
+          threadId: thread.id,
+          created: false,
+          state: "waiting",
+          selectionApplied: false,
+        };
+      }
     }
 
     // The watch request UUID is the App Server idempotency key. Retrying a
@@ -529,38 +599,53 @@ export class AppServerClient {
         clientUserMessageId: messageId,
       }));
     });
-    if (dormantQueueNeedsWake && !foreignTurnInProgress) {
-      await this.startDormantQueuedSubmission(
+    if (startQueuedSubmission) {
+      await this.startControlledQueuedSubmission(
         thread.id,
         queued.queuedSubmission.id,
-        model,
-        effort,
         previousTurnId,
       );
     }
-    this.watchReadyThreads.add(thread.id);
-    return { threadId: thread.id, created: threadId === null };
+    return {
+      threadId: thread.id,
+      created: false,
+      state: startQueuedSubmission ? "running" : "queued",
+      selectionApplied: true,
+    };
   }
 
-  private async startDormantQueuedSubmission(
+  private async acquireDormantThread(
     threadId: string,
-    queuedSubmissionId: string,
     model: string | null,
     effort: string,
-    previousTurnId: string | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const resumeParams: Record<string, unknown> = {
       threadId,
       excludeTurns: true,
+      config: { model_reasoning_effort: effort },
     };
     if (model !== null) resumeParams.model = model;
-    let startAttempted = false;
     try {
       responseWithThreadSchema.parse(await this.request("thread/resume", resumeParams));
       this.controlledThreads.add(threadId);
       const stickySettings: Record<string, unknown> = { threadId, effort };
       if (model !== null) stickySettings.model = model;
       await this.request("thread/settings/update", stickySettings);
+      return true;
+    } catch (error) {
+      if (this.controlledThreads.has(threadId)) await this.releaseThread(threadId);
+      if (isActiveWriterError(error) || isTransientThreadAvailabilityError(error)) return false;
+      throw error;
+    }
+  }
+
+  private async startControlledQueuedSubmission(
+    threadId: string,
+    queuedSubmissionId: string,
+    previousTurnId: string | null,
+  ): Promise<void> {
+    let startAttempted = false;
+    try {
       startAttempted = true;
       const started = queueStartResponseSchema.parse(await this.request("thread/queue/start", {
         threadId,
@@ -569,15 +654,6 @@ export class AppServerClient {
       this.controlledTurnIds.set(threadId, started.turn.id);
       this.watchReadyThreads.add(threadId);
     } catch (error) {
-      // queue/add already committed the Watch request. An idle foreign task can
-      // still have a writer retained by Desktop or mobile, so this private App
-      // Server is not allowed to resume it. Keep the accepted queue item for
-      // that owning client instead of deleting it and falsely reporting the
-      // prompt as unsent.
-      if (!startAttempted && isActiveWriterError(error)) {
-        this.watchReadyThreads.add(threadId);
-        return;
-      }
       const deleted = await this.request("thread/queue/delete", {
         threadId,
         queuedSubmissionId,
@@ -660,7 +736,6 @@ export class AppServerClient {
         threadId,
         limit: 1,
       }));
-      this.watchReadyThreads.add(threadId);
     } catch {
       // History remains useful even when the queue probe is temporarily
       // unavailable. Keep the state gray rather than failing the whole chat.
@@ -879,7 +954,11 @@ export class AppServerClient {
     if (terminal) {
       const event = terminal;
       const shouldRelease = this.controlledTurnIds.get(event.threadId) === event.turn.id;
-      this.updateCachedChatStatus(event.threadId, event.turn.status === "failed" ? "error" : "idle");
+      const internalCancellation = isInternalCancellationFailure(event.turn.status, event.turn.error?.message);
+      this.updateCachedChatStatus(
+        event.threadId,
+        event.turn.status === "failed" && !internalCancellation ? "error" : "idle",
+      );
       try {
         const revision = this.ephemeralRevisions.get(event.threadId);
         if (revision) {
@@ -895,9 +974,14 @@ export class AppServerClient {
         // load the released thread again on the bridge.
         const thread = this.threadCache.get(event.threadId) ?? await this.readThread(event.threadId, true);
         if (!isTopLevelUserThread(thread)) return;
+        if (internalCancellation && !shouldRelease) return;
         const occurredAt = event.turn.completedAt ? event.turn.completedAt * 1_000 : Date.now();
-        const kind = `terminal.${event.turn.status}` as TerminalEvent["kind"];
-        const detail = event.turn.status === "completed"
+        const kind = internalCancellation
+          ? "terminal.interrupted"
+          : `terminal.${event.turn.status}` as TerminalEvent["kind"];
+        const detail = internalCancellation
+          ? "Codex cancelled an internal response task. Open the session and retry only if no reply appears."
+          : event.turn.status === "completed"
           ? "The agent finished its full response."
           : event.turn.status === "failed"
             ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
@@ -1086,6 +1170,7 @@ export class AppServerClient {
   }
 
   private markThreadNotLoaded(threadId: string): void {
+    this.watchReadyThreads.delete(threadId);
     const cachedThread = this.threadCache.get(threadId);
     if (!cachedThread) return;
     this.threadCache.set(threadId, {
@@ -1200,8 +1285,18 @@ export class AppServerClient {
       .filter((turn) => turn.status !== "inProgress" && isTerminalNewerThan(turn.completedAt, newerThanMs))
       .reverse();
     for (const turn of turns) {
-      const kind = `terminal.${turn.status}` as TerminalEvent["kind"];
-      const detail = turn.status === "completed"
+      const controlled = this.controlledTurnIds.get(session.id) === turn.id;
+      const internalCancellation = isInternalCancellationFailure(turn.status, turn.error?.message);
+      if (internalCancellation && !controlled) {
+        this.rememberTerminalEvent(`turn:${session.id}:${turn.id}:${turn.status}`);
+        continue;
+      }
+      const kind = internalCancellation
+        ? "terminal.interrupted"
+        : `terminal.${turn.status}` as TerminalEvent["kind"];
+      const detail = internalCancellation
+        ? "Codex cancelled an internal response task. Open the session and retry only if no reply appears."
+        : turn.status === "completed"
         ? "The agent finished its full response."
         : turn.status === "failed"
           ? sanitizePublicText(turn.error?.message ?? "The agent stopped with an error.")
@@ -1443,6 +1538,31 @@ function isTransientThreadAvailabilityError(error: unknown): boolean {
 function isActiveWriterError(error: unknown): boolean {
   return /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|another (?:Codex )?client|owns this session/iu
     .test(error instanceof Error ? error.message : "");
+}
+
+function isInternalCancellationFailure(status: string, message: string | undefined): boolean {
+  return status === "failed" && /\b[a-z]{1,4}\d+\s+was cancel(?:led|ed)\b/iu.test(message ?? "");
+}
+
+function readPersistedThreadSettings(threadId: string): ThreadSettings | null {
+  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+  const databasePath = join(codexHome, "state_5.sqlite");
+  let database: DatabaseSync | null = null;
+  try {
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const row = database.prepare(
+      "SELECT model, reasoning_effort AS effort FROM threads WHERE id = ? LIMIT 1",
+    ).get(threadId) as { model?: unknown; effort?: unknown } | undefined;
+    if (!row) return null;
+    return {
+      model: typeof row.model === "string" && row.model ? row.model : null,
+      effort: typeof row.effort === "string" && row.effort ? row.effort : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    database?.close();
+  }
 }
 
 function handoffDelay(milliseconds: number): Promise<void> {

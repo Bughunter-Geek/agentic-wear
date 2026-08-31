@@ -8,6 +8,7 @@ const MAX_MESSAGE_AGE_MS = 24 * 60 * 60 * 1_000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 
 export type BridgeKeyPair = { publicKeyBase64: string; privateKeyMaterial: string };
+export type SealedLocalPayload = { nonce: string; ciphertext: string };
 
 export async function generateBridgeKeyPair(): Promise<BridgeKeyPair> {
   const pair = await cryptoApi.subtle.generateKey(
@@ -102,6 +103,40 @@ export class CryptoBox {
     return JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(plaintext));
   }
 
+  async sealLocal(id: string, payload: Record<string, unknown>): Promise<SealedLocalPayload> {
+    const nonce = cryptoApi.getRandomValues(new Uint8Array(12));
+    const encrypted = await cryptoApi.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce,
+        additionalData: bufferSource(localAad(this.pairId, id)),
+        tagLength: 128,
+      },
+      await this.key(),
+      encoder.encode(JSON.stringify(payload)),
+    );
+    return {
+      nonce: Buffer.from(nonce).toString("base64"),
+      ciphertext: Buffer.from(encrypted).toString("base64"),
+    };
+  }
+
+  async openLocal(id: string, sealed: SealedLocalPayload): Promise<unknown> {
+    const nonce = Buffer.from(sealed.nonce, "base64");
+    if (nonce.byteLength !== 12) throw new Error("Invalid local pending-turn nonce");
+    const plaintext = await cryptoApi.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce,
+        additionalData: bufferSource(localAad(this.pairId, id)),
+        tagLength: 128,
+      },
+      await this.key(),
+      Buffer.from(sealed.ciphertext, "base64"),
+    );
+    return JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(plaintext));
+  }
+
   private async key(): Promise<CryptoKey> {
     if (this.sharedKey) return this.sharedKey;
     if (!this.watchPublicKeyBase64) throw new Error("The watch has not completed pairing yet");
@@ -169,6 +204,10 @@ export class CryptoBox {
 
 function aad(version: number, id: string, sender: string, recipient: string, sentAt: number): Uint8Array {
   return encoder.encode(`${version}|${id}|${sender}|${recipient}|${sentAt}`);
+}
+
+function localAad(pairId: string, id: string): Uint8Array {
+  return encoder.encode(`agentic-wear-v1|pending-turn|${pairId}|${id}`);
 }
 
 function bufferSource(value: Uint8Array): ArrayBuffer {

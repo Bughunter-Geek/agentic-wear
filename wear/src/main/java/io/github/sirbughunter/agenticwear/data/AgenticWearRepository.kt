@@ -102,6 +102,8 @@ class AgenticWearRepository(private val context: Context) {
         preferences.pending = true
         preferences.pendingTurnRequestId = requestId
         preferences.lastAcceptedThreadId = null
+        preferences.lastAcceptedTurnRequestId = null
+        preferences.lastSendNotice = null
         preferences.lastError = null
         try {
             send(
@@ -290,6 +292,8 @@ class AgenticWearRepository(private val context: Context) {
         preferences.pendingFeedbackRequestId = null
         preferences.pendingApprovalRequestId = null
         preferences.lastAcceptedThreadId = null
+        preferences.lastAcceptedTurnRequestId = null
+        preferences.lastSendNotice = null
         preferences.pending = false
         preferences.lastError = null
         broadcastStateChanged()
@@ -403,11 +407,20 @@ class AgenticWearRepository(private val context: Context) {
             }
             "turn.accepted" -> {
                 if (payload.optString("requestId") == preferences.pendingTurnRequestId) {
+                    val requestId = payload.optString("requestId")
                     preferences.pendingTurnRequestId = null
                     preferences.lastAcceptedThreadId = payload.optString("threadId").takeIf(String::isNotBlank)
+                    preferences.lastAcceptedTurnRequestId = requestId
+                    preferences.lastSendNotice = payload.optString("message").takeIf(String::isNotBlank)
                     preferences.transcript = null
                     preferences.revisionBase = null
                     preferences.pending = false
+                    preferences.lastError = null
+                }
+            }
+            "turn.started" -> {
+                if (payload.optString("requestId") == preferences.lastAcceptedTurnRequestId) {
+                    preferences.lastSendNotice = payload.optString("message").takeIf(String::isNotBlank)
                     preferences.lastError = null
                 }
             }

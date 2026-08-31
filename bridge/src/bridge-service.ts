@@ -1,6 +1,6 @@
 import type { BridgeConfig } from "./config.js";
 import { writeConfig } from "./config.js";
-import { CryptoBox } from "./crypto-box.js";
+import { CryptoBox, type SealedLocalPayload } from "./crypto-box.js";
 import {
   AppServerClient,
   type ModelView,
@@ -15,8 +15,19 @@ import { type WatchPayload, type WireEnvelope } from "./schemas.js";
 import type { Transcriber } from "./transcriber.js";
 import { MAX_AUDIO_BYTES } from "./limits.js";
 import { sanitizePublicText } from "./public-text.js";
+import { z } from "zod";
 
 type SendablePayload = Record<string, unknown> & { version: 1; kind: string };
+const pendingTurnSchema = z.object({
+  requestId: z.string().min(1).max(128),
+  threadId: z.string().min(1).max(128),
+  text: z.string().trim().min(1).max(12_000),
+  model: z.string().min(1).max(128).nullable(),
+  effort: z.string().min(1).max(32),
+  createdAt: z.number().int().positive(),
+}).strict();
+type PendingTurn = z.infer<typeof pendingTurnSchema>;
+type StoredPendingTurn = { payload: PendingTurn; sealed: SealedLocalPayload };
 
 export class BridgeService {
   private readonly ownedThreads: Set<string>;
@@ -28,6 +39,9 @@ export class BridgeService {
   private watchedThreadId: string | null = null;
   private watchExpiresAt = 0;
   private chatSyncTimer: NodeJS.Timeout | null = null;
+  private pendingTurnTimer: NodeJS.Timeout | null = null;
+  private pendingTurnTask: Promise<void> | null = null;
+  private readonly pendingTurns = new Map<string, StoredPendingTurn>();
 
   constructor(
     private readonly config: BridgeConfig,
@@ -68,6 +82,18 @@ export class BridgeService {
       // watch. Connect through the control socket so ownership and idle state
       // are evaluated by the same App Server as Desktop.
       await this.appServer.connect("daemon");
+      await this.loadPendingTurns();
+      await this.processPendingTurns();
+      this.pendingTurnTimer = setInterval(() => {
+        void this.processPendingTurns().catch((error: unknown) => {
+          console.error(JSON.stringify({
+            level: "error",
+            message: "Could not retry a pending Watch prompt",
+            error: publicError(error),
+          }));
+        });
+      }, PENDING_TURN_RETRY_MS);
+      this.pendingTurnTimer.unref();
       await this.reportRealtimeVoiceCapability();
       await this.sendSessions();
       const monitorTask = this.appServer.monitorTerminals(this.controller.signal).catch((error: unknown) => {
@@ -81,6 +107,8 @@ export class BridgeService {
       await this.appServer.close();
       if (this.chatSyncTimer) clearTimeout(this.chatSyncTimer);
       this.chatSyncTimer = null;
+      if (this.pendingTurnTimer) clearInterval(this.pendingTurnTimer);
+      this.pendingTurnTimer = null;
       this.controller.abort();
       await socketTask.catch(() => undefined);
       await this.transcriber.close?.();
@@ -125,11 +153,26 @@ export class BridgeService {
             payload.requestId,
           );
           if (result.created) await this.persistOwnedThreads();
+          if (result.state === "waiting") {
+            await this.storePendingTurn({
+              requestId: payload.requestId,
+              threadId: result.threadId,
+              text: payload.text,
+              model: payload.model ?? null,
+              effort: payload.effort,
+              createdAt: Date.now(),
+            });
+          }
           await this.send({
             version: 1,
             kind: "turn.accepted",
             requestId: payload.requestId,
             threadId: result.threadId,
+            state: result.state,
+            selectionApplied: result.selectionApplied,
+            message: result.state === "waiting"
+              ? "Prompt saved for this chat. Waiting for the current owner to release the session so the Watch model and reasoning selection can be applied exactly."
+              : undefined,
           });
           await this.sendSessions();
           return;
@@ -218,6 +261,7 @@ export class BridgeService {
 
   private async onTerminal(event: TerminalEvent): Promise<void> {
     await this.send({ version: 1, ...event });
+    void this.processPendingTurns().catch(() => undefined);
     await this.sendSessions().catch((error: unknown) => {
       console.error(JSON.stringify({ level: "error", message: "Could not refresh sessions", error: publicError(error) }));
     });
@@ -297,6 +341,79 @@ export class BridgeService {
     await this.persistConfig();
   }
 
+  private async loadPendingTurns(): Promise<void> {
+    this.pendingTurns.clear();
+    for (const stored of this.config.pendingTurns ?? []) {
+      const payload = pendingTurnSchema.parse(await this.crypto.openLocal(stored.id, stored));
+      if (payload.requestId !== stored.id) {
+        throw new Error("Pending Watch prompt id did not match its encrypted record");
+      }
+      this.pendingTurns.set(stored.id, {
+        payload,
+        sealed: { nonce: stored.nonce, ciphertext: stored.ciphertext },
+      });
+    }
+  }
+
+  private async storePendingTurn(payload: PendingTurn): Promise<void> {
+    const parsed = pendingTurnSchema.parse(payload);
+    if (this.pendingTurns.has(parsed.requestId)) return;
+    if (this.pendingTurns.size >= MAX_PENDING_TURNS) {
+      throw new Error("The bridge already has too many prompts waiting for session ownership. No prompt was queued; release a Codex session and retry.");
+    }
+    const sealed = await this.crypto.sealLocal(parsed.requestId, parsed);
+    this.pendingTurns.set(parsed.requestId, { payload: parsed, sealed });
+    await this.persistPendingTurns();
+  }
+
+  private async processPendingTurns(): Promise<void> {
+    if (this.pendingTurnTask) return this.pendingTurnTask;
+    this.pendingTurnTask = this.processPendingTurnsNow().finally(() => {
+      this.pendingTurnTask = null;
+    });
+    return this.pendingTurnTask;
+  }
+
+  private async processPendingTurnsNow(): Promise<void> {
+    for (const [requestId, pending] of this.pendingTurns) {
+      let result;
+      try {
+        result = await this.appServer.submitTurn(
+          pending.payload.threadId,
+          pending.payload.text,
+          this.config.defaultCwd,
+          pending.payload.model,
+          pending.payload.effort,
+          requestId,
+        );
+      } catch (error) {
+        if (isRetryablePendingTurnError(error)) continue;
+        throw error;
+      }
+      if (result.state === "waiting") continue;
+      this.pendingTurns.delete(requestId);
+      await this.persistPendingTurns();
+      await this.send({
+        version: 1,
+        kind: "turn.started",
+        requestId,
+        threadId: result.threadId,
+        selectionApplied: true,
+        message: "Watch model and reasoning selection applied. Prompt started in this chat.",
+      });
+      await this.sendSessions().catch(() => undefined);
+    }
+  }
+
+  private async persistPendingTurns(): Promise<void> {
+    this.config.pendingTurns = [...this.pendingTurns].map(([id, pending]) => ({
+      id,
+      nonce: pending.sealed.nonce,
+      ciphertext: pending.sealed.ciphertext,
+    }));
+    await this.persistConfig();
+  }
+
   private async persistConfig(): Promise<void> {
     this.persistTask = this.persistTask.catch(() => undefined).then(() => writeConfig(this.config));
     await this.persistTask;
@@ -347,6 +464,13 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
 
 const CHAT_SYNC_DEBOUNCE_MS = 700;
 const CHAT_WATCH_TTL_MS = 90_000;
+const PENDING_TURN_RETRY_MS = 2_000;
+const MAX_PENDING_TURNS = 20;
+
+function isRetryablePendingTurnError(error: unknown): boolean {
+  return /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|not found|no rollout|not available|temporarily unavailable|cancel(?:led|ed)/iu
+    .test(error instanceof Error ? error.message : "");
+}
 
 function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("Bridge stopped");

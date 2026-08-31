@@ -1744,6 +1744,28 @@ private fun ChatScreen(
                     }
                 }
             }
+            state.sendNotice?.let { message ->
+                item {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
+                            .clip(SurfaceShape)
+                            .background(Violet.copy(alpha = 0.12f))
+                            .border(1.dp, Violet.copy(alpha = 0.55f), SurfaceShape)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            message,
+                            color = Frost,
+                            fontSize = 10.sp,
+                            lineHeight = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
             if (messages.isEmpty()) {
                 item {
                     EmptyState(

@@ -20,6 +20,117 @@ describe("BridgeService App Server transport", () => {
     await expect((service as unknown as BridgeService).run()).rejects.toBe(stopAfterConnect);
     expect(connect).toHaveBeenCalledWith("daemon");
   });
+
+  it("acknowledges an owner-blocked prompt as waiting after durable persistence", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const storePendingTurn = vi.fn().mockResolvedValue(undefined);
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      appServer: {
+        submitTurn: vi.fn().mockResolvedValue({
+          threadId: "thread-1",
+          created: false,
+          state: "waiting",
+          selectionApplied: false,
+        }),
+      },
+      config: { defaultCwd: "/tmp" },
+      send,
+      sendSessions: vi.fn().mockResolvedValue(undefined),
+      storePendingTurn,
+    });
+
+    await (service as unknown as {
+      handleWatchPayload: (payload: {
+        version: 1;
+        kind: "turn.submit";
+        requestId: string;
+        threadId: string;
+        text: string;
+        model: string;
+        effort: string;
+      }) => Promise<void>;
+    }).handleWatchPayload({
+      version: 1,
+      kind: "turn.submit",
+      requestId: "watch-owner-held-1",
+      threadId: "thread-1",
+      text: "Continue once.",
+      model: "gpt-5.6-terra",
+      effort: "high",
+    });
+
+    expect(storePendingTurn).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: "watch-owner-held-1",
+      threadId: "thread-1",
+      text: "Continue once.",
+      model: "gpt-5.6-terra",
+      effort: "high",
+    }));
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "turn.accepted",
+      requestId: "watch-owner-held-1",
+      threadId: "thread-1",
+      state: "waiting",
+      selectionApplied: false,
+      message: expect.stringContaining("Waiting for the current owner"),
+    }));
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error" }));
+  });
+
+  it("retries an encrypted pending prompt on the original thread with the same idempotency key", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const persistPendingTurns = vi.fn().mockResolvedValue(undefined);
+    const submitTurn = vi.fn().mockResolvedValue({
+      threadId: "thread-1",
+      created: false,
+      state: "running",
+      selectionApplied: true,
+    });
+    const pendingTurns = new Map([[
+      "watch-pending-1",
+      {
+        payload: {
+          requestId: "watch-pending-1",
+          threadId: "thread-1",
+          text: "Continue this exact chat.",
+          model: "gpt-5.6-luna",
+          effort: "max",
+          createdAt: 1_787_900_000_000,
+        },
+        sealed: { nonce: "nonce", ciphertext: "ciphertext" },
+      },
+    ]]);
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      appServer: { submitTurn },
+      config: { defaultCwd: "/tmp" },
+      pendingTurns,
+      pendingTurnTask: null,
+      persistPendingTurns,
+      send,
+      sendSessions: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await (service as unknown as { processPendingTurns: () => Promise<void> }).processPendingTurns();
+
+    expect(submitTurn).toHaveBeenCalledWith(
+      "thread-1",
+      "Continue this exact chat.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "max",
+      "watch-pending-1",
+    );
+    expect(pendingTurns.size).toBe(0);
+    expect(persistPendingTurns).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "turn.started",
+      requestId: "watch-pending-1",
+      threadId: "thread-1",
+      selectionApplied: true,
+    }));
+  });
 });
 
 describe("publicRequestError", () => {

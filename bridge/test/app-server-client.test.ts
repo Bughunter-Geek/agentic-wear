@@ -8,6 +8,7 @@ type ClientInternals = {
   write: (message: Record<string, unknown>) => void;
   controlledThreads: Set<string>;
   controlledTurnIds: Map<string, string>;
+  watchReadyThreads: Set<string>;
   openDaemonSocket: () => Promise<void>;
   openStdio: () => void;
   initialize: () => Promise<void>;
@@ -128,24 +129,33 @@ describe("AppServerClient session delivery", () => {
     await expect(target.submitTurn("thread-1", "Please continue.", "/tmp")).resolves.toEqual({
       threadId: "thread-1",
       created: false,
+      state: "running",
+      selectionApplied: true,
     });
 
     expect(methods).toEqual([
       "thread/read",
       "thread/turns/list",
-      "thread/queue/add",
       "thread/resume",
       "thread/settings/update",
+      "thread/queue/add",
       "thread/queue/start",
     ]);
     expect(vi.mocked(internals.request).mock.calls.at(-1)?.[1]).toEqual({
       threadId: "thread-1",
       queuedSubmissionId: "queued-1",
     });
+    expect(vi.mocked(internals.request).mock.calls.find(([method]) => method === "thread/resume")?.[1])
+      .toEqual({
+        threadId: "thread-1",
+        excludeTurns: true,
+        config: { model_reasoning_effort: "medium" },
+      });
     expect(internals.controlledTurnIds.get("thread-1")).toBe("turn-watch");
+    expect(internals.watchReadyThreads.has("thread-1")).toBe(true);
   });
 
-  it("queues behind a genuinely active foreign turn without taking over its writer", async () => {
+  it("waits without queueing when a foreign active turn has different settings", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
@@ -163,15 +173,71 @@ describe("AppServerClient session delivery", () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
-    await expect(target.submitTurn("thread-1", "After the phone finishes.", "/tmp"))
-      .resolves.toEqual({ threadId: "thread-1", created: false });
+    await expect(target.submitTurn(
+      "thread-1",
+      "After the phone finishes.",
+      "/tmp",
+      "gpt-5.6-sol",
+      "xhigh",
+      "watch-active-owner-1",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "waiting",
+      selectionApplied: false,
+    });
 
-    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/add"]);
+    expect(methods).toEqual(["thread/read", "thread/turns/list"]);
+    expect(methods).not.toContain("thread/settings/update");
     expect(methods).not.toContain("thread/resume");
     expect(methods).not.toContain("thread/queue/start");
+    expect(methods).not.toContain("thread/queue/delete");
+    expect(internals.watchReadyThreads.has("thread-1")).toBe(false);
   });
 
-  it("keeps an accepted dormant queue item when the owning client retains the writer", async () => {
+  it("queues immediately on the same foreign chat when its persisted settings already match", async () => {
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-luna", effort: "max" }),
+    );
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{ id: "turn-mobile", status: "inProgress", completedAt: null }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Use the already-selected configuration.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "max",
+      "watch-matching-owner-1",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "queued",
+      selectionApplied: true,
+    });
+
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/add"]);
+  });
+
+  it("waits without queueing when an idle owner blocks the requested settings", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
@@ -190,19 +256,42 @@ describe("AppServerClient session delivery", () => {
       "thread-1",
       "Continue when the owning client is ready.",
       "/tmp",
-      null,
-      "medium",
+      "gpt-5.6-terra",
+      "high",
       "watch-owner-held-1",
-    )).resolves.toEqual({ threadId: "thread-1", created: false });
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "waiting",
+      selectionApplied: false,
+    });
 
     expect(methods).toEqual([
       "thread/read",
       "thread/turns/list",
-      "thread/queue/add",
       "thread/resume",
     ]);
+    expect(methods).not.toContain("thread/settings/update");
     expect(methods).not.toContain("thread/queue/delete");
     expect(internals.controlledThreads.has("thread-1")).toBe(false);
+    expect(internals.watchReadyThreads.has("thread-1")).toBe(false);
+    expect(vi.mocked(internals.request).mock.calls.find(([method]) => method === "thread/resume")?.[1])
+      .toEqual({
+        threadId: "thread-1",
+        excludeTurns: true,
+        model: "gpt-5.6-terra",
+        config: { model_reasoning_effort: "high" },
+      });
+
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/list") {
+        return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    await expect(target.listSessions()).resolves.toEqual([
+      expect.objectContaining({ id: "thread-1", watchReady: false }),
+    ]);
   });
 
   it("recognizes resume auto-start without retrying the Watch message", async () => {
@@ -243,10 +332,16 @@ describe("AppServerClient session delivery", () => {
       null,
       "medium",
       "watch-race-1",
-    )).resolves.toEqual({ threadId: "thread-1", created: false });
+    )).resolves.toMatchObject({ threadId: "thread-1", created: false, state: "running" });
 
     expect(queueAdds).toBe(1);
     expect(turnReads).toBe(2);
+    expect(vi.mocked(internals.request).mock.calls.find(([method]) => method === "thread/resume")?.[1])
+      .toEqual({
+        threadId: "thread-1",
+        excludeTurns: true,
+        config: { model_reasoning_effort: "medium" },
+      });
     expect(internals.controlledTurnIds.has("thread-1")).toBe(false);
   });
 
@@ -282,7 +377,7 @@ describe("AppServerClient session delivery", () => {
       "gpt-5.6-luna",
       "low",
       "watch-request-1",
-    )).resolves.toEqual({ threadId: "thread-1", created: false });
+    )).resolves.toMatchObject({ threadId: "thread-1", created: false, state: "running" });
 
     expect(readAttempts).toBe(2);
     expect(methods.filter((method) => method === "thread/queue/add")).toHaveLength(1);
@@ -318,7 +413,7 @@ describe("AppServerClient session delivery", () => {
       null,
       "medium",
       "watch-request-2",
-    )).resolves.toEqual({ threadId: "thread-1", created: false });
+    )).resolves.toMatchObject({ threadId: "thread-1", created: false, state: "running" });
 
     expect(queueIds).toEqual(["watch-request-2", "watch-request-2"]);
   });
@@ -336,7 +431,7 @@ describe("AppServerClient session delivery", () => {
     });
 
     await expect(target.submitTurn("thread-1", "Use the selected settings.", "/tmp", "gpt-5.6-terra", "xhigh"))
-      .resolves.toEqual({ threadId: "thread-1", created: false });
+      .resolves.toMatchObject({ threadId: "thread-1", created: false, state: "queued" });
 
     expect(requests[1]).toMatchObject({
       method: "thread/settings/update",
@@ -503,9 +598,10 @@ describe("AppServerClient session delivery", () => {
       "gpt-5.6-sol",
       "high",
       "watch-request-idle",
-    )).resolves.toEqual({
+    )).resolves.toMatchObject({
       threadId: "thread-1",
       created: false,
+      state: "queued",
     });
 
     expect(requests.map(({ method }) => method)).toEqual([
@@ -526,7 +622,14 @@ describe("AppServerClient session delivery", () => {
   });
 
   it("queues behind an active foreign writer even when direct steering is unavailable", async () => {
-    const target = client();
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "medium" }),
+    );
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
     internals.request = vi.fn((method: string, params: unknown) => {
@@ -537,9 +640,10 @@ describe("AppServerClient session delivery", () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
-    await expect(target.submitTurn("thread-1", "Run after the current turn.", "/tmp")).resolves.toEqual({
+    await expect(target.submitTurn("thread-1", "Run after the current turn.", "/tmp")).resolves.toMatchObject({
       threadId: "thread-1",
       created: false,
+      state: "queued",
     });
     expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
     expect(methods).not.toContain("thread/resume");
@@ -548,7 +652,14 @@ describe("AppServerClient session delivery", () => {
   });
 
   it("does not inspect or reuse a stale active turn ID when queueing", async () => {
-    const target = client();
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "medium" }),
+    );
     const internals = target as unknown as ClientInternals;
     await internals.handleNotification("turn/started", {
       threadId: "thread-1",
@@ -564,7 +675,7 @@ describe("AppServerClient session delivery", () => {
     });
 
     await expect(target.submitTurn("thread-1", "Queue exactly once.", "/tmp"))
-      .resolves.toEqual({ threadId: "thread-1", created: false });
+      .resolves.toMatchObject({ threadId: "thread-1", created: false, state: "queued" });
     expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
   });
 
@@ -584,32 +695,35 @@ describe("AppServerClient session delivery", () => {
     expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
   });
 
-  it("releases a newly created session before queueing its first message", async () => {
+  it("starts a newly created session with the exact selected configuration", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
-    internals.request = vi.fn((method: string, params: unknown) => {
+    internals.request = vi.fn((method: string, _params: unknown) => {
       methods.push(method);
       if (method === "thread/start") return Promise.resolve({ thread: thread("idle") });
       if (method === "thread/settings/update") return Promise.resolve({});
-      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
-      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
-      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
-      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
+      if (method === "turn/start") return Promise.resolve({ threadId: "thread-1", turn: { id: "turn-watch" } });
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
     await expect(target.submitTurn(null, "First watch message.", "/tmp", null, "low", "watch-new-1"))
-      .resolves.toEqual({ threadId: "thread-1", created: true });
+      .resolves.toEqual({
+        threadId: "thread-1",
+        created: true,
+        state: "running",
+        selectionApplied: true,
+      });
     expect(methods).toEqual([
       "thread/start",
       "thread/settings/update",
-      "thread/unsubscribe",
-      "thread/queue/add",
-      "thread/resume",
-      "thread/settings/update",
-      "thread/queue/start",
+      "turn/start",
     ]);
+    expect(vi.mocked(internals.request).mock.calls.at(-1)?.[1]).toMatchObject({
+      threadId: "thread-1",
+      clientUserMessageId: "watch-new-1",
+      effort: "low",
+    });
   });
 
   it("delivers the terminal event before releasing its thread subscription", async () => {
@@ -620,6 +734,7 @@ describe("AppServerClient session delivery", () => {
     const internals = target as unknown as ClientInternals;
     internals.controlledThreads.add("thread-1");
     internals.controlledTurnIds.set("thread-1", "turn-1");
+    internals.watchReadyThreads.add("thread-1");
     internals.request = vi.fn((method: string) => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
       if (method === "thread/unsubscribe") {
@@ -641,6 +756,7 @@ describe("AppServerClient session delivery", () => {
 
     expect(order).toEqual(["terminal", "unsubscribe"]);
     expect(internals.controlledThreads.has("thread-1")).toBe(false);
+    expect(internals.watchReadyThreads.has("thread-1")).toBe(false);
   });
 
   it("makes unsubscribe failures visible and retries without duplicating a turn", async () => {
@@ -738,7 +854,7 @@ describe("AppServerClient session delivery", () => {
     });
 
     await expect(target.submitTurn("thread-1", "Use Auto.", "/tmp", null, "medium"))
-      .resolves.toEqual({ threadId: "thread-1", created: false });
+      .resolves.toMatchObject({ threadId: "thread-1", created: false, state: "queued" });
 
     expect(requests[1]?.params).toEqual({ threadId: "thread-1", effort: "medium" });
     expect(requests[2]?.params).not.toHaveProperty("model");
@@ -847,7 +963,7 @@ describe("AppServerClient session delivery", () => {
     expect(snapshot.messages[0]?.text).not.toContain("Files mentioned");
 
     const sessions = await target.listSessions();
-    expect(sessions[0]?.watchReady).toBe(true);
+    expect(sessions[0]?.watchReady).toBe(false);
   });
 
   it("retries a transient missing rollout before declaring a listed chat unavailable", async () => {
@@ -1182,6 +1298,78 @@ describe("AppServerClient session delivery", () => {
     await internals.emitRecentTerminals(session, 1_787_900_010_000);
 
     expect(events).toEqual(["turn:thread-1:turn-new:completed"]);
+  });
+
+  it("suppresses foreign internal cancellation task ids instead of alerting the Watch", async () => {
+    const events: Array<{ kind: string; detail: string }> = [];
+    const target = new AppServerClient(new Set(), async (event) => {
+      events.push({ kind: event.kind, detail: event.detail });
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method !== "thread/turns/list") return Promise.reject(new Error(`Unexpected method ${method}`));
+      return Promise.resolve({
+        data: [{
+          id: "turn-cancelled",
+          status: "failed",
+          completedAt: 1_787_900_020,
+          error: { message: "bs1 was cancelled" },
+        }],
+        nextCursor: null,
+        backwardsCursor: null,
+      });
+    });
+
+    await internals.emitRecentTerminals({
+      id: "thread-1",
+      title: "Foreign session",
+      updatedAt: 1_787_900_020_000,
+      status: "notLoaded",
+      ownedByWear: false,
+      canAcceptDirectInput: false,
+    }, 1_787_900_000_000);
+
+    expect(events).toEqual([]);
+  });
+
+  it("turns a controlled internal cancellation into a generic interrupted result", async () => {
+    const events: Array<{ kind: string; detail: string }> = [];
+    const target = new AppServerClient(new Set(["thread-1"]), async (event) => {
+      events.push({ kind: event.kind, detail: event.detail });
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.controlledThreads.add("thread-1");
+    internals.controlledTurnIds.set("thread-1", "turn-cancelled");
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-cancelled",
+            status: "failed",
+            completedAt: 1_787_900_020,
+            error: { message: "bs1 was cancelled" },
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await internals.emitRecentTerminals({
+      id: "thread-1",
+      title: "Watch session",
+      updatedAt: 1_787_900_020_000,
+      status: "idle",
+      ownedByWear: true,
+      canAcceptDirectInput: true,
+    }, 1_787_900_000_000);
+
+    expect(events).toEqual([{
+      kind: "terminal.interrupted",
+      detail: "Codex cancelled an internal response task. Open the session and retry only if no reply appears.",
+    }]);
   });
 
   it("polling releases only the exact controlled turn after terminal delivery", async () => {

@@ -62,6 +62,31 @@ describe("CryptoBox", () => {
     await expect(box.decrypt(future)).rejects.toThrow("timestamp is outside");
   });
 
+  it("seals pending prompts for local crash-safe storage", async () => {
+    const bridge = await generateBridgeKeyPair();
+    const watch = await generateTestKeyPair();
+    const box = new CryptoBox(
+      "pair-id-for-local-pending-test-0000000000",
+      bridge.privateKeyMaterial,
+      bridge.publicKeyBase64,
+      watch.publicKeyBase64,
+    );
+    const payload = {
+      requestId: "watch-pending-1",
+      threadId: "thread-1",
+      text: "Keep this private prompt encrypted.",
+      model: "gpt-5.6-luna",
+      effort: "max",
+      createdAt: 1_787_900_000_000,
+    };
+
+    const sealed = await box.sealLocal(payload.requestId, payload);
+
+    expect(sealed.ciphertext).not.toContain(payload.text);
+    await expect(box.openLocal(payload.requestId, sealed)).resolves.toEqual(payload);
+    await expect(box.openLocal("different-request", sealed)).rejects.toThrow();
+  });
+
   it("decrypts a maximum bounded four-minute transcription request", async () => {
     const bridge = await generateBridgeKeyPair();
     const watch = await generateTestKeyPair();
