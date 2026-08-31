@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -57,11 +58,14 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.List
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.ThumbDown
 import androidx.compose.material.icons.rounded.ThumbUp
@@ -149,8 +153,14 @@ import java.util.Date
 import kotlin.math.roundToInt
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.ButtonDefaults
+import androidx.wear.compose.material3.Button
+import androidx.wear.compose.material3.ButtonGroup
+import androidx.wear.compose.material3.CompactButton
 import androidx.wear.compose.material3.EdgeButton
 import androidx.wear.compose.material3.EdgeButtonSize
+import androidx.wear.compose.material3.FilledTonalIconButton
+import androidx.wear.compose.material3.IconButtonDefaults
+import androidx.wear.compose.material3.touchTargetAwareSize
 import androidx.wear.compose.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -408,53 +418,45 @@ private fun HomeScreen(
 ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxHeight < 420.dp
-        val orbSize = if (compact) 68.dp else 148.dp
+        val isRound = LocalConfiguration.current.isScreenRound
+        val compactSquare = compact && !isRound
+        val updateOnHome = !state.recording && !state.transcribing && !state.pending &&
+            state.appUpdate.stage in setOf(UpdateStage.AVAILABLE, UpdateStage.DOWNLOADING, UpdateStage.READY)
+        val orbSize = when {
+            compactSquare && updateOnHome -> 36.dp
+            compactSquare -> 48.dp
+            compact && updateOnHome -> 50.dp
+            compact -> 68.dp
+            else -> 148.dp
+        }
         val horizontalPadding = roundAwareHorizontalPadding(
             round = if (compact) 24.dp else 30.dp,
             square = if (compact) 16.dp else 20.dp,
         )
+        val dockBottomPadding = if (isRound) {
+            if (compact) 5.dp else 12.dp
+        } else {
+            if (compact) 0.dp else 12.dp
+        }
+        val dockReservedHeight = IconButtonDefaults.SmallButtonSize + dockBottomPadding
         Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = horizontalPadding),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = horizontalPadding)
+                .padding(bottom = dockReservedHeight),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(if (compact) 8.dp else 22.dp))
-            ConnectionPill(connected = state.isPaired)
-            Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
-            TactileCard(
-                onClick = if (state.selectedSession == null) onSessions else onChat,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(
-                        horizontal = if (compact) 13.dp else 17.dp,
-                        vertical = if (compact) 7.dp else 12.dp,
-                    ),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    StatusDot(
-                        state.selectedSession?.status ?: SessionStatus.NOT_LOADED,
-                        state.selectedSession?.watchReady == true,
-                    )
-                    Spacer(Modifier.width(if (compact) 8.dp else 11.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = state.selectedSession?.title ?: "Choose a session",
-                            color = Frost,
-                            fontSize = if (compact) 12.sp else 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = state.selectedSession?.displayLabel ?: "No session selected",
-                            color = if (state.selectedSession?.showsReady == true) Mint else Muted,
-                            fontSize = if (compact) 9.sp else 11.sp,
-                        )
-                    }
-                    Text("›", color = Muted, fontSize = if (compact) 19.sp else 24.sp)
-                }
+            Spacer(Modifier.height(if (compact) 0.dp else 22.dp))
+            if (!compactSquare || !updateOnHome) {
+                ConnectionPill(connected = state.isPaired, dense = compactSquare)
+                Spacer(Modifier.height(if (compactSquare) 1.dp else if (compact) 2.dp else 8.dp))
             }
-            Spacer(Modifier.height(if (compact) 2.dp else 10.dp))
+            HomeSessionButton(
+                session = state.selectedSession,
+                compact = compact,
+                onClick = if (state.selectedSession == null) onSessions else onChat,
+            )
+            Spacer(Modifier.weight(1f))
             PushToTalkOrb(
                 size = orbSize,
                 recording = state.recording,
@@ -465,54 +467,207 @@ private fun HomeScreen(
                 enabled = state.isPaired && !state.pending,
                 onToggle = onPushToTalk,
             )
-            val updateOnHome = !state.recording && !state.transcribing && !state.pending &&
-                state.appUpdate.stage in setOf(UpdateStage.AVAILABLE, UpdateStage.DOWNLOADING, UpdateStage.READY)
-            Text(
-                text = if (updateOnHome) {
-                    when (state.appUpdate.stage) {
-                        UpdateStage.AVAILABLE -> "↓ Update ${state.appUpdate.release?.versionName.orEmpty()} available"
-                        UpdateStage.DOWNLOADING -> if (state.appUpdate.progress > 0) {
-                            "Downloading update · ${state.appUpdate.progress}%"
-                        } else {
-                            "Starting update download"
-                        }
-                        UpdateStage.READY -> "✓ Update ready to install"
-                        else -> "Tap to talk"
-                    }
-                } else when {
+            if (updateOnHome) {
+                HomeUpdateStatus(update = state.appUpdate, concise = compactSquare, onClick = onUpdate)
+            } else {
+                Text(
+                    text = when {
                     state.recording -> "Tap again to transcribe"
                     state.transcribing -> state.transcriptionElapsedMillis?.let { elapsedMillis ->
                         "Transcribing · ${formatTranscriptionElapsed(elapsedMillis)}"
                     } ?: "Transcribing audio…"
                     state.pending -> "Agentic Wear is working…"
                     else -> "Tap to talk"
-                },
-                color = when {
-                    updateOnHome -> Mint
+                    },
+                    color = when {
                     state.recording -> Cyan
                     state.transcribing -> Violet
                     else -> Muted
-                },
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Spacer(Modifier.height(if (compact) 2.dp else 9.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 10.dp)) {
-                MiniAction("Sessions", onSessions) {
-                    Text("≡", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                }
-                if (state.latestAlert != null) {
-                    MiniAction("Latest", onAlert) {
-                        Text("●", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-                if (state.appUpdate.stage == UpdateStage.AVAILABLE || state.appUpdate.stage == UpdateStage.READY) {
-                    MiniAction("Update", onUpdate) {
-                        Text(if (state.appUpdate.stage == UpdateStage.READY) "✓" else "↓", color = Mint, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-                MiniAction("Settings", onSettings) { SettingsGlyph() }
+                    },
+                    fontSize = if (compactSquare) 10.sp else 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
             }
+            Spacer(Modifier.height(if (compact) 1.dp else 5.dp))
+        }
+        HomeActionDock(
+            showLatest = state.latestAlert != null,
+            onSessions = onSessions,
+            onLatest = onAlert,
+            onSettings = onSettings,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = dockBottomPadding),
+        )
+    }
+}
+
+@Composable
+private fun HomeSessionButton(
+    session: AgentSession?,
+    compact: Boolean,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(if (compact) 48.dp else 68.dp)
+            .semantics {
+                contentDescription = if (session == null) {
+                    "Choose a session"
+                } else {
+                    "Open ${session.title}"
+                }
+            },
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = PanelRaised,
+            contentColor = Frost,
+        ),
+        contentPadding = PaddingValues(horizontal = if (compact) 13.dp else 17.dp),
+    ) {
+        StatusDot(
+            session?.status ?: SessionStatus.NOT_LOADED,
+            session?.watchReady == true,
+        )
+        Spacer(Modifier.width(if (compact) 8.dp else 11.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = session?.title ?: "Choose a session",
+                color = Frost,
+                fontSize = if (compact) 12.sp else 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = session?.displayLabel ?: "No session selected",
+                color = if (session?.showsReady == true) Mint else Muted,
+                fontSize = if (compact) 9.sp else 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(
+            imageVector = Icons.Rounded.ChevronRight,
+            contentDescription = null,
+            tint = Muted,
+            modifier = Modifier.size(if (compact) 18.dp else 22.dp),
+        )
+    }
+}
+
+@Composable
+private fun HomeUpdateStatus(update: UpdateUiState, concise: Boolean, onClick: () -> Unit) {
+    val label = when (update.stage) {
+        UpdateStage.AVAILABLE -> "Update ${update.release?.versionName.orEmpty()} available"
+        UpdateStage.DOWNLOADING -> if (update.progress > 0) {
+            "Downloading · ${update.progress}%"
+        } else {
+            "Starting update download"
+        }
+        UpdateStage.READY -> "Update ready to install"
+        else -> "Update"
+    }
+    val displayLabel = if (concise) {
+        when (update.stage) {
+            UpdateStage.AVAILABLE -> "Update available"
+            UpdateStage.DOWNLOADING -> if (update.progress > 0) "Downloading · ${update.progress}%" else "Starting download"
+            UpdateStage.READY -> "Ready to install"
+            else -> label
+        }
+    } else {
+        label
+    }
+    val actionable = update.stage == UpdateStage.AVAILABLE || update.stage == UpdateStage.READY
+    CompactButton(
+        onClick = onClick,
+        enabled = actionable,
+        modifier = Modifier.semantics {
+            contentDescription = label
+            stateDescription = if (actionable) "Action available" else "In progress"
+        },
+        icon = {
+            Icon(
+                imageVector = if (update.stage == UpdateStage.READY) Icons.Rounded.Check else Icons.Rounded.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+        },
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = Mint.copy(alpha = 0.18f),
+            contentColor = Mint,
+            disabledContainerColor = PanelRaised,
+            disabledContentColor = Muted,
+        ),
+        label = {
+            Text(displayLabel, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        },
+    )
+}
+
+@Composable
+private fun HomeActionDock(
+    showLatest: Boolean,
+    onSessions: () -> Unit,
+    onLatest: () -> Unit,
+    onSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val actionCount = if (showLatest) 3 else 2
+    val spacing = 0.dp
+    val actionTouchSize = IconButtonDefaults.SmallButtonSize
+    val dockWidth = actionTouchSize * actionCount
+    val sessionsInteractions = remember { MutableInteractionSource() }
+    val latestInteractions = remember { MutableInteractionSource() }
+    val settingsInteractions = remember { MutableInteractionSource() }
+    val colors = IconButtonDefaults.filledTonalIconButtonColors(
+        containerColor = PanelRaised,
+        contentColor = Cyan,
+    )
+    ButtonGroup(
+        modifier = modifier.width(dockWidth),
+        spacing = spacing,
+        expansionWidth = 4.dp,
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        FilledTonalIconButton(
+            onClick = onSessions,
+            modifier = Modifier
+                .animateWidth(sessionsInteractions)
+                .touchTargetAwareSize(IconButtonDefaults.ExtraSmallButtonSize)
+                .semantics { contentDescription = "Sessions" },
+            interactionSource = sessionsInteractions,
+            shapes = IconButtonDefaults.animatedShapes(),
+            colors = colors,
+        ) {
+            Icon(Icons.AutoMirrored.Rounded.List, contentDescription = null)
+        }
+        if (showLatest) {
+            FilledTonalIconButton(
+                onClick = onLatest,
+                modifier = Modifier
+                    .animateWidth(latestInteractions)
+                    .touchTargetAwareSize(IconButtonDefaults.ExtraSmallButtonSize)
+                    .semantics { contentDescription = "Latest result" },
+                interactionSource = latestInteractions,
+                shapes = IconButtonDefaults.animatedShapes(),
+                colors = colors,
+            ) {
+                Icon(Icons.Rounded.NotificationsActive, contentDescription = null)
+            }
+        }
+        FilledTonalIconButton(
+            onClick = onSettings,
+            modifier = Modifier
+                .animateWidth(settingsInteractions)
+                .touchTargetAwareSize(IconButtonDefaults.ExtraSmallButtonSize)
+                .semantics { contentDescription = "Settings" },
+            interactionSource = settingsInteractions,
+            shapes = IconButtonDefaults.animatedShapes(),
+            colors = colors,
+        ) {
+            Icon(Icons.Rounded.Settings, contentDescription = null)
         }
     }
 }
@@ -543,7 +698,7 @@ private fun PushToTalkOrb(
         label = "live voice activity",
     )
     val activityHaloSize = size + if (compact) 28.dp else 52.dp
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(activityHaloSize)) {
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(size)) {
         AnimatedVisibility(
             visible = transcribing,
             enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
@@ -551,7 +706,12 @@ private fun PushToTalkOrb(
             exit = fadeOut(tween(140, easing = AgenticEaseOut)) +
                 scaleOut(tween(140, easing = AgenticEaseOut), targetScale = 0.96f),
         ) {
-            TranscribingIndicator(size + if (compact) 10.dp else 16.dp)
+            Box(
+                modifier = Modifier.requiredSize(size + if (compact) 10.dp else 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                TranscribingIndicator(size + if (compact) 10.dp else 16.dp)
+            }
         }
         VoiceActivityHalo(size = activityHaloSize, activity = activity)
         Box(
@@ -607,7 +767,7 @@ private fun PushToTalkOrb(
 private fun VoiceActivityHalo(size: Dp, activity: Float) {
     Canvas(
         Modifier
-            .size(size)
+            .requiredSize(size)
             .graphicsLayer {
                 val activityScale = 0.78f + activity * 0.22f
                 scaleX = activityScale
@@ -3001,44 +3161,21 @@ private fun InputSurface(
 }
 
 @Composable
-private fun ConnectionPill(connected: Boolean) {
+private fun ConnectionPill(connected: Boolean, dense: Boolean = false) {
     Row(
         Modifier.clip(CircleShape).background(Color(0xFF151A27).copy(alpha = 0.92f))
-            .border(1.dp, Color(0xFF31364B), CircleShape).padding(horizontal = 11.dp, vertical = 4.dp),
+            .border(1.dp, Color(0xFF31364B), CircleShape)
+            .padding(horizontal = if (dense) 9.dp else 11.dp, vertical = if (dense) 2.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(7.dp).clip(CircleShape).background(if (connected) Mint else Coral))
-        Spacer(Modifier.width(6.dp))
-        Text(if (connected) "Bridge paired" else "Not paired", color = Frost, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-@Composable
-private fun MiniAction(label: String, onClick: () -> Unit, content: @Composable () -> Unit) {
-    TactileCard(
-        onClick = onClick,
-        modifier = Modifier.size(34.dp).semantics { contentDescription = label },
-    ) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            content()
-        }
-    }
-}
-
-@Composable
-private fun SettingsGlyph() {
-    Canvas(Modifier.size(17.dp)) {
-        val stroke = 1.6.dp.toPx()
-        val start = 1.5.dp.toPx()
-        val end = size.width - start
-        fun drawTrack(y: Float, knobX: Float) {
-            drawLine(Cyan, Offset(start, y), Offset(end, y), stroke, StrokeCap.Round)
-            drawCircle(PanelRaised, 2.7.dp.toPx(), Offset(knobX, y))
-            drawCircle(Cyan, 2.1.dp.toPx(), Offset(knobX, y), style = Stroke(stroke))
-        }
-        drawTrack(size.height * 0.24f, size.width * 0.36f)
-        drawTrack(size.height * 0.5f, size.width * 0.68f)
-        drawTrack(size.height * 0.76f, size.width * 0.45f)
+        Box(Modifier.size(if (dense) 6.dp else 7.dp).clip(CircleShape).background(if (connected) Mint else Coral))
+        Spacer(Modifier.width(if (dense) 5.dp else 6.dp))
+        Text(
+            if (connected) "Bridge paired" else "Not paired",
+            color = Frost,
+            fontSize = if (dense) 8.sp else 10.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 

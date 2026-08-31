@@ -2,6 +2,18 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.9-alpha — 2026-08-31
+
+- Rebuilds the Home session selector as a full-width Material 3 stadium button with a proper session-state hierarchy and directional affordance.
+- Replaces the old rectangular bottom controls with an animated two- or three-action circular dock for Sessions, Latest result, and Settings while preserving 48 dp touch targets.
+- Keeps OTA availability out of the navigation dock and surfaces available, downloading, and ready states as a dedicated compact action beneath the voice orb.
+- Adapts Home independently for round and compact square watches so voice state, update status, and action controls remain readable without bezel clipping or collisions.
+- Preserves the voice orb as the primary action and prevents its decorative activity halo from consuming layout space or hiding live status text.
+
+### Test status
+
+- All 113 bridge tests, 18 relay tests, Wear unit tests, debug lint/assembly, round/square interaction checks, and Material 3 button-group motion checks pass. Motion was verified at 0×, 0.5×, 1×, and 10× animation scales with no stuck or clipped state. Gemini 3.7 Flash at High reasoning independently passed the final Antigravity visual gate with no release blockers across round and square Home states.
+
 ## 0.6.8-alpha — 2026-08-31
 
 - Sends every Watch prompt as a canonical App Server user message in the original chat, including Android/iOS/Desktop-controlled active turns; no current send uses the retired native-tool relay and no route creates or forks a chat.

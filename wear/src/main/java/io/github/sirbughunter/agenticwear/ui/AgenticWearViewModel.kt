@@ -122,6 +122,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun onForegrounded() {
         foregroundStartedAtMillis = System.currentTimeMillis()
+        if (_state.value.demo) return
         if (repository.isPaired) refreshInbox()
         if (updateManager.enabled &&
             SystemClock.elapsedRealtime() - lastUpdateCheckStartedAtElapsedRealtime >= UPDATE_REFRESH_INTERVAL_MS
@@ -449,6 +450,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun showDemo(stateName: String?) {
         if (!BuildConfig.DEBUG || stateName.isNullOrBlank()) return
         cancelTranscriptionTimerJob()
+        updateCheckGeneration += 1
+        updateCheckJob?.cancel()
+        updateManager.cancelActiveChecks()
         val now = System.currentTimeMillis()
         val sessions = listOf(
             AgentSession("demo-build", "Build Agentic Wear Alpha 0.4", now, SessionStatus.ACTIVE, true, true),
@@ -474,9 +478,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val normalized = stateName.lowercase()
         val updatePermissionDemo = normalized == "update-permission"
         val homeUpdateDemo = normalized == "home-update"
+        val homeUpdateDownloadingDemo = normalized == "home-update-downloading"
+        val homeUpdateReadyDemo = normalized == "home-update-ready"
         val homeErrorDemo = normalized == "home-error"
         val chatDemo = normalized in setOf("chat", "chat-error", "chat-permission")
         val alert = when (normalized) {
+            "home-alert" -> AgentAlert("demo-home-alert", AlertKind.COMPLETE, "demo-build", sessions[0].title, "The latest Watch prompt completed successfully.", now)
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
             "complete" -> AgentAlert("demo-complete", AlertKind.COMPLETE, "demo-build", sessions[0].title, "All checks passed. Release APK is ready for review.", now)
             "error" -> AgentAlert("demo-error", AlertKind.ERROR, "demo-docs", sessions[2].title, "The agent stopped after a build error.", now)
@@ -589,6 +596,19 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                     enabled = true,
                     stage = UpdateStage.AVAILABLE,
                     release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                )
+                homeUpdateDownloadingDemo -> UpdateUiState(
+                    enabled = true,
+                    stage = UpdateStage.DOWNLOADING,
+                    release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                    progress = 64,
+                )
+                homeUpdateReadyDemo -> UpdateUiState(
+                    enabled = true,
+                    stage = UpdateStage.READY,
+                    release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                    progress = 100,
+                    message = "Ready to install",
                 )
                 else -> UpdateUiState(enabled = updateManager.enabled)
             },
