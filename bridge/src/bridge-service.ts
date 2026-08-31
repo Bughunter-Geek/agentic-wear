@@ -7,11 +7,14 @@ import {
   type ApprovalEvent,
   type SessionView,
   type TerminalEvent,
+  type ExternalTurnBaseline,
+  type TurnSubmissionResult,
 } from "./app-server-client.js";
+import { CodexAppToolsClient } from "./codex-app-tools-client.js";
 import { RelayClient } from "./relay-client.js";
 import { ReplayGuard } from "./replay-guard.js";
 import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
-import { type WatchPayload, type WireEnvelope } from "./schemas.js";
+import { followUpActionSchema, type FollowUpAction, type WatchPayload, type WireEnvelope } from "./schemas.js";
 import type { Transcriber } from "./transcriber.js";
 import { MAX_AUDIO_BYTES } from "./limits.js";
 import { sanitizePublicText } from "./public-text.js";
@@ -24,7 +27,12 @@ const pendingTurnSchema = z.object({
   text: z.string().trim().min(1).max(12_000),
   model: z.string().min(1).max(128).nullable(),
   effort: z.string().min(1).max(32),
+  followUpAction: followUpActionSchema.default("default"),
   createdAt: z.number().int().positive(),
+  externalAttempt: z.object({
+    attemptedAt: z.number().int().positive(),
+    userMessageIds: z.array(z.string().min(1).max(128)).max(200),
+  }).strict().optional(),
 }).strict();
 type PendingTurn = z.infer<typeof pendingTurnSchema>;
 type StoredPendingTurn = { payload: PendingTurn; sealed: SealedLocalPayload };
@@ -61,6 +69,8 @@ export class BridgeService {
         this.controller.abort(error);
       },
       (threadId) => this.onAgentOutput(threadId),
+      undefined,
+      new CodexAppToolsClient(),
     );
   }
 
@@ -144,6 +154,19 @@ export class BridgeService {
           await this.createTranscription(payload);
           return;
         case "turn.submit": {
+          const submittedAt = Date.now();
+          const pendingPayload = (
+            threadId: string,
+            followUpAction: FollowUpAction = payload.followUpAction,
+          ): PendingTurn => ({
+            requestId: payload.requestId,
+            threadId,
+            text: payload.text,
+            model: payload.model ?? null,
+            effort: payload.effort,
+            followUpAction,
+            createdAt: submittedAt,
+          });
           const result = await this.appServer.submitTurn(
             payload.threadId,
             payload.text,
@@ -151,18 +174,22 @@ export class BridgeService {
             payload.model ?? null,
             payload.effort,
             payload.requestId,
+            (baseline, followUpMode) => {
+              if (payload.threadId === null) throw new Error("A new chat cannot require an external handoff");
+              return this.markPendingExternalAttempt(
+                pendingPayload(payload.threadId, followUpMode),
+                baseline,
+              );
+            },
+            payload.followUpAction,
           );
           if (result.created) await this.persistOwnedThreads();
           if (result.state === "waiting") {
-            await this.storePendingTurn({
-              requestId: payload.requestId,
-              threadId: result.threadId,
-              text: payload.text,
-              model: payload.model ?? null,
-              effort: payload.effort,
-              createdAt: Date.now(),
-            });
-          }
+            await this.storePendingTurn(pendingPayload(
+              result.threadId,
+              result.followUpMode ?? payload.followUpAction,
+            ));
+          } else await this.removePendingTurn(payload.requestId);
           await this.send({
             version: 1,
             kind: "turn.accepted",
@@ -170,9 +197,7 @@ export class BridgeService {
             threadId: result.threadId,
             state: result.state,
             selectionApplied: result.selectionApplied,
-            message: result.state === "waiting"
-              ? "Prompt saved for this chat. Waiting for the current owner to release the session so the Watch model and reasoning selection can be applied exactly."
-              : undefined,
+            message: turnAcceptedMessage(result),
           });
           await this.sendSessions();
           return;
@@ -361,9 +386,38 @@ export class BridgeService {
     if (this.pendingTurns.size >= MAX_PENDING_TURNS) {
       throw new Error("The bridge already has too many prompts waiting for session ownership. No prompt was queued; release a Codex session and retry.");
     }
+    await this.savePendingTurn(parsed);
+  }
+
+  private async savePendingTurn(payload: PendingTurn): Promise<void> {
+    const parsed = pendingTurnSchema.parse(payload);
     const sealed = await this.crypto.sealLocal(parsed.requestId, parsed);
     this.pendingTurns.set(parsed.requestId, { payload: parsed, sealed });
     await this.persistPendingTurns();
+  }
+
+  private async markPendingExternalAttempt(
+    payload: PendingTurn,
+    baseline: ExternalTurnBaseline,
+  ): Promise<void> {
+    await this.savePendingTurn({
+      ...payload,
+      externalAttempt: {
+        attemptedAt: Date.now(),
+        userMessageIds: baseline.userMessageIds,
+      },
+    });
+  }
+
+  private async clearPendingExternalAttempt(pending: StoredPendingTurn): Promise<void> {
+    const { externalAttempt: _externalAttempt, ...payload } = pending.payload;
+    await this.savePendingTurn(payload);
+  }
+
+  private async removePendingTurn(requestId: string): Promise<boolean> {
+    if (!this.pendingTurns.delete(requestId)) return false;
+    await this.persistPendingTurns();
+    return true;
   }
 
   private async processPendingTurns(): Promise<void> {
@@ -376,6 +430,25 @@ export class BridgeService {
 
   private async processPendingTurnsNow(): Promise<void> {
     for (const [requestId, pending] of this.pendingTurns) {
+      if (pending.payload.externalAttempt) {
+        let deliveryStatus;
+        try {
+          deliveryStatus = await this.appServer.reconcileExternalTurn(
+            pending.payload.threadId,
+            pending.payload.text,
+            pending.payload.externalAttempt,
+          );
+        } catch (error) {
+          if (isRetryablePendingTurnError(error)) continue;
+          throw error;
+        }
+        if (deliveryStatus === "delivered") {
+          await this.finishPendingTurn(requestId, pending.payload.threadId);
+          continue;
+        }
+        if (deliveryStatus === "waiting") continue;
+        await this.clearPendingExternalAttempt(pending);
+      }
       let result;
       try {
         result = await this.appServer.submitTurn(
@@ -385,24 +458,34 @@ export class BridgeService {
           pending.payload.model,
           pending.payload.effort,
           requestId,
+          (baseline, followUpMode) => this.markPendingExternalAttempt({
+            ...pending.payload,
+            followUpAction: followUpMode,
+          }, baseline),
+          pending.payload.followUpAction ?? "default",
         );
       } catch (error) {
         if (isRetryablePendingTurnError(error)) continue;
         throw error;
       }
       if (result.state === "waiting") continue;
-      this.pendingTurns.delete(requestId);
-      await this.persistPendingTurns();
-      await this.send({
-        version: 1,
-        kind: "turn.started",
-        requestId,
-        threadId: result.threadId,
-        selectionApplied: true,
-        message: "Watch model and reasoning selection applied. Prompt started in this chat.",
-      });
-      await this.sendSessions().catch(() => undefined);
+      await this.finishPendingTurn(requestId, result.threadId, result.steered);
     }
+  }
+
+  private async finishPendingTurn(requestId: string, threadId: string, steered = false): Promise<void> {
+    await this.removePendingTurn(requestId);
+    await this.send({
+      version: 1,
+      kind: "turn.started",
+      requestId,
+      threadId,
+      selectionApplied: true,
+      message: steered
+        ? "Steered the active turn. Your selected model and reasoning will be used for the next new turn."
+        : "Watch model and reasoning selection applied. Prompt submitted in this chat.",
+    });
+    await this.sendSessions().catch(() => undefined);
   }
 
   private async persistPendingTurns(): Promise<void> {
@@ -418,6 +501,22 @@ export class BridgeService {
     this.persistTask = this.persistTask.catch(() => undefined).then(() => writeConfig(this.config));
     await this.persistTask;
   }
+}
+
+function turnAcceptedMessage(result: TurnSubmissionResult): string | undefined {
+  if (result.state === "waiting" && result.followUpMode === "queue") {
+    return "Queued on the Watch. Waiting for the active turn to finish so the selected model and reasoning can be applied exactly.";
+  }
+  if (result.state === "waiting") {
+    return "Prompt saved for this chat. Waiting for Codex Desktop to apply the Watch model and reasoning selection exactly.";
+  }
+  if (result.steered) {
+    return "Steered the active turn. Your selected model and reasoning will be used for the next new turn.";
+  }
+  if (result.state === "queued" && result.followUpMode === "queue") {
+    return "Queued after the active turn.";
+  }
+  return undefined;
 }
 
 export function publicError(error: unknown): string {
@@ -454,7 +553,7 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
     return "The private bridge lost its Codex connection. Restart Codex and the Agentic Wear bridge, then retry.";
   }
   if (/active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|session is busy|another (?:Codex )?client|owns this session/iu.test(message)) {
-    return "Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft, refresh sessions, then retry after its turn finishes. If it stays busy, start a new session; Send remains explicit.";
+    return "Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft and retry this same chat after its turn finishes; Agentic Wear will not create another chat.";
   }
   if (/unknown variant [`']thread\/queue\/add|queued submission operation failed/iu.test(message)) {
     return "This Codex App Server does not support queued watch prompts. Agentic Wear did not queue or send your prompt; keep the draft and retry after the current turn finishes.";

@@ -26,6 +26,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -79,6 +80,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.CornerRadius
@@ -134,6 +136,7 @@ import io.github.sirbughunter.agenticwear.model.ChatMessageKind
 import io.github.sirbughunter.agenticwear.model.ChatPhase
 import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
@@ -786,7 +789,7 @@ private fun TranscriptScreen(
     state: WearUiState,
     onBack: () -> Unit,
     onTextChanged: (String) -> Unit,
-    onSend: () -> Unit,
+    onSend: (FollowUpAction) -> Unit,
     onRevise: () -> Unit,
     onModel: (String?) -> Unit,
     onEffort: (String) -> Unit,
@@ -800,10 +803,12 @@ private fun TranscriptScreen(
     val horizontalPadding = roundAwareHorizontalPadding()
     var modelSelectorOpen by rememberSaveable { mutableStateOf(false) }
     var approvalSelectorOpen by rememberSaveable { mutableStateOf(false) }
+    var sendModeSelectorOpen by rememberSaveable { mutableStateOf(false) }
     var selectorContainerSize by remember { mutableStateOf(IntSize.Zero) }
     var modelSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
     var approvalSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
-    val selectorOpen = modelSelectorOpen || approvalSelectorOpen
+    var sendModeSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
+    val selectorOpen = modelSelectorOpen || approvalSelectorOpen || sendModeSelectorOpen
     val selectedModel = state.models.firstOrNull { it.model == state.selectedModel }
     val modelLabel = selectedModel?.displayName ?: state.selectedModel ?: "Auto"
     Box(
@@ -817,6 +822,7 @@ private fun TranscriptScreen(
                 .semantics {
                     if (selectorOpen) hideFromAccessibility()
                 }
+                .blur(if (sendModeSelectorOpen) 18.dp else 0.dp)
                 .requestFocusOnHierarchyActive()
                 .rotaryScrollable(
                     behavior = RotaryScrollableDefaults.behavior(scrollState),
@@ -945,7 +951,25 @@ private fun TranscriptScreen(
                     onRevise,
                     enabled = !state.pending,
                 )
-                ActionButton(if (state.pending) "Sending…" else "Send", true, onSend, enabled = !state.pending && !transcript?.text.isNullOrBlank())
+                ActionButton(
+                    label = if (state.pending) "Sending…" else "Send",
+                    primary = true,
+                    onClick = { onSend(FollowUpAction.DEFAULT) },
+                    enabled = !state.pending && !transcript?.text.isNullOrBlank(),
+                    modifier = Modifier.onGloballyPositioned { coordinates ->
+                        sendModeSelectorOrigin = selectorTransformOrigin(
+                            triggerPosition = coordinates.positionInRoot(),
+                            triggerSize = coordinates.size,
+                            containerSize = selectorContainerSize,
+                        )
+                    },
+                    onLongClickLabel = "Choose Queue or Steer",
+                    onLongClick = {
+                        modelSelectorOpen = false
+                        approvalSelectorOpen = false
+                        sendModeSelectorOpen = true
+                    },
+                )
             }
             if (state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
                 Spacer(Modifier.height(7.dp))
@@ -984,6 +1008,20 @@ private fun TranscriptScreen(
                 onApprovalMode = { approvalMode ->
                     onApprovalMode(approvalMode)
                     approvalSelectorOpen = false
+                },
+            )
+        }
+        AnimatedVisibility(
+            visible = sendModeSelectorOpen,
+            modifier = Modifier.fillMaxSize(),
+            enter = selectorEnterTransition(sendModeSelectorOrigin),
+            exit = selectorExitTransition(sendModeSelectorOrigin),
+        ) {
+            SendModeOverlay(
+                onDismiss = { sendModeSelectorOpen = false },
+                onSend = { action ->
+                    sendModeSelectorOpen = false
+                    onSend(action)
                 },
             )
         }
@@ -1315,6 +1353,185 @@ private val ApprovalMode.description: String
     get() = when (this) {
         ApprovalMode.ALERT_ONLY -> "Notify here; decide in Codex"
         ApprovalMode.ALLOW_CONTROLS -> "Decide for watch-owned sessions"
+    }
+
+@Composable
+private fun SendModeOverlay(
+    onDismiss: () -> Unit,
+    onSend: (FollowUpAction) -> Unit,
+) {
+    val horizontalPadding = roundAwareHorizontalPadding(round = 34.dp, square = 20.dp)
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = 0.72f),
+                            Color(0xFF07070A).copy(alpha = 0.86f),
+                        ),
+                    ),
+                )
+                .pointerInput(onDismiss) {
+                    detectTapGestures(onTap = { onDismiss() })
+                },
+        )
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(top = 8.dp, bottom = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(Modifier.fillMaxWidth().height(44.dp)) {
+                Text(
+                    text = "Send this prompt",
+                    color = Frost,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.2).sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 60.dp)
+                        .align(Alignment.Center),
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = horizontalPadding - 6.dp)
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .clickable(role = Role.Button, onClick = onDismiss)
+                        .semantics { contentDescription = "Close send options" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(PanelRaised),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = null,
+                            tint = Frost.copy(alpha = 0.78f),
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                }
+            }
+            Text(
+                "Override your Codex follow-up default for this prompt",
+                color = Muted.copy(alpha = 0.86f),
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                modifier = Modifier.padding(horizontal = horizontalPadding),
+            )
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                SendModeChoice(
+                    action = FollowUpAction.STEER,
+                    onClick = { onSend(FollowUpAction.STEER) },
+                )
+                Spacer(Modifier.height(7.dp))
+                SendModeChoice(
+                    action = FollowUpAction.QUEUE,
+                    onClick = { onSend(FollowUpAction.QUEUE) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SendModeChoice(action: FollowUpAction, onClick: () -> Unit) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(120, easing = AgenticEaseOut),
+        label = "send mode choice press",
+    )
+    val accent = if (action == FollowUpAction.STEER) Cyan else Mint
+    val surface = if (action == FollowUpAction.STEER) Color(0xFF10252D) else Color(0xFF10251F)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(18.dp))
+            .background(surface)
+            .border(1.dp, accent.copy(alpha = 0.72f), RoundedCornerShape(18.dp))
+            .semantics { contentDescription = "${action.sendLabel}. ${action.sendDescription}" }
+            .clickable(
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+            ) {
+                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+                onClick()
+            }
+            .padding(horizontal = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (action == FollowUpAction.STEER) Icons.Rounded.TouchApp else Icons.Rounded.KeyboardArrowDown,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Spacer(Modifier.width(9.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                action.sendLabel,
+                color = Frost,
+                fontSize = 11.sp,
+                lineHeight = 13.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+            Text(
+                action.sendDescription,
+                color = Muted.copy(alpha = 0.9f),
+                fontSize = 8.sp,
+                lineHeight = 10.sp,
+                maxLines = 2,
+            )
+        }
+    }
+}
+
+private val FollowUpAction.sendLabel: String
+    get() = when (this) {
+        FollowUpAction.STEER -> "Steer now"
+        FollowUpAction.QUEUE -> "Queue next"
+        FollowUpAction.DEFAULT -> "Use default"
+    }
+
+private val FollowUpAction.sendDescription: String
+    get() = when (this) {
+        FollowUpAction.STEER -> "Apply it to the active turn"
+        FollowUpAction.QUEUE -> "Wait for the active turn to finish"
+        FollowUpAction.DEFAULT -> "Follow the current Codex setting"
     }
 
 @Composable
@@ -2759,6 +2976,8 @@ private fun ActionButton(
     enabled: Boolean,
     modifier: Modifier = Modifier,
     accent: Color = Cyan,
+    onLongClickLabel: String? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
@@ -2769,7 +2988,27 @@ private fun ActionButton(
             .clip(CircleShape)
             .background(if (primary) accent else PanelRaised)
             .border(1.dp, if (primary) accent else Color(0xFF3B3F57), CircleShape)
-            .clickable(enabled = enabled, interactionSource = interactions, indication = null, role = Role.Button, onClick = onClick)
+            .then(
+                if (onLongClick == null) {
+                    Modifier.clickable(
+                        enabled = enabled,
+                        interactionSource = interactions,
+                        indication = null,
+                        role = Role.Button,
+                        onClick = onClick,
+                    )
+                } else {
+                    Modifier.combinedClickable(
+                        enabled = enabled,
+                        interactionSource = interactions,
+                        indication = null,
+                        role = Role.Button,
+                        onLongClickLabel = onLongClickLabel,
+                        onLongClick = onLongClick,
+                        onClick = onClick,
+                    )
+                },
+            )
             .alpha(if (enabled) 1f else 0.48f)
             .padding(horizontal = 20.dp, vertical = 11.dp),
         contentAlignment = Alignment.Center,

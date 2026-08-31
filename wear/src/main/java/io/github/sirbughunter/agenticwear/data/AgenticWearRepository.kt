@@ -6,6 +6,7 @@ import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import java.io.File
@@ -96,7 +97,13 @@ class AgenticWearRepository(private val context: Context) {
         }
     }
 
-    suspend fun submitTurn(threadId: String?, text: String, model: String?, effort: String): String {
+    suspend fun submitTurn(
+        threadId: String?,
+        text: String,
+        model: String?,
+        effort: String,
+        followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
+    ): String {
         require(text.isNotBlank()) { "Transcript is empty" }
         val requestId = UUID.randomUUID().toString()
         preferences.pending = true
@@ -113,6 +120,7 @@ class AgenticWearRepository(private val context: Context) {
                     text = text.trim(),
                     model = model,
                     effort = effort,
+                    followUpAction = followUpAction,
                 ),
             )
             for (waitMillis in TURN_REPLY_DELAYS_MS) {

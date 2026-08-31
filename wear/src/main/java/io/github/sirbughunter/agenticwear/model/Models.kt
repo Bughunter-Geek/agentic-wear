@@ -92,6 +92,12 @@ enum class TranscriptionEngine { BRIDGE_WHISPER, DEVICE_SPEECH }
 
 enum class ApprovalMode { ALERT_ONLY, ALLOW_CONTROLS }
 
+enum class FollowUpAction(val wireValue: String) {
+    DEFAULT("default"),
+    QUEUE("queue"),
+    STEER("steer"),
+}
+
 const val MAX_TRANSCRIPT_CHARS = 12_000
 
 data class Transcript(
@@ -170,6 +176,7 @@ sealed interface BridgePayload {
         val text: String,
         val model: String? = null,
         val effort: String = ReasoningEffortPolicy.DEFAULT,
+        val followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
     ) : BridgePayload
     data class ApprovalResponse(
         override val requestId: String,

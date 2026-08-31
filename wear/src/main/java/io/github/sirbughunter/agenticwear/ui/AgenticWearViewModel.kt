@@ -20,6 +20,7 @@ import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.ChatMessage
 import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
@@ -299,7 +300,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         _state.update { it.copy(transcript = updated) }
     }
 
-    fun submitTranscript() {
+    fun submitTranscript(followUpAction: FollowUpAction = FollowUpAction.DEFAULT) {
         val transcript = _state.value.transcript ?: return
         launchTask {
             val current = _state.value
@@ -308,6 +309,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 text = transcript.text,
                 model = current.selectedModel,
                 effort = current.reasoningEffort,
+                followUpAction = followUpAction,
             )
             preferences.selectedThreadId = threadId
             preferences.submitDraftAsNewSession = false

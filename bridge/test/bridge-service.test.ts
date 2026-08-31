@@ -32,6 +32,7 @@ describe("BridgeService App Server transport", () => {
           created: false,
           state: "waiting",
           selectionApplied: false,
+          followUpMode: "queue",
         }),
       },
       config: { defaultCwd: "/tmp" },
@@ -49,6 +50,7 @@ describe("BridgeService App Server transport", () => {
         text: string;
         model: string;
         effort: string;
+        followUpAction: "queue";
       }) => Promise<void>;
     }).handleWatchPayload({
       version: 1,
@@ -58,6 +60,7 @@ describe("BridgeService App Server transport", () => {
       text: "Continue once.",
       model: "gpt-5.6-terra",
       effort: "high",
+      followUpAction: "queue",
     });
 
     expect(storePendingTurn).toHaveBeenCalledWith(expect.objectContaining({
@@ -66,6 +69,7 @@ describe("BridgeService App Server transport", () => {
       text: "Continue once.",
       model: "gpt-5.6-terra",
       effort: "high",
+      followUpAction: "queue",
     }));
     expect(send).toHaveBeenCalledWith(expect.objectContaining({
       kind: "turn.accepted",
@@ -73,9 +77,80 @@ describe("BridgeService App Server transport", () => {
       threadId: "thread-1",
       state: "waiting",
       selectionApplied: false,
-      message: expect.stringContaining("Waiting for the current owner"),
+      message: expect.stringContaining("Queued on the Watch"),
     }));
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error" }));
+  });
+
+  it("durably marks an active-turn handoff before acknowledging the steer", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const markPendingExternalAttempt = vi.fn().mockResolvedValue(undefined);
+    const removePendingTurn = vi.fn().mockResolvedValue(true);
+    const submitTurn = vi.fn(async (...args: unknown[]) => {
+      const beforeExternalDispatch = args[6] as (
+        baseline: { userMessageIds: string[] },
+        mode: "steer",
+      ) => Promise<void>;
+      await beforeExternalDispatch({ userMessageIds: ["user-before"] }, "steer");
+      return {
+        threadId: "thread-1",
+        created: false,
+        state: "running",
+        selectionApplied: true,
+        steered: true,
+        followUpMode: "steer",
+      };
+    });
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      appServer: { submitTurn },
+      config: { defaultCwd: "/tmp" },
+      send,
+      sendSessions: vi.fn().mockResolvedValue(undefined),
+      markPendingExternalAttempt,
+      removePendingTurn,
+    });
+
+    await (service as unknown as {
+      handleWatchPayload: (payload: {
+        version: 1;
+        kind: "turn.submit";
+        requestId: string;
+        threadId: string;
+        text: string;
+        model: string;
+        effort: string;
+        followUpAction: "steer";
+      }) => Promise<void>;
+    }).handleWatchPayload({
+      version: 1,
+      kind: "turn.submit",
+      requestId: "watch-model-change-1",
+      threadId: "thread-1",
+      text: "Use Luna high in this chat.",
+      model: "gpt-5.6-luna",
+      effort: "high",
+      followUpAction: "steer",
+    });
+
+    expect(markPendingExternalAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: "watch-model-change-1",
+      threadId: "thread-1",
+      text: "Use Luna high in this chat.",
+      model: "gpt-5.6-luna",
+      effort: "high",
+      followUpAction: "steer",
+    }), { userMessageIds: ["user-before"] });
+    expect(submitTurn.mock.calls[0]?.[7]).toBe("steer");
+    expect(removePendingTurn).toHaveBeenCalledWith("watch-model-change-1");
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "turn.accepted",
+      requestId: "watch-model-change-1",
+      threadId: "thread-1",
+      state: "running",
+      selectionApplied: true,
+      message: expect.stringContaining("Steered the active turn"),
+    }));
   });
 
   it("retries an encrypted pending prompt on the original thread with the same idempotency key", async () => {
@@ -121,6 +196,8 @@ describe("BridgeService App Server transport", () => {
       "gpt-5.6-luna",
       "max",
       "watch-pending-1",
+      expect.any(Function),
+      "default",
     );
     expect(pendingTurns.size).toBe(0);
     expect(persistPendingTurns).toHaveBeenCalledOnce();
@@ -129,6 +206,60 @@ describe("BridgeService App Server transport", () => {
       requestId: "watch-pending-1",
       threadId: "thread-1",
       selectionApplied: true,
+    }));
+  });
+
+  it("migrates a previously dispatched prompt by reconciling before retrying", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const persistPendingTurns = vi.fn().mockResolvedValue(undefined);
+    const submitTurn = vi.fn();
+    const reconcileExternalTurn = vi.fn().mockResolvedValue("delivered");
+    const pendingTurns = new Map([[
+      "watch-pending-external-1",
+      {
+        payload: {
+          requestId: "watch-pending-external-1",
+          threadId: "thread-1",
+          text: "Use the requested configuration once.",
+          model: "gpt-5.6-luna",
+          effort: "max",
+          createdAt: 1_787_900_000_000,
+          externalAttempt: {
+            attemptedAt: 1_787_900_001_000,
+            userMessageIds: ["user-before"],
+          },
+        },
+        sealed: { nonce: "nonce", ciphertext: "ciphertext" },
+      },
+    ]]);
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      appServer: { submitTurn, reconcileExternalTurn },
+      config: { defaultCwd: "/tmp" },
+      pendingTurns,
+      pendingTurnTask: null,
+      persistPendingTurns,
+      send,
+      sendSessions: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await (service as unknown as { processPendingTurns: () => Promise<void> }).processPendingTurns();
+
+    expect(reconcileExternalTurn).toHaveBeenCalledWith(
+      "thread-1",
+      "Use the requested configuration once.",
+      {
+        attemptedAt: 1_787_900_001_000,
+        userMessageIds: ["user-before"],
+      },
+    );
+    expect(submitTurn).not.toHaveBeenCalled();
+    expect(pendingTurns.size).toBe(0);
+    expect(persistPendingTurns).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "turn.started",
+      requestId: "watch-pending-external-1",
+      threadId: "thread-1",
     }));
   });
 });
@@ -143,11 +274,11 @@ describe("publicRequestError", () => {
 
   it("states that a foreign active writer leaves the watch draft unsent", () => {
     expect(publicRequestError(new Error("active writer already attached"), "turn.submit"))
-      .toBe("Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft, refresh sessions, then retry after its turn finishes. If it stays busy, start a new session; Send remains explicit.");
+      .toBe("Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft and retry this same chat after its turn finishes; Agentic Wear will not create another chat.");
   });
 
   it("maps foreign-session wording variants to the same safe recovery", () => {
-    const expected = "Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft, refresh sessions, then retry after its turn finishes. If it stays busy, start a new session; Send remains explicit.";
+    const expected = "Another Codex client owns this active session. Agentic Wear did not queue or send your prompt. Keep the draft and retry this same chat after its turn finishes; Agentic Wear will not create another chat.";
 
     expect(publicRequestError(new Error("Codex still owns this session in another client"), "turn.submit"))
       .toBe(expected);

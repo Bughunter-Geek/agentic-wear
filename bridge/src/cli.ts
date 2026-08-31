@@ -35,6 +35,7 @@ import {
   setupLocalWhisper,
 } from "./local-whisper.js";
 import { installLaunchAgent, launchAgentStatus, uninstallLaunchAgent } from "./launchd.js";
+import { installCodexRelayConfig, uninstallCodexRelayConfig } from "./codex-relay-config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -65,12 +66,15 @@ async function service(args: string[]): Promise<void> {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
     const builtCli = resolve(root, "bridge", "dist", "cli.js");
     if (!existsSync(builtCli)) throw new Error("Build the bridge first with `npm --prefix bridge run build`");
-    const path = await installLaunchAgent(root, process.execPath, await resolveCodexExecutable());
+    const codexPath = await resolveCodexExecutable();
+    await installCodexRelayConfig(root, codexPath);
+    const path = await installLaunchAgent(root, process.execPath, codexPath);
     console.log(`Background bridge installed: ${path}`);
     return;
   }
   if (action === "uninstall") {
     await uninstallLaunchAgent();
+    await uninstallCodexRelayConfig();
     console.log("Background bridge removed. Pairing and Keychain data were preserved.");
     return;
   }

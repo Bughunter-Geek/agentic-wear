@@ -6,6 +6,7 @@ import io.github.sirbughunter.agenticwear.model.ChatMessage
 import io.github.sirbughunter.agenticwear.model.ChatMessageKind
 import io.github.sirbughunter.agenticwear.model.ChatPhase
 import io.github.sirbughunter.agenticwear.model.ChatRole
+import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -13,6 +14,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PayloadCodecPolicyTest {
+    @Test
+    fun `turn payload keeps normal send backward compatible and encodes one-shot overrides`() {
+        assertEquals(null, FollowUpAction.DEFAULT.wireOverride())
+        assertEquals("queue", FollowUpAction.QUEUE.wireOverride())
+        assertEquals("steer", FollowUpAction.STEER.wireOverride())
+    }
+
     @Test
     fun `completion requires an explicit top-level turn scope`() {
         assertTrue(acceptsAlertEnvelope("terminal.completed", "topLevel"))

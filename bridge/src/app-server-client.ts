@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -19,8 +20,10 @@ import {
   turnListResponseSchema,
   turnStartedSchema,
   type CodexThread,
+  type FollowUpAction,
 } from "./schemas.js";
 import { sanitizePublicText } from "./public-text.js";
+import type { CodexAppTurnSubmitter } from "./codex-app-tools-client.js";
 
 export type SessionView = {
   id: string;
@@ -45,7 +48,21 @@ export type TurnSubmissionResult = {
   created: boolean;
   state: "running" | "queued" | "waiting";
   selectionApplied: boolean;
+  steered?: boolean;
+  followUpMode?: ActiveFollowUpMode;
 };
+
+export type ActiveFollowUpMode = "queue" | "steer";
+
+export type ExternalTurnBaseline = {
+  userMessageIds: string[];
+};
+
+export type ExternalTurnAttempt = ExternalTurnBaseline & {
+  attemptedAt: number;
+};
+
+export type ExternalTurnDeliveryStatus = "delivered" | "waiting" | "retry";
 
 type ThreadSettings = { model: string | null; effort: string | null };
 
@@ -173,6 +190,9 @@ const queueStartResponseSchema = z.object({
     id: z.string().min(1).max(128),
   }).passthrough(),
 }).passthrough();
+const turnSteerResponseSchema = z.object({
+  turnId: z.string().min(1).max(128),
+}).passthrough();
 const queueDeleteResponseSchema = z.object({ deleted: z.boolean() }).passthrough();
 const permissionPathSchema = z.string().min(1).max(4_096);
 const fileSystemPathSchema = z.discriminatedUnion("type", [
@@ -249,6 +269,8 @@ export class AppServerClient {
     private readonly onFatal: (error: Error) => void = () => {},
     private readonly onAgentOutput: (threadId: string) => Promise<void> = () => Promise.resolve(),
     private readonly readThreadSettings: (threadId: string) => ThreadSettings | null = readPersistedThreadSettings,
+    private readonly codexAppTools: CodexAppTurnSubmitter | null = null,
+    private readonly readFollowUpMode: () => ActiveFollowUpMode = readPersistedFollowUpMode,
   ) {}
 
   async connect(transport: "daemon" | "stdio" = "daemon"): Promise<void> {
@@ -347,7 +369,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     const initialized = initializeResponseSchema.parse(await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.5" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.7" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -475,10 +497,14 @@ export class AppServerClient {
     model: string | null = null,
     effort = "medium",
     clientUserMessageId: string | null = null,
+    beforeExternalDispatch?: (baseline: ExternalTurnBaseline, mode: ActiveFollowUpMode) => Promise<void>,
+    followUpAction: FollowUpAction = "default",
   ): Promise<TurnSubmissionResult> {
     let thread: CodexThread;
     let startQueuedSubmission = false;
     let waitForSelection = false;
+    let acceptedState: "running" | "queued" | null = null;
+    let activeFollowUpMode: ActiveFollowUpMode | null = null;
     let previousTurnId: string | null = null;
     const messageId = clientUserMessageId ?? randomUUID();
     if (threadId === null) {
@@ -529,13 +555,49 @@ export class AppServerClient {
         if (current.status.type === "notLoaded") {
           const latest = await this.latestTurn(current.id);
           previousTurnId = latest?.id ?? null;
+          if (latest?.status === "inProgress") {
+            activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
+            if (activeFollowUpMode === "queue") {
+              const persisted = this.readThreadSettings(current.id);
+              const selectionAlreadyApplied = persisted !== null &&
+                (model === null || persisted.model === model) &&
+                persisted.effort === effort;
+              if (!selectionAlreadyApplied) waitForSelection = true;
+            } else {
+              const externalResult = await this.submitExternalTurn(
+                current.id,
+                text,
+                model,
+                effort,
+                messageId,
+                activeFollowUpMode,
+                beforeExternalDispatch,
+              );
+              if (externalResult === "accepted") acceptedState = "running";
+              else waitForSelection = true;
+            }
+            return current;
+          }
           const persisted = this.readThreadSettings(current.id);
           const selectionAlreadyApplied = persisted !== null &&
             (model === null || persisted.model === model) &&
             persisted.effort === effort;
           if (selectionAlreadyApplied) return current;
-          if (latest?.status === "inProgress") {
-            this.watchReadyThreads.delete(current.id);
+          const externalResult = await this.submitExternalTurn(
+            current.id,
+            text,
+            model,
+            effort,
+            messageId,
+            this.resolveFollowUpMode(followUpAction),
+            beforeExternalDispatch,
+          );
+          if (externalResult === "accepted") {
+            acceptedState = "queued";
+            return current;
+          }
+          if (externalResult === "uncertain") {
+            waitForSelection = true;
             return current;
           }
           if (!await this.acquireDormantThread(current.id, model, effort)) {
@@ -546,14 +608,35 @@ export class AppServerClient {
           return current;
         }
         if (current.status.type === "active") {
-          const persisted = this.readThreadSettings(current.id);
-          const selectionAlreadyApplied = persisted !== null &&
-            (model === null || persisted.model === model) &&
-            persisted.effort === effort;
-          if (!selectionAlreadyApplied) {
-            waitForSelection = true;
-            return current;
+          activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
+          const controlledTurnId = this.controlledTurnIds.get(current.id);
+          if (activeFollowUpMode === "queue") {
+            if (controlledTurnId) {
+              await this.updateThreadSettings(current.id, model, effort);
+            } else {
+              const persisted = this.readThreadSettings(current.id);
+              const selectionAlreadyApplied = persisted !== null &&
+                (model === null || persisted.model === model) &&
+                persisted.effort === effort;
+              if (!selectionAlreadyApplied) waitForSelection = true;
+            }
+          } else if (controlledTurnId) {
+            await this.steerControlledTurn(current.id, controlledTurnId, text, model, effort, messageId);
+            acceptedState = "running";
+          } else {
+            const externalResult = await this.submitExternalTurn(
+              current.id,
+              text,
+              model,
+              effort,
+              messageId,
+              activeFollowUpMode,
+              beforeExternalDispatch,
+            );
+            if (externalResult === "accepted") acceptedState = "running";
+            else waitForSelection = true;
           }
+          return current;
         }
         const stickySettings: Record<string, unknown> = {
           threadId: current.id,
@@ -565,12 +648,24 @@ export class AppServerClient {
       });
     }
 
+    if (acceptedState) {
+      return {
+        threadId: thread.id,
+        created: false,
+        state: acceptedState,
+        selectionApplied: true,
+        ...(acceptedState === "running" ? { steered: true } : {}),
+        ...(activeFollowUpMode ? { followUpMode: activeFollowUpMode } : {}),
+      };
+    }
+
     if (waitForSelection) {
       return {
         threadId: thread.id,
         created: false,
         state: "waiting",
         selectionApplied: false,
+        ...(activeFollowUpMode ? { followUpMode: activeFollowUpMode } : {}),
       };
     }
 
@@ -611,7 +706,82 @@ export class AppServerClient {
       created: false,
       state: startQueuedSubmission ? "running" : "queued",
       selectionApplied: true,
+      ...(activeFollowUpMode ? { followUpMode: activeFollowUpMode } : {}),
     };
+  }
+
+  private resolveFollowUpMode(action: FollowUpAction): ActiveFollowUpMode {
+    return action === "default" ? this.readFollowUpMode() : action;
+  }
+
+  private async updateThreadSettings(
+    threadId: string,
+    model: string | null,
+    effort: string,
+  ): Promise<void> {
+    const stickySettings: Record<string, unknown> = { threadId, effort };
+    if (model !== null) stickySettings.model = model;
+    await this.request("thread/settings/update", stickySettings);
+  }
+
+  private async steerControlledTurn(
+    threadId: string,
+    turnId: string,
+    text: string,
+    model: string | null,
+    effort: string,
+    messageId: string,
+  ): Promise<void> {
+    const stickySettings: Record<string, unknown> = { threadId, effort };
+    if (model !== null) stickySettings.model = model;
+    await this.request("thread/settings/update", stickySettings);
+    const steered = await this.retryTransientThreadOperation(threadId, async () => {
+      return turnSteerResponseSchema.parse(await this.request("turn/steer", {
+        threadId,
+        expectedTurnId: turnId,
+        input: [textInput(text)],
+        clientUserMessageId: messageId,
+      }));
+    });
+    if (steered.turnId !== turnId) throw new Error("Codex steered an unexpected turn");
+    this.watchReadyThreads.add(threadId);
+  }
+
+  private async submitExternalTurn(
+    threadId: string,
+    text: string,
+    model: string | null,
+    effort: string,
+    requestId: string,
+    followUpMode: ActiveFollowUpMode,
+    beforeExternalDispatch?: (baseline: ExternalTurnBaseline, mode: ActiveFollowUpMode) => Promise<void>,
+  ): Promise<"accepted" | "unavailable" | "uncertain"> {
+    if (!this.codexAppTools) return "unavailable";
+    let dispatchPrepared = false;
+    try {
+      await this.codexAppTools.sendMessageToThread({
+        threadId,
+        prompt: text,
+        model,
+        thinking: effort,
+        requestId,
+      }, async () => {
+        dispatchPrepared = true;
+        const baseline = await this.externalTurnBaseline(threadId);
+        await beforeExternalDispatch?.(baseline, followUpMode);
+      });
+      this.watchReadyThreads.add(threadId);
+      return "accepted";
+    } catch (error) {
+      this.watchReadyThreads.delete(threadId);
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: "Same-chat Codex app handoff is waiting",
+        threadId,
+        error: safeError(error),
+      }));
+      return dispatchPrepared ? "uncertain" : "unavailable";
+    }
   }
 
   private async acquireDormantThread(
@@ -684,6 +854,42 @@ export class AppServerClient {
       itemsView: "notLoaded",
     });
     return turnListResponseSchema.parse(raw).data[0] ?? null;
+  }
+
+  async reconcileExternalTurn(
+    threadId: string,
+    text: string,
+    attempt: ExternalTurnAttempt,
+  ): Promise<ExternalTurnDeliveryStatus> {
+    const baseline = new Set(attempt.userMessageIds);
+    const messages = await this.recentUserMessages(threadId);
+    if (messages.some((message) => !baseline.has(message.id) && message.text === text)) {
+      return "delivered";
+    }
+    return Date.now() - attempt.attemptedAt < EXTERNAL_DELIVERY_GRACE_MS
+      ? "waiting"
+      : "retry";
+  }
+
+  private async externalTurnBaseline(threadId: string): Promise<ExternalTurnBaseline> {
+    return {
+      userMessageIds: (await this.recentUserMessages(threadId)).map(({ id }) => id),
+    };
+  }
+
+  private async recentUserMessages(threadId: string): Promise<Array<{ id: string; text: string }>> {
+    const raw = await this.request("thread/turns/list", {
+      threadId,
+      limit: MAX_EXTERNAL_RECONCILIATION_TURNS,
+      sortDirection: "desc",
+      itemsView: "summary",
+    });
+    return chatTurnListResponseSchema.parse(raw).data.flatMap((turn) => turn.items.flatMap((item) => {
+      if (item.type !== "userMessage") return [];
+      const rawText = userMessageText(item);
+      const text = delegatedInput(rawText) ?? rawText;
+      return text ? [{ id: item.id, text }] : [];
+    }));
   }
 
   async chatSnapshot(threadId: string, forceRefresh = false): Promise<ChatSnapshot> {
@@ -874,6 +1080,7 @@ export class AppServerClient {
   }
 
   async close(): Promise<void> {
+    await this.codexAppTools?.close();
     // Best effort while the transport can still receive RPC responses. Threads
     // left in this set failed an earlier terminal release and get one final
     // bounded retry before disconnecting.
@@ -1483,17 +1690,14 @@ function chatMessageFromItem(
   const imageCount = item.content
     ?.filter((content) => content.type === "image" || content.type === "localImage")
     .length ?? 0;
-  const rawText = item.content
-    ?.filter((content) => content.type === "text" && content.text?.trim())
-    .map((content) => content.text!.trim())
-    .join("\n\n")
-    .trim() ?? "";
+  const rawText = userMessageText(item);
+  const visibleText = delegatedInput(rawText) ?? rawText;
   const requestText = imageCount > 0
-    ? rawText.replace(
+    ? visibleText.replace(
       /^# Files mentioned by the user:\s*[\s\S]*?## My request(?: for Codex)?:\s*/u,
       "",
     ).trim()
-    : rawText;
+    : visibleText;
   const imageNotice = imageCount === 1
     ? "Image attached. View on Android or iOS."
     : `${imageCount} images attached. View on Android or iOS.`;
@@ -1510,6 +1714,27 @@ function chatMessageFromItem(
     canControl: false,
     resolved: false,
   };
+}
+
+function userMessageText(
+  item: z.infer<typeof chatTurnListResponseSchema>["data"][number]["items"][number],
+): string {
+  return item.content
+    ?.filter((content) => content.type === "text" && content.text?.trim())
+    .map((content) => content.text!.trim())
+    .join("\n\n")
+    .trim() ?? "";
+}
+
+function delegatedInput(value: string): string | null {
+  const text = value.trim();
+  if (!text.startsWith("<codex_delegation>") || !text.endsWith("</codex_delegation>")) return null;
+  const encoded = /<input>\s*([\s\S]*?)\s*<\/input>/iu.exec(text)?.[1]?.trim();
+  if (encoded === undefined) return null;
+  return encoded
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
 }
 
 function trimOldestMapEntry<Key, Value>(map: Map<Key, Value>, limit: number): void {
@@ -1565,6 +1790,33 @@ function readPersistedThreadSettings(threadId: string): ThreadSettings | null {
   }
 }
 
+export function parsePersistedFollowUpMode(config: string): ActiveFollowUpMode {
+  let inDesktopSection = false;
+  for (const line of config.split(/\r?\n/u)) {
+    const section = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/u.exec(line)?.[1];
+    if (section !== undefined) {
+      inDesktopSection = section === "desktop";
+      continue;
+    }
+    if (!inDesktopSection) continue;
+    const configured = /^\s*followUpQueueMode\s*=\s*["'](queue|steer|interrupt)["']\s*(?:#.*)?$/u
+      .exec(line)?.[1];
+    if (configured !== undefined) return configured === "queue" ? "queue" : "steer";
+  }
+  return "steer";
+}
+
+function readPersistedFollowUpMode(): ActiveFollowUpMode {
+  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+  try {
+    return parsePersistedFollowUpMode(readFileSync(join(codexHome, "config.toml"), "utf8"));
+  } catch {
+    // Codex Desktop defaults active follow-ups to steer when this setting is
+    // absent or temporarily unreadable.
+    return "steer";
+  }
+}
+
 function handoffDelay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -1591,6 +1843,8 @@ const PRIVATE_SERVER_EXIT_TIMEOUT_MS = 2_000;
 const PRIVATE_SERVER_KILL_TIMEOUT_MS = 500;
 const THREAD_SYNC_ATTEMPTS = 7;
 const THREAD_SYNC_RETRY_MS = 250;
+const EXTERNAL_DELIVERY_GRACE_MS = 60_000;
+const MAX_EXTERNAL_RECONCILIATION_TURNS = 20;
 const MAX_CHAT_HISTORY_TURNS = 6;
 const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CHAT_MESSAGES = 12;

@@ -8,6 +8,8 @@ import {
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
 const safeModel = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_.:/-]+$/u);
 const reasoningEffort = z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9_.:-]+$/u);
+export const followUpActionSchema = z.enum(["default", "queue", "steer"]);
+export type FollowUpAction = z.infer<typeof followUpActionSchema>;
 const base64 = z.string().min(16).max(1_048_576).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
 const audioBase64 = z.string().min(16).max(MAX_AUDIO_BASE64_CHARS).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
 const ciphertextBase64 = z.string()
@@ -46,6 +48,7 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     text: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS),
     model: safeModel.nullable().optional(),
     effort: reasoningEffort.default("medium"),
+    followUpAction: followUpActionSchema.default("default"),
   }).strict(),
   z.object({
     version: z.literal(1),

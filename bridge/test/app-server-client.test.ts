@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AppServerClient, supportsThreadQueue } from "../src/app-server-client.js";
+import { AppServerClient, parsePersistedFollowUpMode, supportsThreadQueue } from "../src/app-server-client.js";
 
 type ClientInternals = {
   request: (method: string, params: unknown) => Promise<unknown>;
@@ -101,6 +101,18 @@ describe("AppServerClient session delivery", () => {
     expect(supportsThreadQueue("unknown")).toBe(false);
   });
 
+  it("reads the active follow-up preference only from the Codex desktop section", () => {
+    expect(parsePersistedFollowUpMode([
+      "followUpQueueMode = \"steer\"",
+      "[desktop]",
+      "followUpQueueMode = \"queue\"",
+      "[desktop.appearanceDarkChromeTheme]",
+      "followUpQueueMode = \"steer\"",
+    ].join("\n"))).toBe("queue");
+    expect(parsePersistedFollowUpMode("[desktop]\nfollowUpQueueMode = \"interrupt\"\n")).toBe("steer");
+    expect(parsePersistedFollowUpMode("[desktop]\nappearanceTheme = \"system\"\n")).toBe("steer");
+  });
+
   it("does not resume a thread again when thread/started already proves it is loaded", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
@@ -155,21 +167,49 @@ describe("AppServerClient session delivery", () => {
     expect(internals.watchReadyThreads.has("thread-1")).toBe(true);
   });
 
-  it("waits without queueing when a foreign active turn has different settings", async () => {
-    const target = client();
+  it("steers a foreign active turn immediately with the selected configuration", async () => {
+    const sendMessageToThread = vi.fn(async (
+      _message: unknown,
+      beforeDispatch: () => Promise<void>,
+    ) => beforeDispatch());
+    const beforeExternalDispatch = vi.fn().mockResolvedValue(undefined);
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "max" }),
+      { sendMessageToThread, close: vi.fn().mockResolvedValue(undefined) },
+      () => "queue",
+    );
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
     internals.request = vi.fn((method: string, params: unknown) => {
       methods.push(method);
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
-      if (method === "thread/turns/list") {
+      if (method === "thread/turns/list" && (params as { itemsView?: string }).itemsView === "notLoaded") {
         return Promise.resolve({
           data: [{ id: "turn-mobile", status: "inProgress", completedAt: null }],
           nextCursor: null,
           backwardsCursor: null,
         });
       }
-      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-mobile",
+            status: "inProgress",
+            items: [{
+              id: "user-before",
+              type: "userMessage",
+              content: [{ type: "text", text: "Earlier phone prompt" }],
+            }],
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -180,29 +220,43 @@ describe("AppServerClient session delivery", () => {
       "gpt-5.6-sol",
       "xhigh",
       "watch-active-owner-1",
+      beforeExternalDispatch,
+      "steer",
     )).resolves.toEqual({
       threadId: "thread-1",
       created: false,
-      state: "waiting",
-      selectionApplied: false,
+      state: "running",
+      selectionApplied: true,
+      steered: true,
+      followUpMode: "steer",
     });
 
-    expect(methods).toEqual(["thread/read", "thread/turns/list"]);
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/turns/list"]);
+    expect(sendMessageToThread).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      prompt: "After the phone finishes.",
+      model: "gpt-5.6-sol",
+      thinking: "xhigh",
+      requestId: "watch-active-owner-1",
+    }, expect.any(Function));
+    expect(beforeExternalDispatch).toHaveBeenCalledWith({ userMessageIds: ["user-before"] }, "steer");
     expect(methods).not.toContain("thread/settings/update");
     expect(methods).not.toContain("thread/resume");
     expect(methods).not.toContain("thread/queue/start");
     expect(methods).not.toContain("thread/queue/delete");
-    expect(internals.watchReadyThreads.has("thread-1")).toBe(false);
   });
 
-  it("queues immediately on the same foreign chat when its persisted settings already match", async () => {
+  it("uses the Codex default to queue behind a foreign active turn", async () => {
+    const sendMessageToThread = vi.fn();
     const target = new AppServerClient(
       new Set(),
       async () => {},
       async () => {},
       () => {},
       async () => {},
-      () => ({ model: "gpt-5.6-luna", effort: "max" }),
+      () => ({ model: "gpt-5.6-luna", effort: "high" }),
+      { sendMessageToThread, close: vi.fn().mockResolvedValue(undefined) },
+      () => "queue",
     );
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
@@ -222,6 +276,293 @@ describe("AppServerClient session delivery", () => {
 
     await expect(target.submitTurn(
       "thread-1",
+      "Run this after the current turn.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "high",
+      "watch-default-queue-1",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "queued",
+      selectionApplied: true,
+      followUpMode: "queue",
+    });
+
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/add"]);
+    expect(sendMessageToThread).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit queued model change pending until the foreign turn finishes", async () => {
+    const sendMessageToThread = vi.fn();
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "max" }),
+      { sendMessageToThread, close: vi.fn().mockResolvedValue(undefined) },
+      () => "steer",
+    );
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active", false) });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Use Luna next.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "high",
+      "watch-explicit-queue-1",
+      undefined,
+      "queue",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "waiting",
+      selectionApplied: false,
+      followUpMode: "queue",
+    });
+
+    expect(methods).toEqual(["thread/read"]);
+    expect(sendMessageToThread).not.toHaveBeenCalled();
+  });
+
+  it("submits a different Watch configuration through the same-chat desktop route", async () => {
+    const sendMessageToThread = vi.fn(async (
+      _message: unknown,
+      beforeDispatch: () => Promise<void>,
+    ) => beforeDispatch());
+    const beforeExternalDispatch = vi.fn().mockResolvedValue(undefined);
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "max" }),
+      { sendMessageToThread, close: vi.fn().mockResolvedValue(undefined) },
+    );
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list" && (params as { itemsView?: string }).itemsView === "notLoaded") {
+        return Promise.resolve({
+          data: [{ id: "turn-mobile", status: "completed", completedAt: 1_787_900_000 }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-mobile",
+            status: "completed",
+            items: [{
+              id: "user-before",
+              type: "userMessage",
+              content: [{ type: "text", text: "Earlier phone prompt" }],
+            }],
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Use Luna at high reasoning.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "high",
+      "watch-model-change-1",
+      beforeExternalDispatch,
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "queued",
+      selectionApplied: true,
+    });
+
+    expect(sendMessageToThread).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      prompt: "Use Luna at high reasoning.",
+      model: "gpt-5.6-luna",
+      thinking: "high",
+      requestId: "watch-model-change-1",
+    }, expect.any(Function));
+    expect(beforeExternalDispatch).toHaveBeenCalledWith({ userMessageIds: ["user-before"] }, "steer");
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/turns/list"]);
+    expect(methods).not.toContain("thread/resume");
+    expect(methods).not.toContain("thread/settings/update");
+    expect(methods).not.toContain("thread/queue/add");
+  });
+
+  it("routes a configuration change without waiting for a queue probe", async () => {
+    const sendMessageToThread = vi.fn(async (
+      _message: unknown,
+      beforeDispatch: () => Promise<void>,
+    ) => beforeDispatch());
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "max" }),
+      { sendMessageToThread, close: vi.fn().mockResolvedValue(undefined) },
+    );
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list" && (params as { itemsView?: string }).itemsView === "notLoaded") {
+        return Promise.resolve(terminalTurnsResponse());
+      }
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{ id: "turn-old", status: "completed", items: [] }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Use Terra after the queued turn.",
+      "/tmp",
+      "gpt-5.6-terra",
+      "high",
+      "watch-model-change-queued-1",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "queued",
+      selectionApplied: true,
+    });
+
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/turns/list"]);
+    expect(methods).not.toContain("thread/queue/list");
+    expect(sendMessageToThread).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles a same-turn desktop handoff before any retry", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      expect(method).toBe("thread/turns/list");
+      return Promise.resolve({
+        data: [{
+          id: "turn-mobile",
+          status: "inProgress",
+          items: [
+            {
+              id: "user-before",
+              type: "userMessage",
+              content: [{ type: "text", text: "Earlier phone prompt" }],
+            },
+            {
+              id: "user-watch",
+              type: "userMessage",
+              content: [{
+                type: "text",
+                text: [
+                  "<codex_delegation>",
+                  "  <source_thread_id>thread-1</source_thread_id>",
+                  "  <input>Use &lt;Luna&gt; &amp; max.</input>",
+                  "</codex_delegation>",
+                ].join("\n"),
+              }],
+            },
+          ],
+        }],
+        nextCursor: null,
+        backwardsCursor: null,
+      });
+    });
+
+    await expect(target.reconcileExternalTurn(
+      "thread-1",
+      "Use <Luna> & max.",
+      { attemptedAt: Date.now(), userMessageIds: ["user-before"] },
+    )).resolves.toBe("delivered");
+  });
+
+  it("waits through the reconciliation grace period before allowing a retry", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn().mockResolvedValue({
+      data: [{ id: "turn-mobile", status: "inProgress", items: [] }],
+      nextCursor: null,
+      backwardsCursor: null,
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+
+    await expect(target.reconcileExternalTurn(
+      "thread-1",
+      "One exact Watch prompt.",
+      { attemptedAt: 1_799_999_970_001, userMessageIds: [] },
+    )).resolves.toBe("waiting");
+    await expect(target.reconcileExternalTurn(
+      "thread-1",
+      "One exact Watch prompt.",
+      { attemptedAt: 1_799_999_939_999, userMessageIds: [] },
+    )).resolves.toBe("retry");
+
+    now.mockRestore();
+  });
+
+  it("steers a foreign active turn even when its persisted settings already match", async () => {
+    const sendMessageToThread = vi.fn(async (
+      _message: unknown,
+      beforeDispatch: () => Promise<void>,
+    ) => beforeDispatch());
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-luna", effort: "max" }),
+      { sendMessageToThread, close: vi.fn().mockResolvedValue(undefined) },
+    );
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list" && (params as { itemsView?: string }).itemsView === "notLoaded") {
+        return Promise.resolve({
+          data: [{ id: "turn-mobile", status: "inProgress", completedAt: null }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{ id: "turn-mobile", status: "inProgress", items: [] }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
       "Use the already-selected configuration.",
       "/tmp",
       "gpt-5.6-luna",
@@ -230,11 +571,20 @@ describe("AppServerClient session delivery", () => {
     )).resolves.toEqual({
       threadId: "thread-1",
       created: false,
-      state: "queued",
+      state: "running",
       selectionApplied: true,
+      steered: true,
+      followUpMode: "steer",
     });
 
-    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/add"]);
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/turns/list"]);
+    expect(sendMessageToThread).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      prompt: "Use the already-selected configuration.",
+      model: "gpt-5.6-luna",
+      thinking: "max",
+      requestId: "watch-matching-owner-1",
+    }, expect.any(Function));
   });
 
   it("waits without queueing when an idle owner blocks the requested settings", async () => {
@@ -313,6 +663,7 @@ describe("AppServerClient session delivery", () => {
           backwardsCursor: null,
         });
       }
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
       if (method === "thread/queue/add") {
         queueAdds += 1;
         return Promise.resolve(queuedResponse(params));
@@ -360,6 +711,7 @@ describe("AppServerClient session delivery", () => {
       }
       if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
       if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
       if (method === "thread/queue/add") {
         queuedParams = params as Record<string, unknown>;
         return Promise.resolve(queuedResponse(params));
@@ -395,6 +747,7 @@ describe("AppServerClient session delivery", () => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
       if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
       if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
       if (method === "thread/queue/add") {
         queueIds.push((params as Record<string, unknown>).clientUserMessageId);
         if (queueIds.length === 1) return Promise.reject(new Error("bs1 was cancelled"));
@@ -621,7 +974,7 @@ describe("AppServerClient session delivery", () => {
     });
   });
 
-  it("queues behind an active foreign writer even when direct steering is unavailable", async () => {
+  it("keeps an active foreign prompt pending when the desktop steering route is unavailable", async () => {
     const target = new AppServerClient(
       new Set(),
       async () => {},
@@ -643,15 +996,16 @@ describe("AppServerClient session delivery", () => {
     await expect(target.submitTurn("thread-1", "Run after the current turn.", "/tmp")).resolves.toMatchObject({
       threadId: "thread-1",
       created: false,
-      state: "queued",
+      state: "waiting",
+      selectionApplied: false,
     });
-    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
+    expect(methods).toEqual(["thread/read"]);
     expect(methods).not.toContain("thread/resume");
     expect(methods).not.toContain("turn/steer");
     expect(methods).not.toContain("turn/start");
   });
 
-  it("does not inspect or reuse a stale active turn ID when queueing", async () => {
+  it("does not mistake an observed foreign turn for a Watch-controlled turn", async () => {
     const target = new AppServerClient(
       new Set(),
       async () => {},
@@ -674,9 +1028,115 @@ describe("AppServerClient session delivery", () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
-    await expect(target.submitTurn("thread-1", "Queue exactly once.", "/tmp"))
-      .resolves.toMatchObject({ threadId: "thread-1", created: false, state: "queued" });
-    expect(methods).toEqual(["thread/read", "thread/settings/update", "thread/queue/add"]);
+    await expect(target.submitTurn("thread-1", "Steer only through an authorized route.", "/tmp"))
+      .resolves.toMatchObject({ threadId: "thread-1", created: false, state: "waiting" });
+    expect(methods).toEqual(["thread/read"]);
+    expect(methods).not.toContain("turn/steer");
+  });
+
+  it("steers a Watch-controlled active turn directly with the exact turn id", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.controlledThreads.add("thread-1");
+    internals.controlledTurnIds.set("thread-1", "turn-watch");
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      requests.push({ method, params: params as Record<string, unknown> });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active", true) });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "turn/steer") return Promise.resolve({ turnId: "turn-watch" });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Adjust the work in progress.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "high",
+      "watch-steer-1",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "running",
+      selectionApplied: true,
+      steered: true,
+      followUpMode: "steer",
+    });
+
+    expect(requests).toEqual([
+      {
+        method: "thread/read",
+        params: { threadId: "thread-1", includeTurns: false },
+      },
+      {
+        method: "thread/settings/update",
+        params: { threadId: "thread-1", model: "gpt-5.6-luna", effort: "high" },
+      },
+      {
+        method: "turn/steer",
+        params: {
+          threadId: "thread-1",
+          expectedTurnId: "turn-watch",
+          input: [{ type: "text", text: "Adjust the work in progress.", text_elements: [] }],
+          clientUserMessageId: "watch-steer-1",
+        },
+      },
+    ]);
+    expect(internals.watchReadyThreads.has("thread-1")).toBe(true);
+  });
+
+  it("queues behind a Watch-controlled turn with the selected next-turn configuration", async () => {
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      async () => {},
+      () => ({ model: "gpt-5.6-sol", effort: "high" }),
+      null,
+      () => "steer",
+    );
+    const internals = target as unknown as ClientInternals;
+    internals.controlledThreads.add("thread-1");
+    internals.controlledTurnIds.set("thread-1", "turn-watch");
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      requests.push({ method, params: params as Record<string, unknown> });
+      if (method === "thread/read") return Promise.resolve({ thread: thread("active", true) });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Do this after the current work.",
+      "/tmp",
+      "gpt-5.6-luna",
+      "max",
+      "watch-controlled-queue-1",
+      undefined,
+      "queue",
+    )).resolves.toEqual({
+      threadId: "thread-1",
+      created: false,
+      state: "queued",
+      selectionApplied: true,
+      followUpMode: "queue",
+    });
+
+    expect(requests.map(({ method }) => method)).toEqual([
+      "thread/read",
+      "thread/settings/update",
+      "thread/queue/add",
+    ]);
+    expect(requests[1]?.params).toEqual({
+      threadId: "thread-1",
+      model: "gpt-5.6-luna",
+      effort: "max",
+    });
+    expect(requests.map(({ method }) => method)).not.toContain("turn/steer");
   });
 
   it("does not start or steer when queue insertion fails", async () => {

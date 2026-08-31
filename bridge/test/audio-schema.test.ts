@@ -67,7 +67,18 @@ describe("watch transcription audio formats", () => {
       threadId: null,
       text: "Keep the legacy wire shape working.",
     };
-    expect(watchPayloadSchema.parse(payload)).toMatchObject({ effort: "medium" });
+    expect(watchPayloadSchema.parse(payload)).toMatchObject({ effort: "medium", followUpAction: "default" });
+  });
+
+  it.each(["queue", "steer"] as const)("accepts a one-shot %s override", (followUpAction) => {
+    expect(watchPayloadSchema.parse({
+      version: 1,
+      kind: "turn.submit",
+      requestId: `request-${followUpAction}`,
+      threadId: "thread-1",
+      text: "Use this one-shot follow-up action.",
+      followUpAction,
+    })).toMatchObject({ followUpAction });
   });
 
   it("bounds the previous draft used for semantic revision", () => {

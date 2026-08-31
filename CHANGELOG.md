@@ -2,7 +2,20 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
-## Unreleased
+## 0.6.7-alpha — 2026-08-31
+
+- Makes a normal Watch Send respect Codex Desktop's current Queue or Steer follow-up preference.
+- Adds a long-press Send chooser with one-shot `Steer now` and `Queue next` actions.
+- Routes active steering through the exact Watch-controlled turn or Codex Desktop's signed same-chat follow-up interface without creating another chat.
+- Keeps queued model/reasoning changes durably pending until the active turn finishes when applying them immediately would alter the wrong turn.
+- Applies the Watch model and reasoning selection as the chat's sticky configuration for the next new turn while steering the current turn with the model it already started with.
+- Keeps the direct queue/start path for idle chats where there is no active turn to steer.
+- Seals a pre-dispatch message baseline with every cross-client handoff and reconciles the original task before retrying after an interrupted acknowledgement, preventing lost or duplicated Watch prompts.
+- Removes delegated-message metadata from Watch chat rendering so the submitted prompt appears normally in the session UI.
+
+### Test status
+
+- All 112 bridge tests, 18 relay tests, and 55 Wear unit tests pass with TypeScript, test-type, Oxlint, debug lint/assembly, release R8, signing, APK metadata, checksum, and OTA-manifest checks. A 454 × 454 round Wear OS 7 emulator verified the blurred Queue/Steer chooser at normal and 10× animation speed without clipping; physical-watch acceptance remains pending.
 
 ## 0.6.6-alpha — 2026-08-31
 

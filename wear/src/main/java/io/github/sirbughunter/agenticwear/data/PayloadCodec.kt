@@ -11,6 +11,7 @@ import io.github.sirbughunter.agenticwear.model.ChatMessageKind
 import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
@@ -43,6 +44,7 @@ object PayloadCodec {
             .put("text", payload.text)
             .put("effort", ReasoningEffortPolicy.normalize(payload.effort))
             .apply { payload.model?.takeIf(::isSafeModelValue)?.let { put("model", it) } }
+            .apply { payload.followUpAction.wireOverride()?.let { put("followUpAction", it) } }
             .toString()
         is BridgePayload.ApprovalResponse -> JSONObject()
             .put("version", 1)
@@ -531,6 +533,9 @@ object PayloadCodec {
     private const val MAX_CHAT_MESSAGES = 12
     private const val MAX_CHAT_MESSAGE_CHARS = 6_000
 }
+
+internal fun FollowUpAction.wireOverride(): String? =
+    wireValue.takeUnless { this == FollowUpAction.DEFAULT }
 
 internal fun fullAlertDetail(value: String): String = value.trim().replace(Regex("\\s+"), " ")
 
