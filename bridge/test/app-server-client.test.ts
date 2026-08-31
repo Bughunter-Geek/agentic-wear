@@ -171,6 +171,40 @@ describe("AppServerClient session delivery", () => {
     expect(methods).not.toContain("thread/queue/start");
   });
 
+  it("keeps an accepted dormant queue item when the owning client retains the writer", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      if (method === "thread/resume") {
+        return Promise.reject(new Error("thread thread-1 already has an active writer"));
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Continue when the owning client is ready.",
+      "/tmp",
+      null,
+      "medium",
+      "watch-owner-held-1",
+    )).resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(methods).toEqual([
+      "thread/read",
+      "thread/turns/list",
+      "thread/queue/add",
+      "thread/resume",
+    ]);
+    expect(methods).not.toContain("thread/queue/delete");
+    expect(internals.controlledThreads.has("thread-1")).toBe(false);
+  });
+
   it("recognizes resume auto-start without retrying the Watch message", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;

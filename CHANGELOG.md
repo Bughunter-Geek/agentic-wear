@@ -4,6 +4,19 @@ Every public build remains an Alpha GitHub Pre-release until the project is expl
 
 ## Unreleased
 
+## 0.6.4-alpha — 2026-08-31
+
+This is a public Alpha prerelease for remote OTA testing. The retained-writer failure is reproduced and covered by regression tests; physical Pixel Watch acceptance remains pending.
+
+- Keeps a Watch prompt in Codex's accepted cross-client queue when an idle task is still owned by Desktop or mobile and the private bridge is therefore forbidden to resume it.
+- Stops deleting that already-accepted prompt and falsely reporting it as unsent. The owning Codex client can process the queued turn without Agentic Wear stealing its writer.
+- Preserves the 0.6.3 direct wake/start path when no other client owns the idle task, and continues queueing behind genuinely active foreign turns.
+
+### Test status
+
+- The bridge regression suite reproduces the exact `already has an active writer` response after queue acceptance and verifies that the bridge acknowledges the Watch request without calling queue deletion or taking ownership.
+- All 87 bridge tests, 18 relay tests, 53 Wear tests, TypeScript/Oxlint, release lint, R8, and signed code-30 assembly pass. The APK package/version, signing certificate, size, and SHA-256 manifest fields were verified; physical OTA acceptance remains unverified for this Alpha.
+
 ## 0.6.3-alpha — 2026-08-31
 
 This is a public Alpha prerelease for remote OTA testing. Automated checks pass and an independent-client harness verifies the repaired resume/start handoff; physical Pixel Watch acceptance remains pending.

@@ -336,7 +336,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     const initialized = initializeResponseSchema.parse(await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.3" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.4" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -569,6 +569,15 @@ export class AppServerClient {
       this.controlledTurnIds.set(threadId, started.turn.id);
       this.watchReadyThreads.add(threadId);
     } catch (error) {
+      // queue/add already committed the Watch request. An idle foreign task can
+      // still have a writer retained by Desktop or mobile, so this private App
+      // Server is not allowed to resume it. Keep the accepted queue item for
+      // that owning client instead of deleting it and falsely reporting the
+      // prompt as unsent.
+      if (!startAttempted && isActiveWriterError(error)) {
+        this.watchReadyThreads.add(threadId);
+        return;
+      }
       const deleted = await this.request("thread/queue/delete", {
         threadId,
         queuedSubmissionId,
@@ -1428,6 +1437,11 @@ function safeError(error: unknown): string {
 
 function isTransientThreadAvailabilityError(error: unknown): boolean {
   return /not found|no rollout|not available|temporarily unavailable|cancel(?:led|ed)/iu
+    .test(error instanceof Error ? error.message : "");
+}
+
+function isActiveWriterError(error: unknown): boolean {
+  return /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|another (?:Codex )?client|owns this session/iu
     .test(error instanceof Error ? error.message : "");
 }
 
