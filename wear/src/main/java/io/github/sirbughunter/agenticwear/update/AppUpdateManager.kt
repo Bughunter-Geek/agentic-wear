@@ -10,10 +10,17 @@ import io.github.sirbughunter.agenticwear.BuildConfig
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
 
 enum class UpdateStage { IDLE, CHECKING, AVAILABLE, DOWNLOADING, READY, CURRENT, ERROR }
@@ -37,18 +44,110 @@ data class UpdateUiState(
 internal fun isMissingUpdateManifest(status: Int): Boolean =
     status == HttpURLConnection.HTTP_NOT_FOUND
 
+internal fun updateManifestCandidates(primary: String, fallback: String): List<String> =
+    listOf(primary, fallback).map(String::trim).filter(String::isNotEmpty).distinct()
+
+internal fun newestAvailableRelease(releases: Iterable<AppRelease>, installedVersionCode: Int): AppRelease? =
+    releases.maxByOrNull(AppRelease::versionCode)?.takeIf { it.versionCode > installedVersionCode }
+
 class AppUpdateManager(private val context: Context) {
-    val enabled: Boolean = BuildConfig.UPDATE_MANIFEST_URL.isNotBlank()
+    private val manifestUrls = updateManifestCandidates(
+        BuildConfig.UPDATE_MANIFEST_URL,
+        BuildConfig.UPDATE_MANIFEST_FALLBACK_URL,
+    ).map(::validatedUrl)
+    private val updatePreferences = context.getSharedPreferences(UPDATE_PREFERENCES, Context.MODE_PRIVATE)
+    private val activeChecks = ConcurrentHashMap.newKeySet<ManifestCheckRun>()
+    val enabled: Boolean = manifestUrls.isNotEmpty()
+
+    fun cachedRelease(): AppRelease? {
+        val encoded = updatePreferences.getString(KEY_CACHED_RELEASE, null) ?: return null
+        val baseUrl = manifestUrls.firstOrNull() ?: return null
+        val release = runCatching { parseManifest(encoded, baseUrl) }.getOrNull()
+        if (release == null || release.versionCode <= BuildConfig.VERSION_CODE) {
+            updatePreferences.edit().remove(KEY_CACHED_RELEASE).apply()
+            return null
+        }
+        return release
+    }
+
+    fun cancelActiveChecks() {
+        activeChecks.toList().forEach(ManifestCheckRun::cancel)
+    }
 
     fun checkForUpdate(): AppRelease? {
         check(enabled) { "App updates are not configured for this build" }
-        val manifestUrl = validatedUrl(BuildConfig.UPDATE_MANIFEST_URL)
-        val connection = openManifestConnection(manifestUrl) ?: return null
-        val body = connection.useConnection {
-            readLimited(it, MAX_MANIFEST_BYTES).toString(Charsets.UTF_8)
+        val check = ManifestCheckRun()
+        activeChecks += check
+        val executor = Executors.newFixedThreadPool(manifestUrls.size) { task ->
+            Thread(task, "agentic-wear-ota-${UPDATE_THREAD_SEQUENCE.incrementAndGet()}").apply {
+                isDaemon = true
+            }
         }
-        val release = parseManifest(body, manifestUrl)
-        return release.takeIf { it.versionCode > BuildConfig.VERSION_CODE }
+        val completion = ExecutorCompletionService<ManifestAttempt>(executor)
+        val futures = manifestUrls.map { manifestUrl ->
+            completion.submit { fetchManifest(manifestUrl, check) }
+        }
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CHECK_DEADLINE_MS)
+        var completed = 0
+        var validNoUpdate = false
+        var lastError: IOException? = null
+        try {
+            while (completed < futures.size) {
+                val remainingNanos = deadlineNanos - System.nanoTime()
+                if (remainingNanos <= 0L) break
+                val finished = completion.poll(remainingNanos, TimeUnit.NANOSECONDS) ?: break
+                completed += 1
+                val attempt = finished.get()
+                attempt.release?.let { release ->
+                    if (release.versionCode > BuildConfig.VERSION_CODE) {
+                        rememberRelease(release)
+                        return release
+                    }
+                    validNoUpdate = true
+                }
+                if (attempt.missing) validNoUpdate = true
+                if (attempt.error != null) lastError = attempt.error
+            }
+            cachedRelease()?.let { return it }
+            if (validNoUpdate) return null
+            if (completed < futures.size) {
+                throw SocketTimeoutException("Update check timed out. Tap to retry.")
+            }
+            throw IOException("Could not contact either update source", lastError)
+        } finally {
+            check.cancel()
+            activeChecks.remove(check)
+            futures.forEach { it.cancel(true) }
+            executor.shutdownNow()
+        }
+    }
+
+    private fun fetchManifest(manifestUrl: URL, check: ManifestCheckRun): ManifestAttempt = try {
+        val connection = openManifestConnection(manifestUrl, check)
+            ?: return ManifestAttempt(missing = true)
+        val body = try {
+            connection.useConnection {
+                readLimited(it, MAX_MANIFEST_BYTES).toString(Charsets.UTF_8)
+            }
+        } finally {
+            check.forget(connection)
+        }
+        ManifestAttempt(release = parseManifest(body, manifestUrl))
+    } catch (error: IOException) {
+        ManifestAttempt(error = error)
+    } catch (error: Throwable) {
+        ManifestAttempt(error = IOException("Update source failed", error))
+    }
+
+    private fun rememberRelease(release: AppRelease) {
+        val encoded = JSONObject()
+            .put("versionCode", release.versionCode)
+            .put("versionName", release.versionName)
+            .put("apkUrl", release.apkUrl)
+            .put("sha256", release.sha256)
+            .apply { release.apkSize?.let { put("apkSize", it) } }
+            .toString()
+        updatePreferences.edit().putString(KEY_CACHED_RELEASE, encoded).commit()
     }
 
     fun download(release: AppRelease, onProgress: (Int) -> Unit): File {
@@ -156,13 +255,19 @@ class AppUpdateManager(private val context: Context) {
             ?: error("Only update manifests may be absent")
     }
 
-    private fun openManifestConnection(initialUrl: URL): HttpURLConnection? =
-        openConnectionOrNull(initialUrl, "application/json", missingManifestIsNoUpdate = true)
+    private fun openManifestConnection(initialUrl: URL, check: ManifestCheckRun): HttpURLConnection? =
+        openConnectionOrNull(
+            initialUrl,
+            "application/vnd.github.raw+json, application/json",
+            missingManifestIsNoUpdate = true,
+            manifestCheck = check,
+        )
 
     private fun openConnectionOrNull(
         initialUrl: URL,
         accept: String,
         missingManifestIsNoUpdate: Boolean,
+        manifestCheck: ManifestCheckRun? = null,
     ): HttpURLConnection? {
         var current = initialUrl
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
@@ -175,10 +280,12 @@ class AppUpdateManager(private val context: Context) {
                 setRequestProperty("Accept", accept)
                 setRequestProperty("User-Agent", "Agentic-Wear/${BuildConfig.VERSION_NAME}")
             }
+            manifestCheck?.remember(connection)
             val status = connection.responseCode
             if (status in REDIRECT_CODES) {
                 val location = connection.getHeaderField("Location")
                 connection.disconnect()
+                manifestCheck?.forget(connection)
                 if (redirectCount == MAX_REDIRECTS || location.isNullOrBlank()) {
                     throw IOException("Update server redirected too many times")
                 }
@@ -187,10 +294,12 @@ class AppUpdateManager(private val context: Context) {
             } else {
                 if (missingManifestIsNoUpdate && isMissingUpdateManifest(status)) {
                     connection.disconnect()
+                    manifestCheck?.forget(connection)
                     return null
                 }
                 if (status !in 200..299) {
                     connection.disconnect()
+                    manifestCheck?.forget(connection)
                     throw IOException("Update server returned HTTP $status")
                 }
                 return connection
@@ -267,11 +376,47 @@ class AppUpdateManager(private val context: Context) {
 
     private companion object {
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        const val UPDATE_PREFERENCES = "agentic_wear_update_state"
+        const val KEY_CACHED_RELEASE = "cached_release"
         const val MAX_MANIFEST_BYTES = 64 * 1024
         const val MAX_APK_BYTES = 100L * 1024L * 1024L
-        const val CONNECT_TIMEOUT_MS = 10_000
-        const val READ_TIMEOUT_MS = 30_000
+        const val CONNECT_TIMEOUT_MS = 6_000
+        const val READ_TIMEOUT_MS = 10_000
+        const val CHECK_DEADLINE_MS = 15_000L
         const val MAX_REDIRECTS = 5
         val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
+        val UPDATE_THREAD_SEQUENCE = AtomicInteger()
+    }
+}
+
+private data class ManifestAttempt(
+    val release: AppRelease? = null,
+    val missing: Boolean = false,
+    val error: IOException? = null,
+)
+
+private class ManifestCheckRun {
+    private val connections = ConcurrentHashMap.newKeySet<HttpURLConnection>()
+
+    @Volatile
+    private var cancelled = false
+
+    fun remember(connection: HttpURLConnection) {
+        if (cancelled) throw InterruptedIOException("Update check was replaced")
+        connections += connection
+        if (cancelled && connections.remove(connection)) {
+            connection.disconnect()
+            throw InterruptedIOException("Update check was replaced")
+        }
+    }
+
+    fun forget(connection: HttpURLConnection) {
+        connections.remove(connection)
+    }
+
+    fun cancel() {
+        cancelled = true
+        connections.toList().forEach(HttpURLConnection::disconnect)
+        connections.clear()
     }
 }

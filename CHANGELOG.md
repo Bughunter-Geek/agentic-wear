@@ -4,6 +4,20 @@ Every public build remains an Alpha GitHub Pre-release until the project is expl
 
 ## Unreleased
 
+## 0.6.6-alpha — 2026-08-31
+
+This public Alpha prerelease replaces the single sticky OTA request with a bounded, restartable check and adds update availability to Home.
+
+- Races the GitHub raw manifest and Contents API routes, accepting the first valid newer release.
+- Ends checks after a 15-second overall deadline and lets the checking card restart an in-flight request without force-stopping the app.
+- Persists the last verified newer release so availability survives process restarts and temporary loss of connectivity.
+- Refreshes silently on launch and after returning to the foreground once the refresh interval expires.
+- Shows a mint update status and dedicated Update action on Home without displacing the voice control or navigation actions.
+
+### Test status
+
+- All 54 Wear unit tests, debug lint/assembly, release R8/signing, APK metadata, checksum, and OTA-manifest checks pass. Live emulator validation discovered the real 0.6.5 manifest from an older local build, restored it after an offline force-stop, and confirmed the round Home layout and control semantics without crash logs. Physical Pixel Watch acceptance remains pending.
+
 ## 0.6.5-alpha — 2026-08-31
 
 This is a public Alpha prerelease for remote OTA testing. Automated checks pass; physical Pixel Watch acceptance of the owner-held model-routing flow remains pending.

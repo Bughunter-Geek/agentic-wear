@@ -80,6 +80,10 @@ val configuredUpdateManifestUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_URL")
 val releaseUpdateManifestUrl = configuredUpdateManifestUrl.ifBlank {
     "https://raw.githubusercontent.com/Bughunter-Geek/agentic-wear/ota-alpha/update.json"
 }
+val configuredUpdateManifestFallbackUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_FALLBACK_URL")
+val releaseUpdateManifestFallbackUrl = configuredUpdateManifestFallbackUrl.ifBlank {
+    "https://api.github.com/repos/Bughunter-Geek/agentic-wear/contents/update.json?ref=ota-alpha"
+}
 val configuredReleaseChannel = configured("AGENTIC_WEAR_RELEASE_CHANNEL")
 val releaseChannel = configuredReleaseChannel.ifBlank { "Alpha" }
 val developmentChannel = configuredReleaseChannel.ifBlank { "Development" }
@@ -108,6 +112,7 @@ android {
         buildConfigField("String", "FIREBASE_API_KEY", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_API_KEY", "apiKey")))
         buildConfigField("String", "FIREBASE_SENDER_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_SENDER_ID", "senderId")))
         buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(configuredUpdateManifestUrl))
+        buildConfigField("String", "UPDATE_MANIFEST_FALLBACK_URL", quoted(configuredUpdateManifestFallbackUrl))
         buildConfigField("String", "RELEASE_CHANNEL", quoted(developmentChannel))
     }
 
@@ -131,6 +136,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(releaseUpdateManifestUrl))
+            buildConfigField("String", "UPDATE_MANIFEST_FALLBACK_URL", quoted(releaseUpdateManifestFallbackUrl))
             buildConfigField("String", "RELEASE_CHANNEL", quoted(releaseChannel))
             signingConfig = if (releaseSigningConfigured) signingConfigs.getByName("release") else null
             proguardFiles(

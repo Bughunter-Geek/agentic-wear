@@ -91,6 +91,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private var recordingTimeoutJob: Job? = null
     private var transcriptionTimerJob: Job? = null
     private var chatStreamJob: Job? = null
+    private var updateCheckJob: Job? = null
+    private var updateCheckGeneration = 0L
+    private var lastUpdateCheckStartedAtElapsedRealtime = 0L
     @Volatile
     private var transcriptionStartedAtElapsedRealtime: Long? = null
     @Volatile
@@ -119,6 +122,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun onForegrounded() {
         foregroundStartedAtMillis = System.currentTimeMillis()
         if (repository.isPaired) refreshInbox()
+        if (updateManager.enabled &&
+            SystemClock.elapsedRealtime() - lastUpdateCheckStartedAtElapsedRealtime >= UPDATE_REFRESH_INTERVAL_MS
+        ) {
+            checkForUpdate(silent = true)
+        }
     }
 
     fun navigate(screen: WearScreen) {
@@ -399,7 +407,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             UpdateStage.IDLE, UpdateStage.CURRENT, UpdateStage.ERROR -> checkForUpdate(silent = false)
             UpdateStage.AVAILABLE -> _state.value.appUpdate.release?.let(::downloadUpdate)
             UpdateStage.READY -> continueInstall()
-            UpdateStage.CHECKING, UpdateStage.DOWNLOADING -> Unit
+            UpdateStage.CHECKING -> checkForUpdate(silent = false, force = true)
+            UpdateStage.DOWNLOADING -> Unit
         }
     }
 
@@ -462,6 +471,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         )
         val normalized = stateName.lowercase()
         val updatePermissionDemo = normalized == "update-permission"
+        val homeUpdateDemo = normalized == "home-update"
         val homeErrorDemo = normalized == "home-error"
         val chatDemo = normalized in setOf("chat", "chat-error", "chat-permission")
         val alert = when (normalized) {
@@ -565,16 +575,20 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             selectedModel = if (normalized == "transcript") models.first().model else null,
             reasoningEffort = if (normalized == "transcript") "high" else ReasoningEffortPolicy.DEFAULT,
             relayUrl = "https://relay.example.workers.dev",
-            appUpdate = if (updatePermissionDemo) {
-                UpdateUiState(
+            appUpdate = when {
+                updatePermissionDemo -> UpdateUiState(
                     enabled = true,
                     stage = UpdateStage.READY,
                     release = AppRelease(8, "0.1.7", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
                     progress = 100,
                     message = "One-time permission needed",
                 )
-            } else {
-                UpdateUiState(enabled = updateManager.enabled)
+                homeUpdateDemo -> UpdateUiState(
+                    enabled = true,
+                    stage = UpdateStage.AVAILABLE,
+                    release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                )
+                else -> UpdateUiState(enabled = updateManager.enabled)
             },
             showInstallPermissionPrompt = updatePermissionDemo,
             error = when {
@@ -704,14 +718,30 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    private fun checkForUpdate(silent: Boolean) {
-        if (!updateManager.enabled || _state.value.appUpdate.stage in setOf(UpdateStage.CHECKING, UpdateStage.DOWNLOADING)) return
-        _state.update { current ->
-            current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.CHECKING, progress = 0, message = null))
+    private fun checkForUpdate(silent: Boolean, force: Boolean = false) {
+        if (!updateManager.enabled || _state.value.appUpdate.stage == UpdateStage.DOWNLOADING) return
+        if (updateCheckJob?.isActive == true) {
+            if (!force) return
+            updateCheckGeneration += 1
+            updateCheckJob?.cancel()
+            updateManager.cancelActiveChecks()
         }
-        viewModelScope.launch(Dispatchers.IO) {
+        val generation = ++updateCheckGeneration
+        val cached = updateManager.cachedRelease()
+        if (!silent || cached == null) {
+            _state.update { current ->
+                current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.CHECKING, progress = 0, message = null))
+            }
+        } else {
+            _state.update { current ->
+                current.copy(appUpdate = UpdateUiState(enabled = true, stage = UpdateStage.AVAILABLE, release = cached))
+            }
+        }
+        lastUpdateCheckStartedAtElapsedRealtime = SystemClock.elapsedRealtime()
+        updateCheckJob = viewModelScope.launch(Dispatchers.IO) {
             runCatching(updateManager::checkForUpdate)
                 .onSuccess { release ->
+                    if (generation != updateCheckGeneration) return@onSuccess
                     _state.update { current ->
                         current.copy(
                             appUpdate = UpdateUiState(
@@ -724,19 +754,26 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
                 .onFailure { error ->
+                    if (generation != updateCheckGeneration) return@onFailure
+                    val verified = updateManager.cachedRelease()
                     _state.update { current ->
-                        current.copy(
-                            appUpdate = if (silent) {
-                                UpdateUiState(enabled = true)
-                            } else {
-                                current.appUpdate.copy(
-                                    stage = UpdateStage.ERROR,
-                                    message = updateErrorMessage(error),
-                                )
-                            },
-                        )
+                        val update = when {
+                            verified != null -> UpdateUiState(
+                                enabled = true,
+                                stage = UpdateStage.AVAILABLE,
+                                release = verified,
+                                message = "Showing the last verified update",
+                            )
+                            silent -> UpdateUiState(enabled = true)
+                            else -> current.appUpdate.copy(
+                                stage = UpdateStage.ERROR,
+                                message = updateErrorMessage(error),
+                            )
+                        }
+                        current.copy(appUpdate = update)
                     }
                 }
+            if (generation == updateCheckGeneration) updateCheckJob = null
         }
     }
 
@@ -957,13 +994,18 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             selectedModel = preferences.selectedModel,
             reasoningEffort = preferences.reasoningEffort,
             relayUrl = preferences.relayUrl,
-            appUpdate = UpdateUiState(enabled = updateManager.enabled),
+            appUpdate = updateManager.cachedRelease()?.let { release ->
+                UpdateUiState(enabled = true, stage = UpdateStage.AVAILABLE, release = release)
+            } ?: UpdateUiState(enabled = updateManager.enabled),
         )
     }
 
     override fun onCleared() {
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
+        updateCheckGeneration += 1
+        updateCheckJob?.cancel()
+        updateManager.cancelActiveChecks()
         deviceSpeech?.destroy()
         stopChatStream()
         getApplication<Application>().unregisterReceiver(stateReceiver)
@@ -972,6 +1014,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     companion object {
         private const val TRANSCRIPTION_TIMER_INTERVAL_MS = 100L
+        private const val UPDATE_REFRESH_INTERVAL_MS = 15L * 60L * 1_000L
         private const val MAX_RECORDING_DURATION_MS = 4L * 60L * 1_000L
         private const val CHAT_POLL_INTERVAL_MS = 1_000L
         private const val CHAT_WATCH_HEARTBEAT_TICKS = 45

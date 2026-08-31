@@ -225,6 +225,7 @@ fun AgenticWearApp(
                     onChat = viewModel::openSelectedChat,
                     onSettings = { viewModel.navigate(WearScreen.SETTINGS) },
                     onAlert = { viewModel.navigate(WearScreen.ALERT) },
+                    onUpdate = viewModel::onUpdateAction,
                 )
                 WearScreen.PAIR -> PairScreen(
                     relayDefault = state.relayUrl,
@@ -397,6 +398,7 @@ private fun HomeScreen(
     onChat: () -> Unit,
     onSettings: () -> Unit,
     onAlert: () -> Unit,
+    onUpdate: () -> Unit,
 ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxHeight < 420.dp
@@ -457,8 +459,21 @@ private fun HomeScreen(
                 enabled = state.isPaired && !state.pending,
                 onToggle = onPushToTalk,
             )
+            val updateOnHome = !state.recording && !state.transcribing && !state.pending &&
+                state.appUpdate.stage in setOf(UpdateStage.AVAILABLE, UpdateStage.DOWNLOADING, UpdateStage.READY)
             Text(
-                text = when {
+                text = if (updateOnHome) {
+                    when (state.appUpdate.stage) {
+                        UpdateStage.AVAILABLE -> "↓ Update ${state.appUpdate.release?.versionName.orEmpty()} available"
+                        UpdateStage.DOWNLOADING -> if (state.appUpdate.progress > 0) {
+                            "Downloading update · ${state.appUpdate.progress}%"
+                        } else {
+                            "Starting update download"
+                        }
+                        UpdateStage.READY -> "✓ Update ready to install"
+                        else -> "Tap to talk"
+                    }
+                } else when {
                     state.recording -> "Tap again to transcribe"
                     state.transcribing -> state.transcriptionElapsedMillis?.let { elapsedMillis ->
                         "Transcribing · ${formatTranscriptionElapsed(elapsedMillis)}"
@@ -467,6 +482,7 @@ private fun HomeScreen(
                     else -> "Tap to talk"
                 },
                 color = when {
+                    updateOnHome -> Mint
                     state.recording -> Cyan
                     state.transcribing -> Violet
                     else -> Muted
@@ -482,6 +498,11 @@ private fun HomeScreen(
                 if (state.latestAlert != null) {
                     MiniAction("Latest", onAlert) {
                         Text("●", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                if (state.appUpdate.stage == UpdateStage.AVAILABLE || state.appUpdate.stage == UpdateStage.READY) {
+                    MiniAction("Update", onUpdate) {
+                        Text(if (state.appUpdate.stage == UpdateStage.READY) "✓" else "↓", color = Mint, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     }
                 }
                 MiniAction("Settings", onSettings) { SettingsGlyph() }
@@ -2840,7 +2861,7 @@ private fun UpdateCard(update: UpdateUiState, onClick: () -> Unit) {
     }
     val subtitle = when (update.stage) {
         UpdateStage.IDLE -> "Signed ${BuildConfig.RELEASE_CHANNEL.lowercase()} builds from GitHub"
-        UpdateStage.CHECKING -> "Contacting the release server"
+        UpdateStage.CHECKING -> "Checking two sources · tap to restart"
         UpdateStage.AVAILABLE -> "Tap to download and install"
         UpdateStage.DOWNLOADING -> if (update.progress > 0) "Verified download · ${update.progress}%" else "Starting verified download"
         UpdateStage.READY -> update.message ?: "Tap to open the system installer"
@@ -2858,7 +2879,7 @@ private fun UpdateCard(update: UpdateUiState, onClick: () -> Unit) {
         UpdateStage.ERROR -> Coral
         else -> Cyan
     }
-    val actionable = update.stage != UpdateStage.CHECKING && update.stage != UpdateStage.DOWNLOADING
+    val actionable = update.stage != UpdateStage.DOWNLOADING
     TactileCard(onClick = onClick, modifier = Modifier.fillMaxWidth(), enabled = actionable) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(

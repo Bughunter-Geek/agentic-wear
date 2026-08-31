@@ -7,13 +7,16 @@ Agentic Wear can update directly on a Wear OS watch without a Google Play develo
 3. On the watch, open **Settings → App updates** and tap the available version.
 4. The first time only, Agentic Wear explains the permission and opens Android's package installer. If Android blocks the update, tap **Settings** in that installer, enable **Install unknown apps** for Agentic Wear, and return. Agentic Wear resumes the verified installer; confirm the update there.
 
-The default release manifest URL is:
+The updater races two default release-manifest routes, so a stalled raw-content request cannot hold the UI indefinitely:
 
 ```text
 https://raw.githubusercontent.com/Bughunter-Geek/agentic-wear/ota-alpha/update.json
+https://api.github.com/repos/Bughunter-Geek/agentic-wear/contents/update.json?ref=ota-alpha
 ```
 
-Override it at build time with `AGENTIC_WEAR_UPDATE_MANIFEST_URL` if the public repository changes.
+Each check has a 15-second overall deadline and can be restarted from the checking card. The last verified newer manifest is stored locally, survives a force-stop or offline relaunch, and is surfaced as an Update action on Home. The app refreshes on launch and after returning to the foreground once the 15-minute refresh interval has elapsed.
+
+Override the routes at build time with `AGENTIC_WEAR_UPDATE_MANIFEST_URL` and `AGENTIC_WEAR_UPDATE_MANIFEST_FALLBACK_URL` if the public repository changes.
 
 ## Prepare a release
 
