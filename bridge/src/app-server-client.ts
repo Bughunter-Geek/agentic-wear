@@ -1034,8 +1034,8 @@ export class AppServerClient {
     }
     if (method === "turn/started") {
       const event = turnStartedSchema.parse(params);
-      if (event.threadId) {
-        this.updateCachedChatStatus(event.threadId, "active");
+      if (event.threadId && this.updateCachedChatStatus(event.threadId, "active")) {
+        await this.onAgentOutput(event.threadId);
       }
       return;
     }
@@ -1132,7 +1132,9 @@ export class AppServerClient {
           const thread = this.threadCache.get(update.data.threadId);
           if (thread) {
             cached.title = threadTitle(thread);
-            cached.status = this.sessionView(thread).status;
+            if (this.updateCachedChatStatus(update.data.threadId, this.sessionView(thread).status)) {
+              await this.onAgentOutput(update.data.threadId);
+            }
           }
         }
       }
@@ -1402,9 +1404,11 @@ export class AppServerClient {
     });
   }
 
-  private updateCachedChatStatus(threadId: string, status: SessionView["status"]): void {
+  private updateCachedChatStatus(threadId: string, status: SessionView["status"]): boolean {
     const cached = this.chatCaches.get(threadId);
-    if (cached) cached.status = status;
+    if (!cached || cached.status === status) return false;
+    cached.status = status;
+    return true;
   }
 
   private resolveCachedPermission(approvalId: string): void {

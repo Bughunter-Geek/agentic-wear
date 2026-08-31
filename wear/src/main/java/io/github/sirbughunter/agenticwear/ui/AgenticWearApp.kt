@@ -2,6 +2,7 @@
 
 package io.github.sirbughunter.agenticwear.ui
 
+import android.animation.ValueAnimator
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -14,6 +15,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -110,9 +112,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.onClick
@@ -866,23 +870,25 @@ private fun PushToTalkOrb(
             ) {
                 val innerRadius = orbDiameter.toPx() / 2f
                 val outerRadius = this.size.minDimension / 2f
-                val fieldWidth = (outerRadius - innerRadius).coerceAtLeast(1f)
-                val fieldRadius = innerRadius + fieldWidth / 2f
-                drawCircle(
-                    color = Coral.copy(alpha = if (cancelPressed) 0.2f else 0.09f),
-                    radius = fieldRadius,
-                    style = Stroke(width = fieldWidth + 12.dp.toPx()),
-                )
+                val haloRadius = outerRadius * 1.28f
+                val orbEdgeStop = (innerRadius / haloRadius).coerceIn(0.3f, 0.7f)
+                val peakAlpha = if (cancelPressed) 0.28f else 0.2f
                 drawCircle(
                     brush = Brush.radialGradient(
-                        listOf(
-                            Coral.copy(alpha = if (cancelPressed) 0.34f else 0.24f),
-                            Color(0xFFFF8A92).copy(alpha = if (cancelPressed) 0.25f else 0.16f),
-                            Coral.copy(alpha = 0.08f),
+                        colorStops = arrayOf(
+                            0f to Coral.copy(alpha = peakAlpha * 0.62f),
+                            (orbEdgeStop - 0.05f).coerceAtLeast(0f) to
+                                Color(0xFFFF7A84).copy(alpha = peakAlpha),
+                            (orbEdgeStop + 0.16f).coerceAtMost(0.82f) to
+                                Coral.copy(alpha = peakAlpha * 0.55f),
+                            0.82f to Coral.copy(alpha = peakAlpha * 0.18f),
+                            0.94f to Coral.copy(alpha = peakAlpha * 0.045f),
+                            1f to Color.Transparent,
                         ),
+                        center = center,
+                        radius = haloRadius,
                     ),
-                    radius = fieldRadius,
-                    style = Stroke(width = fieldWidth),
+                    radius = haloRadius,
                 )
             }
         }
@@ -905,16 +911,6 @@ private fun PushToTalkOrb(
                 .size(size)
                 .graphicsLayer { scaleX = scale; scaleY = scale }
                 .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        listOf(Color(0xFF43466F), Color(0xFF262940), Color(0xFF121522)),
-                    ),
-                )
-                .border(
-                    1.5.dp,
-                    Brush.sweepGradient(listOf(Cyan, Violet, Color(0xFF34384D), Cyan)),
-                    CircleShape,
-                )
                 .semantics {
                     contentDescription = when {
                         recording -> "Stop recording and transcribe"
@@ -939,6 +935,12 @@ private fun PushToTalkOrb(
                 .alpha(if (enabled) 1f else 0.55f),
             contentAlignment = Alignment.Center,
         ) {
+            VoiceTranscriptionSurface(
+                recording = recording,
+                transcribing = transcribing,
+                voiceLevel = activity,
+                modifier = Modifier.fillMaxSize(),
+            )
             AgentGlyph(
                 recording = recording,
                 pending = pending,
@@ -946,6 +948,93 @@ private fun PushToTalkOrb(
                 modifier = Modifier.size(size * 0.48f),
             )
         }
+    }
+}
+
+@Composable
+private fun VoiceTranscriptionSurface(
+    recording: Boolean,
+    transcribing: Boolean,
+    voiceLevel: Float,
+    modifier: Modifier = Modifier,
+) {
+    val activity = voiceLevel.coerceIn(0f, 1f)
+    val stateAccent = when {
+        recording -> Cyan
+        transcribing -> Violet
+        else -> Frost
+    }
+    Canvas(modifier) {
+        val diameter = size.minDimension
+        val radius = diameter / 2f
+        val centerPoint = center
+        val rimWidth = diameter * 0.018f
+
+        drawCircle(
+            brush = Brush.radialGradient(
+                colorStops = arrayOf(
+                    0f to Color(0xFF3E4368),
+                    0.46f to Color(0xFF292D49),
+                    0.78f to Color(0xFF181B2B),
+                    1f to Color(0xFF0E1018),
+                ),
+                center = Offset(diameter * 0.38f, diameter * 0.3f),
+                radius = diameter * 0.82f,
+            ),
+            radius = radius,
+            center = centerPoint,
+        )
+
+        drawCircle(
+            brush = Brush.radialGradient(
+                colorStops = arrayOf(
+                    0f to stateAccent.copy(alpha = 0.2f + activity * 0.08f),
+                    0.42f to Violet.copy(alpha = if (transcribing) 0.14f else 0.07f),
+                    0.76f to Color.Transparent,
+                    1f to Color.Transparent,
+                ),
+                center = centerPoint,
+                radius = radius * 0.82f,
+            ),
+            radius = radius * 0.82f,
+            center = centerPoint,
+        )
+
+        drawCircle(
+            brush = Brush.sweepGradient(
+                colorStops = arrayOf(
+                    0f to Cyan.copy(alpha = 0.96f),
+                    0.2f to Frost.copy(alpha = 0.58f),
+                    0.48f to Color(0xFF434762).copy(alpha = 0.7f),
+                    0.72f to Violet.copy(alpha = 0.94f),
+                    1f to Cyan.copy(alpha = 0.96f),
+                ),
+                center = centerPoint,
+            ),
+            radius = radius - rimWidth,
+            center = centerPoint,
+            style = Stroke(width = rimWidth, cap = StrokeCap.Round),
+        )
+
+        drawArc(
+            brush = Brush.sweepGradient(
+                listOf(Color.Transparent, Frost.copy(alpha = 0.68f), Cyan.copy(alpha = 0.5f), Color.Transparent),
+                center = centerPoint,
+            ),
+            startAngle = 205f,
+            sweepAngle = 112f,
+            useCenter = false,
+            topLeft = Offset(rimWidth * 2.2f, rimWidth * 2.2f),
+            size = Size(diameter - rimWidth * 4.4f, diameter - rimWidth * 4.4f),
+            style = Stroke(width = rimWidth * 0.72f, cap = StrokeCap.Round),
+        )
+
+        drawCircle(
+            color = Color(0xFF080A10).copy(alpha = 0.34f),
+            radius = radius * 0.57f,
+            center = centerPoint,
+            style = Stroke(width = rimWidth * 0.72f),
+        )
     }
 }
 
@@ -2290,9 +2379,14 @@ private fun ChatScreen(
     val voiceReplyHaze = rememberHazeState(blurEnabled = true)
     val chat = state.chat
     val messages = chat?.messages.orEmpty()
+    val hasPendingPermission = messages.any { message ->
+        message.kind == ChatMessageKind.PERMISSION && !message.resolved
+    }
     val hasActionablePermission = messages.any { message ->
         message.kind == ChatMessageKind.PERMISSION && message.canControl && !message.resolved
     }
+    val agentThinking = chat?.status == SessionStatus.ACTIVE &&
+        !hasPendingPermission && state.error == null
     val showRoundEdgeAction = isRound && !hasActionablePermission
     val nearLatest by remember {
         derivedStateOf {
@@ -2302,12 +2396,15 @@ private fun ChatScreen(
     }
     var positionedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
     var previousMessageCount by remember { mutableStateOf(0) }
-    LaunchedEffect(chat?.threadId, messages.size) {
+    var previousAgentThinking by remember { mutableStateOf(false) }
+    LaunchedEffect(chat?.threadId, messages.size, agentThinking) {
         val currentThreadId = chat?.threadId ?: return@LaunchedEffect
         val firstPosition = positionedThreadId != currentThreadId
         val appendedWhileFollowing = messages.size > previousMessageCount && nearLatest
+        val thinkingStarted = agentThinking && !previousAgentThinking
         previousMessageCount = messages.size
-        if (firstPosition || appendedWhileFollowing) {
+        previousAgentThinking = agentThinking
+        if (firstPosition || appendedWhileFollowing || thinkingStarted) {
             delay(1)
             val lastIndex = listState.layoutInfo.totalItemsCount - 1
             if (lastIndex >= 0) listState.scrollToItem(lastIndex)
@@ -2423,6 +2520,13 @@ private fun ChatScreen(
                         onRateMessage = onRateMessage,
                         onPermissionResponse = onPermissionResponse,
                         modifier = Modifier.padding(bottom = if (sameCluster) 5.dp else 12.dp),
+                    )
+                }
+            }
+            if (agentThinking) {
+                item(key = "agent-thinking") {
+                    AgentThinkingIndicator(
+                        modifier = Modifier.padding(bottom = 12.dp),
                     )
                 }
             }
@@ -2542,6 +2646,98 @@ private fun ChatScreen(
                         modifier = Modifier.size(22.dp),
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentThinkingIndicator(modifier: Modifier = Modifier) {
+    val animationsEnabled = ValueAnimator.areAnimatorsEnabled()
+    val transition = rememberInfiniteTransition(label = "agent thinking")
+    val shape = RoundedCornerShape(18.dp)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(
+                Brush.horizontalGradient(
+                    listOf(
+                        Violet.copy(alpha = 0.15f),
+                        PanelRaised.copy(alpha = 0.92f),
+                        Cyan.copy(alpha = 0.08f),
+                    ),
+                ),
+            )
+            .border(1.dp, Violet.copy(alpha = 0.42f), shape)
+            .semantics {
+                stateDescription = "Agent is thinking"
+                liveRegion = LiveRegionMode.Polite
+            }
+            .padding(horizontal = 9.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(25.dp)
+                .clip(CircleShape)
+                .background(Ink.copy(alpha = 0.72f))
+                .border(1.dp, Cyan.copy(alpha = 0.38f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            AgentGlyph(
+                recording = false,
+                pending = true,
+                modifier = Modifier.size(15.dp),
+            )
+        }
+        Text(
+            "Agent is thinking",
+            color = Frost,
+            fontSize = 10.sp,
+            lineHeight = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.clearAndSetSemantics { },
+        ) {
+            repeat(3) { index ->
+                val delayMillis = index * 120
+                val pulse by if (animationsEnabled) {
+                    transition.animateFloat(
+                        initialValue = 0.46f,
+                        targetValue = 0.46f,
+                        animationSpec = infiniteRepeatable(
+                            animation = keyframes {
+                                durationMillis = 960
+                                0.46f at 0
+                                0.46f at delayMillis
+                                1f at delayMillis + 140 using AgenticEaseOut
+                                0.46f at delayMillis + 300 using AgenticEaseInOut
+                                0.46f at 960
+                            },
+                            repeatMode = RepeatMode.Restart,
+                        ),
+                        label = "thinking dot $index",
+                    )
+                } else {
+                    remember { mutableFloatStateOf(0.72f) }
+                }
+                Box(
+                    Modifier
+                        .size(if (index == 1) 5.dp else 4.dp)
+                        .graphicsLayer {
+                            alpha = 0.3f + pulse * 0.7f
+                            scaleX = 0.82f + pulse * 0.18f
+                            scaleY = scaleX
+                        }
+                        .clip(CircleShape)
+                        .background(if (index == 1) Violet else Cyan),
+                )
             }
         }
     }

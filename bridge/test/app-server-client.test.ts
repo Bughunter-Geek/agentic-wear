@@ -1358,6 +1358,62 @@ describe("AppServerClient session delivery", () => {
     expect(internals.controlledThreads.size).toBe(0);
   });
 
+  it("streams the active indicator as soon as an observed turn starts", async () => {
+    const onAgentOutput = vi.fn().mockResolvedValue(undefined);
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      onAgentOutput,
+    );
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/turns/list") return Promise.resolve({ data: [], nextCursor: null, backwardsCursor: null });
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.chatSnapshot("thread-1");
+    await internals.handleNotification("turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-1" },
+    });
+
+    expect(onAgentOutput).toHaveBeenCalledWith("thread-1");
+    await expect(target.chatSnapshot("thread-1")).resolves.toMatchObject({ status: "active" });
+  });
+
+  it("streams observed thread status changes without waiting for the idle poll", async () => {
+    const onAgentOutput = vi.fn().mockResolvedValue(undefined);
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      onAgentOutput,
+    );
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/turns/list") return Promise.resolve({ data: [], nextCursor: null, backwardsCursor: null });
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/list") return Promise.resolve({ data: [thread("active")], nextCursor: null });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.chatSnapshot("thread-1");
+    await internals.handleNotification("thread/status/changed", {
+      threadId: "thread-1",
+      status: { type: "active" },
+    });
+
+    expect(onAgentOutput).toHaveBeenCalledWith("thread-1");
+    expect(internals.controlledThreads.size).toBe(0);
+    await expect(target.chatSnapshot("thread-1")).resolves.toMatchObject({ status: "active" });
+  });
+
   it("does not start a foreign-thread prompt when its sticky settings update fails", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
