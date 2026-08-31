@@ -48,4 +48,18 @@ class AppPreferencesTest {
             executor.shutdownNow()
         }
     }
+
+    @Test
+    fun `cancelled transcription ids are deduplicated and bounded`() {
+        val existing = (1..16).map { "request-$it" }
+
+        assertEquals(
+            (2..16).map { "request-$it" } + "request-17",
+            appendBoundedRequestId(existing, "request-17"),
+        )
+        assertEquals(
+            (1..15).map { "request-$it" } + "request-16",
+            appendBoundedRequestId(existing, "request-16"),
+        )
+    }
 }

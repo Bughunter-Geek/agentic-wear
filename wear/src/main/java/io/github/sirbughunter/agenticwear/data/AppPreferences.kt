@@ -118,6 +118,36 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_PENDING_TURN_REQUEST, null)
         set(value) = prefs.edit { putString(KEY_PENDING_TURN_REQUEST, value) }
 
+    var pendingTranscriptionRequestId: String?
+        get() = prefs.getString(KEY_PENDING_TRANSCRIPTION_REQUEST, null)
+        set(value) = prefs.edit { putString(KEY_PENDING_TRANSCRIPTION_REQUEST, value) }
+
+    fun markTranscriptionCancelled(requestId: String) {
+        if (!isSafeModel(requestId)) return
+        synchronized(cancelledTranscriptionLock) {
+            val updated = appendBoundedRequestId(cancelledTranscriptionRequestIds(), requestId)
+            prefs.edit(commit = true) {
+                putString(KEY_CANCELLED_TRANSCRIPTION_REQUESTS, JSONArray(updated).toString())
+            }
+        }
+    }
+
+    fun isTranscriptionCancelled(requestId: String): Boolean = synchronized(cancelledTranscriptionLock) {
+        requestId in cancelledTranscriptionRequestIds()
+    }
+
+    fun consumeCancelledTranscription(requestId: String): Boolean = synchronized(cancelledTranscriptionLock) {
+        val current = cancelledTranscriptionRequestIds()
+        if (requestId !in current) return@synchronized false
+        prefs.edit(commit = true) {
+            putString(
+                KEY_CANCELLED_TRANSCRIPTION_REQUESTS,
+                JSONArray(current.filterNot { it == requestId }).toString(),
+            )
+        }
+        true
+    }
+
     var pendingChatRequestId: String?
         get() = prefs.getString(KEY_PENDING_CHAT_REQUEST, null)
         set(value) = prefs.edit { putString(KEY_PENDING_CHAT_REQUEST, value) }
@@ -165,6 +195,15 @@ class AppPreferences(context: Context) {
         prefs.getString(KEY_ALERTS, "[]").orEmpty(),
     )
 
+    private fun cancelledTranscriptionRequestIds(): List<String> = runCatching {
+        val values = JSONArray(prefs.getString(KEY_CANCELLED_TRANSCRIPTION_REQUESTS, "[]").orEmpty())
+        buildList {
+            for (index in 0 until values.length()) {
+                values.optString(index).takeIf(::isSafeModel)?.let(::add)
+            }
+        }
+    }.getOrDefault(emptyList())
+
     private fun encodeTranscript(transcript: Transcript): String = JSONObject()
         .put("requestId", transcript.requestId)
         .put("text", transcript.text)
@@ -200,6 +239,8 @@ class AppPreferences(context: Context) {
         private const val KEY_CHAT_SNAPSHOT = "chat_snapshot"
         private const val KEY_CHAT_FEEDBACK = "chat_feedback"
         private const val KEY_PENDING_TURN_REQUEST = "pending_turn_request"
+        private const val KEY_PENDING_TRANSCRIPTION_REQUEST = "pending_transcription_request"
+        private const val KEY_CANCELLED_TRANSCRIPTION_REQUESTS = "cancelled_transcription_requests"
         private const val KEY_PENDING_CHAT_REQUEST = "pending_chat_request"
         private const val KEY_PENDING_FEEDBACK_REQUEST = "pending_feedback_request"
         private const val KEY_PENDING_APPROVAL_REQUEST = "pending_approval_request"
@@ -217,6 +258,13 @@ private fun isSafeModel(value: String): Boolean = value.length in 1..128 &&
     value.all { it.isLetterOrDigit() || it in "-_.:/" }
 
 private val handledEventClaimLock = Any()
+private val cancelledTranscriptionLock = Any()
+
+internal fun appendBoundedRequestId(
+    existing: List<String>,
+    requestId: String,
+    limit: Int = 16,
+): List<String> = (existing.filterNot { it == requestId } + requestId).takeLast(limit)
 
 internal fun claimHandledEvent(
     eventId: String,

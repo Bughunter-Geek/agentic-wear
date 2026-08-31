@@ -21,6 +21,7 @@ import io.github.sirbughunter.agenticwear.MainActivity
 import io.github.sirbughunter.agenticwear.R
 import io.github.sirbughunter.agenticwear.data.AgenticWearRepository
 import io.github.sirbughunter.agenticwear.data.AppPreferences
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,7 @@ data class VoiceSessionSnapshot(
     val phase: VoiceSessionPhase = VoiceSessionPhase.IDLE,
     val voiceLevel: Float = 0f,
     val transcriptionStartedAtElapsedRealtime: Long? = null,
+    val transcriptionRequestId: String? = null,
     val error: String? = null,
 )
 
@@ -136,9 +138,11 @@ class VoiceSessionService : Service() {
         }
 
         val startedAt = SystemClock.elapsedRealtime()
+        val requestId = UUID.randomUUID().toString()
         _sessionState.value = VoiceSessionSnapshot(
             phase = VoiceSessionPhase.TRANSCRIBING,
             transcriptionStartedAtElapsedRealtime = startedAt,
+            transcriptionRequestId = requestId,
         )
         promoteToForeground(transcribing = true)
         transcriptionJob = serviceScope.launch(Dispatchers.IO) {
@@ -146,6 +150,7 @@ class VoiceSessionService : Service() {
                 repository.transcribe(
                     audioFile = audio,
                     threadId = activeThreadId,
+                    requestId = requestId,
                     notifyAfterMillis = notifyAfterMillis,
                 )
                 finishService()

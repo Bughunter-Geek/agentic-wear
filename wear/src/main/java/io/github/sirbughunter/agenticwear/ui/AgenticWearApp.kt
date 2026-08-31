@@ -12,13 +12,16 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -107,10 +110,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
@@ -148,9 +153,18 @@ import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import io.github.sirbughunter.agenticwear.update.UpdateStage
 import io.github.sirbughunter.agenticwear.update.UpdateUiState
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
+import kotlin.math.hypot
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.ButtonDefaults
 import androidx.wear.compose.material3.Button
@@ -237,6 +251,7 @@ fun AgenticWearApp(
                 WearScreen.HOME -> HomeScreen(
                     state = state,
                     onPushToTalk = onPushToTalk,
+                    onCancelVoiceRequest = viewModel::cancelVoiceRequest,
                     onSessions = { viewModel.navigate(WearScreen.SESSIONS) },
                     onChat = viewModel::openSelectedChat,
                     onSettings = { viewModel.navigate(WearScreen.SETTINGS) },
@@ -410,16 +425,19 @@ private fun InstallPermissionPrompt(
 private fun HomeScreen(
     state: WearUiState,
     onPushToTalk: () -> Unit,
+    onCancelVoiceRequest: () -> Unit,
     onSessions: () -> Unit,
     onChat: () -> Unit,
     onSettings: () -> Unit,
     onAlert: () -> Unit,
     onUpdate: () -> Unit,
 ) {
+    val haptics = LocalHapticFeedback.current
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxHeight < 420.dp
         val isRound = LocalConfiguration.current.isScreenRound
         val compactSquare = compact && !isRound
+        val voiceRequestActive = state.recording || state.transcribing
         val updateOnHome = !state.recording && !state.transcribing && !state.pending &&
             state.appUpdate.stage in setOf(UpdateStage.AVAILABLE, UpdateStage.DOWNLOADING, UpdateStage.READY)
         val orbSize = when {
@@ -438,7 +456,30 @@ private fun HomeScreen(
         } else {
             if (compact) 0.dp else 12.dp
         }
-        val dockReservedHeight = IconButtonDefaults.SmallButtonSize + dockBottomPadding
+        val dockReservedHeight by animateDpAsState(
+            targetValue = if (voiceRequestActive) {
+                0.dp
+            } else {
+                IconButtonDefaults.SmallButtonSize + dockBottomPadding
+            },
+            animationSpec = tween(
+                durationMillis = if (voiceRequestActive) 160 else 100,
+                easing = AgenticEaseOut,
+            ),
+            label = "home dock reserved height",
+        )
+        if (voiceRequestActive) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(onCancelVoiceRequest) {
+                        detectTapGestures {
+                            haptics.performHapticFeedback(HapticFeedbackType.Reject)
+                            onCancelVoiceRequest()
+                        }
+                    },
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -446,10 +487,26 @@ private fun HomeScreen(
                 .padding(bottom = dockReservedHeight),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(if (compact) 0.dp else 22.dp))
-            if (!compactSquare || !updateOnHome) {
-                ConnectionPill(connected = state.isPaired, dense = compactSquare)
-                Spacer(Modifier.height(if (compactSquare) 1.dp else if (compact) 2.dp else 8.dp))
+            Spacer(
+                Modifier.height(
+                    when {
+                        compact && isRound -> 8.dp
+                        compact -> 0.dp
+                        else -> 22.dp
+                    },
+                ),
+            )
+            AnimatedVisibility(
+                visible = !voiceRequestActive && (!compactSquare || !updateOnHome),
+                enter = fadeIn(tween(160, easing = AgenticEaseOut)) +
+                    expandVertically(tween(160, easing = AgenticEaseOut), expandFrom = Alignment.Top),
+                exit = fadeOut(tween(100, easing = AgenticEaseOut)) +
+                    shrinkVertically(tween(100, easing = AgenticEaseOut), shrinkTowards = Alignment.Top),
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    ConnectionPill(connected = state.isPaired, dense = compactSquare)
+                    Spacer(Modifier.height(if (compactSquare) 1.dp else if (compact) 2.dp else 8.dp))
+                }
             }
             HomeSessionButton(
                 session = state.selectedSession,
@@ -466,6 +523,7 @@ private fun HomeScreen(
                 voiceLevel = state.voiceLevel,
                 enabled = state.isPaired && !state.pending,
                 onToggle = onPushToTalk,
+                onCancel = onCancelVoiceRequest,
             )
             if (updateOnHome) {
                 HomeUpdateStatus(update = state.appUpdate, concise = compactSquare, onClick = onUpdate)
@@ -487,18 +545,46 @@ private fun HomeScreen(
                     fontSize = if (compactSquare) 10.sp else 12.sp,
                     fontWeight = FontWeight.Medium,
                 )
+                if (state.recording || state.transcribing) {
+                    Text(
+                        text = "Tap outside to cancel",
+                        color = Coral,
+                        fontSize = if (compactSquare) 8.sp else 9.sp,
+                        lineHeight = if (compactSquare) 9.sp else 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
-            Spacer(Modifier.height(if (compact) 1.dp else 5.dp))
+            Spacer(
+                Modifier.height(
+                    when {
+                        voiceRequestActive && compact && isRound -> 20.dp
+                        voiceRequestActive && compact -> 8.dp
+                        voiceRequestActive -> 12.dp
+                        compact -> 1.dp
+                        else -> 5.dp
+                    },
+                ),
+            )
         }
-        HomeActionDock(
-            showLatest = state.latestAlert != null,
-            onSessions = onSessions,
-            onLatest = onAlert,
-            onSettings = onSettings,
+        AnimatedVisibility(
+            visible = !voiceRequestActive,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = dockBottomPadding),
-        )
+            enter = fadeIn(tween(160, easing = AgenticEaseOut)) +
+                slideInVertically(tween(160, easing = AgenticEaseOut)) { it / 8 },
+            exit = fadeOut(tween(100, easing = AgenticEaseOut)) +
+                slideOutVertically(tween(100, easing = AgenticEaseOut)) { it / 8 },
+        ) {
+            HomeActionDock(
+                showLatest = state.latestAlert != null,
+                onSessions = onSessions,
+                onLatest = onAlert,
+                onSettings = onSettings,
+                modifier = Modifier,
+            )
+        }
     }
 }
 
@@ -535,7 +621,7 @@ private fun HomeSessionButton(
             Text(
                 text = session?.title ?: "Choose a session",
                 color = Frost,
-                fontSize = if (compact) 12.sp else 15.sp,
+                fontSize = if (compact) 11.sp else 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -682,11 +768,32 @@ private fun PushToTalkOrb(
     voiceLevel: Float,
     enabled: Boolean,
     onToggle: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
     val haptics = LocalHapticFeedback.current
+    val isRound = LocalConfiguration.current.isScreenRound
     val compact = size <= 80.dp
+    val orbDiameter = size
+    val cancellationAvailable = recording || transcribing
+    val cancellationAvailableState by rememberUpdatedState(cancellationAvailable)
+    val cancelAction by rememberUpdatedState(onCancel)
+    val cancelDiameter = when {
+        size <= 48.dp -> 100.dp
+        compact && isRound -> 134.dp
+        compact -> 112.dp
+        else -> 260.dp
+    }
+    val controlDiameter by animateDpAsState(
+        targetValue = if (cancellationAvailable) cancelDiameter else size,
+        animationSpec = tween(
+            durationMillis = if (cancellationAvailable) 160 else 100,
+            easing = AgenticEaseOut,
+        ),
+        label = "voice cancellation footprint",
+    )
+    var cancelPressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
         animationSpec = tween(140, easing = AgenticEaseOut),
@@ -697,8 +804,88 @@ private fun PushToTalkOrb(
         animationSpec = tween(100, easing = LinearEasing),
         label = "live voice activity",
     )
-    val activityHaloSize = size + if (compact) 28.dp else 52.dp
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(size)) {
+    val cancelScale by animateFloatAsState(
+        targetValue = if (cancelPressed) 0.985f else 1f,
+        animationSpec = tween(110, easing = AgenticEaseOut),
+        label = "cancel voice request press",
+    )
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(controlDiameter)) {
+        AnimatedVisibility(
+            visible = cancellationAvailable,
+            enter = fadeIn(tween(160, easing = AgenticEaseOut)) +
+                scaleIn(tween(160, easing = AgenticEaseOut), initialScale = 0.96f),
+            exit = fadeOut(tween(100, easing = AgenticEaseOut)) +
+                scaleOut(tween(100, easing = AgenticEaseOut), targetScale = 0.98f),
+        ) {
+            Canvas(
+                Modifier
+                    .size(cancelDiameter)
+                    .graphicsLayer {
+                        scaleX = cancelScale
+                        scaleY = cancelScale
+                    }
+                    .then(
+                        if (cancellationAvailable) {
+                            Modifier.semantics {
+                                contentDescription = "Cancel voice request"
+                                role = Role.Button
+                                onClick(label = "Cancel voice request") {
+                                    if (!cancellationAvailableState) return@onClick false
+                                    haptics.performHapticFeedback(HapticFeedbackType.Reject)
+                                    cancelAction()
+                                    true
+                                }
+                            }
+                        } else {
+                            Modifier.clearAndSetSemantics { }
+                        },
+                    )
+                    .pointerInput(cancellationAvailable) {
+                        val hitBounds = this.size
+                        detectTapGestures(
+                            onPress = { position ->
+                                if (!cancellationAvailableState) return@detectTapGestures
+                                val centerX = hitBounds.width / 2f
+                                val centerY = hitBounds.height / 2f
+                                val distance = hypot(position.x - centerX, position.y - centerY)
+                                val innerRadius = orbDiameter.toPx() / 2f
+                                val outerRadius = minOf(hitBounds.width, hitBounds.height) / 2f
+                                if (!isCancelFieldTap(distance, innerRadius, outerRadius)) {
+                                    return@detectTapGestures
+                                }
+                                cancelPressed = true
+                                val released = tryAwaitRelease()
+                                cancelPressed = false
+                                if (released && cancellationAvailableState) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.Reject)
+                                    cancelAction()
+                                }
+                            },
+                        )
+                    },
+            ) {
+                val innerRadius = orbDiameter.toPx() / 2f
+                val outerRadius = this.size.minDimension / 2f
+                val fieldWidth = (outerRadius - innerRadius).coerceAtLeast(1f)
+                val fieldRadius = innerRadius + fieldWidth / 2f
+                drawCircle(
+                    color = Coral.copy(alpha = if (cancelPressed) 0.2f else 0.09f),
+                    radius = fieldRadius,
+                    style = Stroke(width = fieldWidth + 12.dp.toPx()),
+                )
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(
+                            Coral.copy(alpha = if (cancelPressed) 0.34f else 0.24f),
+                            Color(0xFFFF8A92).copy(alpha = if (cancelPressed) 0.25f else 0.16f),
+                            Coral.copy(alpha = 0.08f),
+                        ),
+                    ),
+                    radius = fieldRadius,
+                    style = Stroke(width = fieldWidth),
+                )
+            }
+        }
         AnimatedVisibility(
             visible = transcribing,
             enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
@@ -713,7 +900,6 @@ private fun PushToTalkOrb(
                 TranscribingIndicator(size + if (compact) 10.dp else 16.dp)
             }
         }
-        VoiceActivityHalo(size = activityHaloSize, activity = activity)
         Box(
             modifier = Modifier
                 .size(size)
@@ -760,36 +946,6 @@ private fun PushToTalkOrb(
                 modifier = Modifier.size(size * 0.48f),
             )
         }
-    }
-}
-
-@Composable
-private fun VoiceActivityHalo(size: Dp, activity: Float) {
-    Canvas(
-        Modifier
-            .requiredSize(size)
-            .graphicsLayer {
-                val activityScale = 0.78f + activity * 0.22f
-                scaleX = activityScale
-                scaleY = activityScale
-                alpha = (activity * 1.4f).coerceIn(0f, 1f)
-            },
-    ) {
-        val stroke = this.size.minDimension * 0.025f
-        drawArc(
-            color = Violet.copy(alpha = 0.22f),
-            startAngle = 127.5f,
-            sweepAngle = 285f,
-            useCenter = false,
-            style = Stroke(stroke * 2.4f, cap = StrokeCap.Round),
-        )
-        drawArc(
-            brush = Brush.sweepGradient(listOf(Cyan, Violet, Frost, Cyan)),
-            startAngle = 127.5f,
-            sweepAngle = 285f,
-            useCenter = false,
-            style = Stroke(stroke, cap = StrokeCap.Round),
-        )
     }
 }
 
@@ -966,7 +1122,9 @@ private fun TranscriptScreen(
     val horizontalPadding = roundAwareHorizontalPadding()
     var modelSelectorOpen by rememberSaveable { mutableStateOf(false) }
     var approvalSelectorOpen by rememberSaveable { mutableStateOf(false) }
-    var sendModeSelectorOpen by rememberSaveable { mutableStateOf(false) }
+    var sendModeSelectorOpen by rememberSaveable(state.showSendModeOverlay) {
+        mutableStateOf(state.showSendModeOverlay)
+    }
     var selectorContainerSize by remember { mutableStateOf(IntSize.Zero) }
     var modelSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
     var approvalSelectorOrigin by remember { mutableStateOf(TransformOrigin(0.5f, 0.5f)) }
@@ -1525,7 +1683,21 @@ private fun SendModeOverlay(
 ) {
     val horizontalPadding = roundAwareHorizontalPadding(round = 34.dp, square = 20.dp)
     val isRound = LocalConfiguration.current.isScreenRound
-    Box(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compactSquare = !isRound && maxHeight < 220.dp
+        val closeCenterY = minOf(if (compactSquare) 32.dp else 56.dp, maxHeight * 0.22f)
+        val closeTopPadding = closeCenterY - 22.dp
+        val closeEndPadding = if (isRound) {
+            roundSafeEndPadding(
+                screenWidth = maxWidth,
+                screenHeight = maxHeight,
+                centerY = closeCenterY,
+                targetRadius = 22.dp,
+                margin = 4.dp,
+            )
+        } else {
+            14.dp
+        }
         Box(
             Modifier
                 .fillMaxSize()
@@ -1544,14 +1716,14 @@ private fun SendModeOverlay(
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(top = 8.dp, bottom = if (isRound) 66.dp else 12.dp),
+                .padding(bottom = if (isRound) 66.dp else 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Box(Modifier.fillMaxWidth().height(44.dp)) {
+            Box(Modifier.fillMaxWidth().height(if (compactSquare) 50.dp else 72.dp)) {
                 Text(
                     text = "Send prompt",
                     color = Frost,
-                    fontSize = 16.sp,
+                    fontSize = if (compactSquare) 14.sp else 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = (-0.2).sp,
                     textAlign = TextAlign.Center,
@@ -1563,8 +1735,8 @@ private fun SendModeOverlay(
                 )
                 Box(
                     modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .padding(end = horizontalPadding - 6.dp)
+                        .align(Alignment.TopEnd)
+                        .padding(top = closeTopPadding, end = closeEndPadding)
                         .size(44.dp)
                         .clip(CircleShape)
                         .clickable(role = Role.Button, onClick = onDismiss)
@@ -1590,8 +1762,8 @@ private fun SendModeOverlay(
             Text(
                 "Override your Codex follow-up default for this prompt",
                 color = Muted.copy(alpha = 0.86f),
-                fontSize = 9.sp,
-                lineHeight = 12.sp,
+                fontSize = if (compactSquare) 8.sp else 9.sp,
+                lineHeight = if (compactSquare) 10.sp else 12.sp,
                 textAlign = TextAlign.Center,
                 maxLines = 2,
                 modifier = Modifier.padding(horizontal = horizontalPadding),
@@ -1605,12 +1777,14 @@ private fun SendModeOverlay(
             ) {
                 SendModeChoice(
                     action = FollowUpAction.STEER,
+                    compact = compactSquare,
                     onClick = { onSend(FollowUpAction.STEER) },
                 )
                 if (!isRound) {
-                    Spacer(Modifier.height(7.dp))
+                    Spacer(Modifier.height(if (compactSquare) 4.dp else 7.dp))
                     SendModeChoice(
                         action = FollowUpAction.QUEUE,
+                        compact = compactSquare,
                         onClick = { onSend(FollowUpAction.QUEUE) },
                     )
                 }
@@ -1638,7 +1812,11 @@ private fun SendModeOverlay(
 }
 
 @Composable
-private fun SendModeChoice(action: FollowUpAction, onClick: () -> Unit) {
+private fun SendModeChoice(
+    action: FollowUpAction,
+    compact: Boolean = false,
+    onClick: () -> Unit,
+) {
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
     val haptics = LocalHapticFeedback.current
@@ -1647,16 +1825,16 @@ private fun SendModeChoice(action: FollowUpAction, onClick: () -> Unit) {
         animationSpec = tween(120, easing = AgenticEaseOut),
         label = "send mode choice press",
     )
-    val accent = if (action == FollowUpAction.STEER) Cyan else Mint
-    val surface = if (action == FollowUpAction.STEER) Color(0xFF10252D) else Color(0xFF10251F)
+    val accent = Mint
+    val surface = Mint
     Row(
         Modifier
             .fillMaxWidth()
-            .height(58.dp)
+            .height(if (compact) 44.dp else 58.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(if (compact) 15.dp else 18.dp))
             .background(surface)
-            .border(1.dp, accent.copy(alpha = 0.72f), RoundedCornerShape(18.dp))
+            .border(1.dp, accent.copy(alpha = 0.72f), RoundedCornerShape(if (compact) 15.dp else 18.dp))
             .semantics { contentDescription = "${action.sendLabel}. ${action.sendDescription}" }
             .clickable(
                 interactionSource = interactions,
@@ -1666,38 +1844,38 @@ private fun SendModeChoice(action: FollowUpAction, onClick: () -> Unit) {
                 haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
                 onClick()
             }
-            .padding(horizontal = 11.dp),
+            .padding(horizontal = if (compact) 8.dp else 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(32.dp)
+                .size(if (compact) 26.dp else 32.dp)
                 .clip(CircleShape)
-                .background(accent.copy(alpha = 0.14f)),
+                .background(Ink.copy(alpha = 0.14f)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = if (action == FollowUpAction.STEER) Icons.Rounded.TouchApp else Icons.Rounded.KeyboardArrowDown,
                 contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(18.dp),
+                tint = Ink,
+                modifier = Modifier.size(if (compact) 15.dp else 18.dp),
             )
         }
-        Spacer(Modifier.width(9.dp))
+        Spacer(Modifier.width(if (compact) 7.dp else 9.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 action.sendLabel,
-                color = Frost,
-                fontSize = 11.sp,
-                lineHeight = 13.sp,
+                color = Ink,
+                fontSize = if (compact) 10.sp else 11.sp,
+                lineHeight = if (compact) 11.sp else 13.sp,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
             )
             Text(
                 action.sendDescription,
-                color = Muted.copy(alpha = 0.9f),
-                fontSize = 8.sp,
-                lineHeight = 10.sp,
+                color = Ink.copy(alpha = 0.76f),
+                fontSize = if (compact) 7.sp else 8.sp,
+                lineHeight = if (compact) 8.sp else 10.sp,
                 maxLines = 2,
             )
         }
@@ -2109,6 +2287,7 @@ private fun ChatScreen(
     val rotaryFocusRequester = remember { FocusRequester() }
     val horizontalPadding = roundAwareHorizontalPadding(round = 27.dp, square = 18.dp)
     val isRound = LocalConfiguration.current.isScreenRound
+    val voiceReplyHaze = rememberHazeState(blurEnabled = true)
     val chat = state.chat
     val messages = chat?.messages.orEmpty()
     val hasActionablePermission = messages.any { message ->
@@ -2141,6 +2320,7 @@ private fun ChatScreen(
             LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
+                .hazeSource(voiceReplyHaze)
                 .requestFocusOnHierarchyActive()
                 .rotaryScrollable(
                     behavior = RotaryScrollableDefaults.behavior(listState),
@@ -2150,7 +2330,7 @@ private fun ChatScreen(
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
-                bottom = if (showRoundEdgeAction) 116.dp else 76.dp,
+                bottom = if (showRoundEdgeAction) 116.dp else if (isRound) 76.dp else 52.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
@@ -2247,32 +2427,92 @@ private fun ChatScreen(
                 }
             }
             }
-            if (showRoundEdgeAction) {
+            if (isRound) {
                 val retrying = state.error != null
-                EdgeButton(
-                    onClick = if (retrying) onRetry else onReply,
-                    enabled = !state.pending,
-                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-                    buttonSize = EdgeButtonSize.Small,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (retrying) Coral else Cyan,
-                        contentColor = Ink,
-                        disabledContainerColor = PanelRaised,
-                        disabledContentColor = Muted,
-                    ),
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = showRoundEdgeAction,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                    enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
+                        slideInVertically(tween(180, easing = AgenticEaseOut)) { it / 16 },
+                    exit = fadeOut(tween(120, easing = AgenticEaseOut)) +
+                        slideOutVertically(tween(120, easing = AgenticEaseOut)) { it / 24 },
                 ) {
-                    Text(if (retrying) "Retry chat" else "Voice reply", fontWeight = FontWeight.Bold)
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(112.dp)
+                            .then(
+                                if (showRoundEdgeAction) {
+                                    Modifier
+                                } else {
+                                    Modifier.clearAndSetSemantics { }
+                                },
+                            )
+                            .hazeEffect(voiceReplyHaze) {
+                                blurRadius = 14.dp
+                                backgroundColor = Ink
+                                tints = listOf(HazeTint(Ink.copy(alpha = 0.54f)))
+                                fallbackTint = HazeTint(Ink.copy(alpha = 0.88f))
+                                noiseFactor = 0.04f
+                                mask = Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black, Color.Black),
+                                )
+                            }
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.Transparent,
+                                        Ink.copy(alpha = 0.42f),
+                                        Ink.copy(alpha = 0.86f),
+                                    ),
+                                ),
+                            ),
+                    ) {
+                        EdgeButton(
+                            onClick = if (retrying) onRetry else onReply,
+                            enabled = showRoundEdgeAction && !state.pending,
+                            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                            buttonSize = EdgeButtonSize.Small,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (retrying) Coral else Cyan,
+                                contentColor = Ink,
+                                disabledContainerColor = PanelRaised,
+                                disabledContentColor = Muted,
+                            ),
+                        ) {
+                            Text(if (retrying) "Retry chat" else "Voice reply", fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             } else if (!isRound) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(horizontal = horizontalPadding, vertical = 10.dp),
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Ink.copy(alpha = 0.92f)),
+                            ),
+                        )
+                        .padding(horizontal = horizontalPadding, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 ) {
-                    ActionButton("Retry", false, onRetry, enabled = !state.pending)
-                    ActionButton("Voice reply", true, onReply, enabled = !state.pending)
+                    if (state.error != null) {
+                        SquareChatAction(
+                            label = "Retry",
+                            primary = false,
+                            onClick = onRetry,
+                            enabled = !state.pending,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    SquareChatAction(
+                        label = "Voice reply",
+                        primary = true,
+                        onClick = onReply,
+                        enabled = !state.pending,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
             if (!nearLatest) {
@@ -3254,6 +3494,49 @@ private fun ActionButton(
 }
 
 @Composable
+private fun SquareChatAction(
+    label: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = tween(110, easing = AgenticEaseOut),
+        label = "square chat action press",
+    )
+    Box(
+        modifier
+            .height(40.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(CircleShape)
+            .background(if (primary) Cyan else PanelRaised)
+            .border(1.dp, if (primary) Cyan else Color(0xFF3B3F57), CircleShape)
+            .clickable(
+                enabled = enabled,
+                interactionSource = interactions,
+                indication = null,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .alpha(if (enabled) 1f else 0.48f),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (primary) Ink else Frost,
+            fontSize = 9.sp,
+            lineHeight = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
 private fun SettingChoice(title: String, subtitle: String, selected: Boolean, onClick: () -> Unit) {
     TactileCard(
         onClick = onClick,
@@ -3384,6 +3667,24 @@ private fun roundAwareHorizontalPadding(
     square: Dp = 18.dp,
 ): Dp = if (LocalConfiguration.current.isScreenRound) round else square
 
+internal fun roundSafeEndPadding(
+    screenWidth: Dp,
+    screenHeight: Dp,
+    centerY: Dp,
+    targetRadius: Dp,
+    margin: Dp,
+): Dp {
+    val displayRadius = min(screenWidth.value, screenHeight.value) / 2f
+    val safeCenterRadius = max(0f, displayRadius - targetRadius.value - margin.value)
+    val verticalDistance = abs(centerY.value - screenHeight.value / 2f)
+    val horizontalDistance = sqrt(max(0f, safeCenterRadius * safeCenterRadius - verticalDistance * verticalDistance))
+    val centerX = screenWidth.value / 2f + horizontalDistance
+    return max(margin.value, screenWidth.value - centerX - targetRadius.value).dp
+}
+
+internal fun isCancelFieldTap(distance: Float, innerRadius: Float, outerRadius: Float): Boolean =
+    distance >= innerRadius && distance <= outerRadius
+
 @Composable
 private fun ScreenHeader(title: String, onBack: () -> Unit, horizontalPadding: Dp = 50.dp) {
     val round = LocalConfiguration.current.isScreenRound
@@ -3399,8 +3700,8 @@ private fun ScreenHeader(title: String, onBack: () -> Unit, horizontalPadding: D
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(
-                    start = if (round) 84.dp else 72.dp,
-                    end = if (round) 42.dp else 72.dp,
+                    start = if (round) 84.dp else 88.dp,
+                    end = if (round) 42.dp else 8.dp,
                 )
                 .align(Alignment.Center),
         )

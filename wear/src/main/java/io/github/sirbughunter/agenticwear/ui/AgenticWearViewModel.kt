@@ -76,6 +76,7 @@ data class WearUiState(
     val relayUrl: String = "",
     val appUpdate: UpdateUiState = UpdateUiState(),
     val showInstallPermissionPrompt: Boolean = false,
+    val showSendModeOverlay: Boolean = false,
     val demo: Boolean = false,
 ) {
     val selectedSession: AgentSession?
@@ -89,6 +90,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private val _state = MutableStateFlow(readState())
     val state: StateFlow<WearUiState> = _state.asStateFlow()
     private var deviceSpeech: DeviceSpeechController? = null
+    private var voiceAttemptGeneration = 0L
     private var recordingTimeoutJob: Job? = null
     private var transcriptionTimerJob: Job? = null
     private var chatStreamJob: Job? = null
@@ -241,11 +243,21 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 }
                 .onFailure(::showError)
         } else {
-            val controller = deviceSpeech ?: DeviceSpeechController(
+            val attemptGeneration = ++voiceAttemptGeneration
+            deviceSpeech?.destroy()
+            val controller = DeviceSpeechController(
                 getApplication(),
-                onResult = ::acceptDeviceTranscript,
-                onFailure = ::showError,
-                onVoiceLevel = ::updateVoiceLevel,
+                onResult = { text ->
+                    if (attemptGeneration == voiceAttemptGeneration) {
+                        acceptDeviceTranscript(text)
+                    }
+                },
+                onFailure = { message ->
+                    if (attemptGeneration == voiceAttemptGeneration) showError(message)
+                },
+                onVoiceLevel = { level ->
+                    if (attemptGeneration == voiceAttemptGeneration) updateVoiceLevel(level)
+                },
             ).also { deviceSpeech = it }
             runCatching { controller.start() }
                 .onSuccess {
@@ -281,13 +293,58 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun cancelRecording() {
         if (!_state.value.recording && VoiceSessionService.sessionState.value.phase != VoiceSessionPhase.RECORDING) return
+        cancelVoiceRequest(returnHome = false)
+    }
+
+    fun cancelVoiceRequest() = cancelVoiceRequest(returnHome = true)
+
+    private fun cancelVoiceRequest(returnHome: Boolean) {
+        val current = _state.value
+        val voiceSession = VoiceSessionService.sessionState.value
+        val active = current.recording || current.transcribing ||
+            voiceSession.phase == VoiceSessionPhase.RECORDING ||
+            voiceSession.phase == VoiceSessionPhase.TRANSCRIBING
+        if (!active) return
+        if (current.demo) {
+            cancelTranscriptionTimerJob()
+            _state.update {
+                it.copy(
+                    pending = false,
+                    recording = false,
+                    transcribing = false,
+                    transcriptionElapsedMillis = null,
+                    voiceLevel = 0f,
+                    error = null,
+                )
+            }
+            return
+        }
+        voiceAttemptGeneration += 1
+        stopVoiceMonitoring()
+        cancelTranscriptionTimerJob()
+        repository.cancelTranscription(voiceSession.transcriptionRequestId)
         if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
             VoiceSessionService.cancel(getApplication())
         } else {
-            stopVoiceMonitoring()
             deviceSpeech?.cancel()
         }
-        _state.update { it.copy(recording = false, transcribing = false, voiceLevel = 0f) }
+        val restoredTranscript = preferences.transcript
+        _state.update {
+            it.copy(
+                screen = when {
+                    restoredTranscript != null -> WearScreen.TRANSCRIPT
+                    returnHome -> WearScreen.HOME
+                    else -> it.screen
+                },
+                transcript = restoredTranscript,
+                pending = false,
+                recording = false,
+                transcribing = false,
+                transcriptionElapsedMillis = null,
+                voiceLevel = 0f,
+                error = null,
+            )
+        }
     }
 
     fun onActivityStopped() {
@@ -489,14 +546,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             "error" -> AgentAlert("demo-error", AlertKind.ERROR, "demo-docs", sessions[2].title, "The agent stopped after a build error.", now)
             else -> null
         }
-        val transcript = if (normalized == "transcript" || normalized == "transcript-foreign-error") {
+        val transcript = if (normalized in setOf("transcript", "transcript-foreign-error", "send-mode")) {
             Transcript("demo-transcript", "Make the completion state calmer and verify the release build.", "demo-build")
         } else null
         _state.value = WearUiState(
             screen = when (normalized) {
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
-                "transcript", "transcript-foreign-error" -> WearScreen.TRANSCRIPT
+                "transcript", "transcript-foreign-error", "send-mode" -> WearScreen.TRANSCRIPT
                 "chat", "chat-error", "chat-permission" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
@@ -613,6 +670,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 else -> UpdateUiState(enabled = updateManager.enabled)
             },
             showInstallPermissionPrompt = updatePermissionDemo,
+            showSendModeOverlay = normalized == "send-mode",
             error = when {
                 homeErrorDemo -> "I didn't catch enough audio. Tap and try again."
                 normalized == "chat-error" -> "The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears."
@@ -938,6 +996,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private fun showError(error: Throwable) = showError(error.message ?: "Something went wrong")
 
     private fun showError(message: String) {
+        voiceAttemptGeneration += 1
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
         VoiceSessionService.cancel(getApplication())

@@ -59,14 +59,18 @@ class AgenticWearRepository(private val context: Context) {
     suspend fun transcribe(
         audioFile: File,
         threadId: String?,
+        requestId: String,
         notifyAfterMillis: Long? = null,
     ): String {
-        val requestId = UUID.randomUUID().toString()
         val revisionBase = preferences.revisionBase
         val bytes = audioFile.readBytes()
         try {
+            if (preferences.isTranscriptionCancelled(requestId)) {
+                throw kotlinx.coroutines.CancellationException("Transcription was cancelled")
+            }
             require(bytes.size <= MAX_RECORDING_BYTES) { "Recording is too large; keep it under four minutes" }
             preferences.pending = true
+            preferences.pendingTranscriptionRequestId = requestId
             preferences.transcript = null
             preferences.lastError = null
             send(
@@ -85,10 +89,18 @@ class AgenticWearRepository(private val context: Context) {
                 if (preferences.transcript?.requestId == requestId || preferences.lastError != null) break
             }
             return requestId
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            audioFile.delete()
+            if (preferences.pendingTranscriptionRequestId == requestId) {
+                preferences.pendingTranscriptionRequestId = null
+                preferences.pending = false
+            }
+            throw cancelled
         } catch (error: Throwable) {
             audioFile.delete()
             revisionBase?.let { preferences.transcript = it }
             preferences.revisionBase = null
+            preferences.pendingTranscriptionRequestId = null
             preferences.pending = false
             preferences.lastError = error.message
             throw error
@@ -96,6 +108,16 @@ class AgenticWearRepository(private val context: Context) {
             bytes.fill(0)
             broadcastStateChanged()
         }
+    }
+
+    fun cancelTranscription(requestId: String? = preferences.pendingTranscriptionRequestId) {
+        requestId?.let(preferences::markTranscriptionCancelled)
+        preferences.pendingTranscriptionRequestId = null
+        preferences.revisionBase?.let { preferences.transcript = it }
+        preferences.revisionBase = null
+        preferences.pending = false
+        preferences.lastError = null
+        broadcastStateChanged()
     }
 
     suspend fun submitTurn(
@@ -343,10 +365,21 @@ class AgenticWearRepository(private val context: Context) {
                 preferences.lastError = null
             }
             "transcription.ready" -> {
-                preferences.transcript = PayloadCodec.decodeTranscript(payload)
-                preferences.revisionBase = null
-                preferences.pending = false
-                preferences.lastError = null
+                val transcript = PayloadCodec.decodeTranscript(payload) ?: return
+                val requestId = transcript.requestId
+                when {
+                    preferences.consumeCancelledTranscription(requestId) -> Unit
+                    shouldAcceptTranscriptionResult(
+                        pendingRequestId = preferences.pendingTranscriptionRequestId,
+                        incomingRequestId = requestId,
+                    ) -> {
+                        preferences.transcript = transcript
+                        preferences.revisionBase = null
+                        preferences.pendingTranscriptionRequestId = null
+                        preferences.pending = false
+                        preferences.lastError = null
+                    }
+                }
             }
             "chat.snapshot" -> {
                 PayloadCodec.decodeChatSnapshot(payload)?.let { snapshot ->
@@ -397,6 +430,15 @@ class AgenticWearRepository(private val context: Context) {
             "transcription.error", "turn.error", "approval.error", "bridge.error" -> {
                 val errorKind = payload.optString("kind")
                 val requestId = payload.optString("requestId")
+                if (errorKind == "transcription.error") {
+                    val cancelled = preferences.consumeCancelledTranscription(requestId)
+                    val expected = shouldAcceptTranscriptionResult(
+                        pendingRequestId = preferences.pendingTranscriptionRequestId,
+                        incomingRequestId = requestId,
+                    )
+                    if (cancelled || !expected) return
+                    preferences.pendingTranscriptionRequestId = null
+                }
                 val staleTurnError = errorKind == "turn.error" &&
                     !shouldAcceptTurnError(preferences.pendingTurnRequestId, requestId)
                 if (!staleTurnError) preferences.pending = false
@@ -520,6 +562,11 @@ private data class InboxRefreshResult(
 
 internal fun transcriptionReplyDelaysMs(): LongArray =
     longArrayOf(150, 200, 250, 350, 500, 700, 1_000, 500, 700, 900, 1_200, 1_600, 2_000)
+
+internal fun shouldAcceptTranscriptionResult(
+    pendingRequestId: String?,
+    incomingRequestId: String,
+): Boolean = pendingRequestId != null && incomingRequestId == pendingRequestId
 
 internal fun shouldAcceptChatSnapshot(
     selectedThreadId: String?,

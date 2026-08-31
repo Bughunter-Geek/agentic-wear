@@ -182,6 +182,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.google.firebase:firebase-messaging")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("dev.chrisbanes.haze:haze-android:1.6.10")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
