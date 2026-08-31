@@ -10,7 +10,6 @@ import {
   type ExternalTurnBaseline,
   type TurnSubmissionResult,
 } from "./app-server-client.js";
-import { CodexAppToolsClient } from "./codex-app-tools-client.js";
 import { RelayClient } from "./relay-client.js";
 import { ReplayGuard } from "./replay-guard.js";
 import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
@@ -69,8 +68,6 @@ export class BridgeService {
         this.controller.abort(error);
       },
       (threadId) => this.onAgentOutput(threadId),
-      undefined,
-      new CodexAppToolsClient(),
     );
   }
 
@@ -286,6 +283,15 @@ export class BridgeService {
 
   private async onTerminal(event: TerminalEvent): Promise<void> {
     await this.send({ version: 1, ...event });
+    if (this.watchedThreadId === event.threadId && Date.now() <= this.watchExpiresAt) {
+      await this.sendChatSnapshot(event.threadId, undefined, true).catch((error: unknown) => {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Could not refresh the completed live chat",
+          error: publicError(error),
+        }));
+      });
+    }
     void this.processPendingTurns().catch(() => undefined);
     await this.sendSessions().catch((error: unknown) => {
       console.error(JSON.stringify({ level: "error", message: "Could not refresh sessions", error: publicError(error) }));
@@ -331,8 +337,12 @@ export class BridgeService {
     await this.send(snapshot);
   }
 
-  private async sendChatSnapshot(threadId: string, requestId?: string): Promise<void> {
-    const snapshot = await this.appServer.chatSnapshot(threadId, requestId !== undefined);
+  private async sendChatSnapshot(
+    threadId: string,
+    requestId?: string,
+    forceRefresh = false,
+  ): Promise<void> {
+    const snapshot = await this.appServer.chatSnapshot(threadId, requestId !== undefined || forceRefresh);
     await this.send({
       version: 1,
       kind: "chat.snapshot",

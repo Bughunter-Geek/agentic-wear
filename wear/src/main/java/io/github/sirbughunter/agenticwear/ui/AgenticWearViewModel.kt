@@ -810,9 +810,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                         }
                     }
                 ticks += 1
-                if (ticks >= CHAT_WATCH_HEARTBEAT_TICKS) {
+                val refreshTicks = if (_state.value.chat?.status == SessionStatus.ACTIVE) {
+                    CHAT_ACTIVE_REFRESH_TICKS
+                } else {
+                    CHAT_IDLE_REFRESH_TICKS
+                }
+                if (ticks >= refreshTicks) {
                     ticks = 0
-                    runCatching { repository.watchChat(threadId) }
+                    runCatching { repository.requestChatRefresh(threadId) }
                 }
             }
         }
@@ -1019,7 +1024,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         private const val UPDATE_REFRESH_INTERVAL_MS = 15L * 60L * 1_000L
         private const val MAX_RECORDING_DURATION_MS = 4L * 60L * 1_000L
         private const val CHAT_POLL_INTERVAL_MS = 1_000L
-        private const val CHAT_WATCH_HEARTBEAT_TICKS = 45
+        private const val CHAT_ACTIVE_REFRESH_TICKS = 2
+        private const val CHAT_IDLE_REFRESH_TICKS = 15
     }
 }
 

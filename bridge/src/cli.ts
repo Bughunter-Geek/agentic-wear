@@ -35,7 +35,7 @@ import {
   setupLocalWhisper,
 } from "./local-whisper.js";
 import { installLaunchAgent, launchAgentStatus, uninstallLaunchAgent } from "./launchd.js";
-import { installCodexRelayConfig, uninstallCodexRelayConfig } from "./codex-relay-config.js";
+import { uninstallCodexRelayConfig } from "./codex-relay-config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,7 +67,10 @@ async function service(args: string[]): Promise<void> {
     const builtCli = resolve(root, "bridge", "dist", "cli.js");
     if (!existsSync(builtCli)) throw new Error("Build the bridge first with `npm --prefix bridge run build`");
     const codexPath = await resolveCodexExecutable();
-    await installCodexRelayConfig(root, codexPath);
+    // Current releases submit canonical user turns through the shared App
+    // Server. Remove the legacy native-tool relay block during upgrade so no
+    // background MCP process can recreate tool-context-only prompts.
+    await uninstallCodexRelayConfig();
     const path = await installLaunchAgent(root, process.execPath, codexPath);
     console.log(`Background bridge installed: ${path}`);
     return;

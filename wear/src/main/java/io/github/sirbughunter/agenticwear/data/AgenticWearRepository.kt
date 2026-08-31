@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 class AgenticWearRepository(private val context: Context) {
+    private var pendingChatRefreshStartedAtMillis = 0L
     private val pairingStore = SecurePairingStore(context)
     private val preferences = AppPreferences(context)
     private val crypto = CryptoBox()
@@ -171,6 +172,20 @@ class AgenticWearRepository(private val context: Context) {
         refreshInboxBatch(notify = true)
     }
 
+    suspend fun requestChatRefresh(threadId: String) {
+        require(threadId.isNotBlank()) { "Choose a Codex session first" }
+        val now = System.currentTimeMillis()
+        if (
+            preferences.pendingChatRequestId != null &&
+            pendingChatRefreshStartedAtMillis > 0L &&
+            now - pendingChatRefreshStartedAtMillis < CHAT_REFRESH_REQUEST_TIMEOUT_MS
+        ) return
+        val requestId = UUID.randomUUID().toString()
+        preferences.pendingChatRequestId = requestId
+        pendingChatRefreshStartedAtMillis = now
+        send(BridgePayload.WatchChat(requestId, threadId))
+    }
+
     suspend fun unwatchChat(threadId: String) {
         send(BridgePayload.UnwatchChat(UUID.randomUUID().toString(), threadId))
     }
@@ -297,6 +312,7 @@ class AgenticWearRepository(private val context: Context) {
         preferences.chatFeedback = emptyMap()
         preferences.pendingTurnRequestId = null
         preferences.pendingChatRequestId = null
+        pendingChatRefreshStartedAtMillis = 0L
         preferences.pendingFeedbackRequestId = null
         preferences.pendingApprovalRequestId = null
         preferences.lastAcceptedThreadId = null
@@ -347,6 +363,7 @@ class AgenticWearRepository(private val context: Context) {
                         preferences.chatSnapshot = snapshot
                         if (snapshot.requestId == preferences.pendingChatRequestId) {
                             preferences.pendingChatRequestId = null
+                            pendingChatRefreshStartedAtMillis = 0L
                         }
                         preferences.lastError = null
                     }
@@ -373,6 +390,7 @@ class AgenticWearRepository(private val context: Context) {
                     )
                 ) {
                     preferences.pendingChatRequestId = null
+                    pendingChatRefreshStartedAtMillis = 0L
                     preferences.lastError = payload.optString("message", "Could not load this Codex chat")
                 }
             }
@@ -483,6 +501,7 @@ class AgenticWearRepository(private val context: Context) {
     }
 
     companion object {
+        private const val CHAT_REFRESH_REQUEST_TIMEOUT_MS = 5_000L
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private const val MAX_RECORDING_BYTES = 1_300_000
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)

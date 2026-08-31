@@ -2,6 +2,19 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.8-alpha — 2026-08-31
+
+- Sends every Watch prompt as a canonical App Server user message in the original chat, including Android/iOS/Desktop-controlled active turns; no current send uses the retired native-tool relay and no route creates or forks a chat.
+- Applies the selected model and reasoning directly as sticky thread settings before queueing or steering, removing the previous cross-client propagation wait.
+- Inserts accepted Watch prompts into the live chat immediately and replaces them with canonical history once synchronized, so the prompt cannot disappear while its response remains visible.
+- Refreshes the actively watched chat every two seconds and forces a fresh snapshot at terminal delivery, closing the gap between the response alert and the rendered answer.
+- Opens each chat at its newest message, follows appended output only while the user remains near the bottom, and shows a jump-to-latest control after deliberate upward scrolling.
+- Rebuilds the round-display Queue and Voice reply actions as bezel-following Wear OS EdgeButtons while retaining rectangular controls on square watches. The send chooser keeps the underlying review blurred for readable one-shot Queue/Steer selection.
+
+### Test status
+
+- Bridge, relay, Wear unit/lint, minified release, signing, APK metadata, checksum, and round-emulator interaction checks pass. Gemini 3.7 Flash at High reasoning independently passed the final Antigravity visual gate with no release blockers for round safe zones, EdgeButtons, or live-chat bottom padding.
+
 ## 0.6.7-alpha — 2026-08-31
 
 - Makes a normal Watch Send respect Codex Desktop's current Queue or Steer follow-up preference.
@@ -181,7 +194,7 @@ This is an explicitly unverified public Alpha prerelease. The physical minimized
 ### Privacy and cost
 
 - Firebase receives only an `inbox.ready` wake signal and the private pairing identifier; notification text and Codex session content remain end-to-end encrypted in the relay inbox.
-- Agentic Wear uses its own dedicated Firebase project on the no-cost Spark plan; it is not connected to Nudgely and does not introduce per-transcription charges.
+- Agentic Wear uses its own dedicated Firebase project on the no-cost Spark plan; it is not connected to any unrelated product and does not introduce per-transcription charges.
 - Open Agentic Wear once after installing this update so the watch can register background alerts for the existing pairing.
 
 ## 0.4.2-alpha — 2026-08-28

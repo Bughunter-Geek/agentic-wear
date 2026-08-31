@@ -148,6 +148,9 @@ import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
 import androidx.wear.compose.material3.Icon
+import androidx.wear.compose.material3.ButtonDefaults
+import androidx.wear.compose.material3.EdgeButton
+import androidx.wear.compose.material3.EdgeButtonSize
 import androidx.wear.compose.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1361,6 +1364,7 @@ private fun SendModeOverlay(
     onSend: (FollowUpAction) -> Unit,
 ) {
     val horizontalPadding = roundAwareHorizontalPadding(round = 34.dp, square = 20.dp)
+    val isRound = LocalConfiguration.current.isScreenRound
     Box(Modifier.fillMaxSize()) {
         Box(
             Modifier
@@ -1380,12 +1384,12 @@ private fun SendModeOverlay(
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(top = 8.dp, bottom = 12.dp),
+                .padding(top = 8.dp, bottom = if (isRound) 66.dp else 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(Modifier.fillMaxWidth().height(44.dp)) {
                 Text(
-                    text = "Send this prompt",
+                    text = "Send prompt",
                     color = Frost,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -1443,11 +1447,31 @@ private fun SendModeOverlay(
                     action = FollowUpAction.STEER,
                     onClick = { onSend(FollowUpAction.STEER) },
                 )
-                Spacer(Modifier.height(7.dp))
-                SendModeChoice(
-                    action = FollowUpAction.QUEUE,
-                    onClick = { onSend(FollowUpAction.QUEUE) },
-                )
+                if (!isRound) {
+                    Spacer(Modifier.height(7.dp))
+                    SendModeChoice(
+                        action = FollowUpAction.QUEUE,
+                        onClick = { onSend(FollowUpAction.QUEUE) },
+                    )
+                }
+            }
+        }
+        if (isRound) {
+            EdgeButton(
+                onClick = { onSend(FollowUpAction.QUEUE) },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .semantics {
+                        contentDescription = "Queue next. Wait for the active turn to finish"
+                    },
+                buttonSize = EdgeButtonSize.Small,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Mint,
+                    contentColor = Ink,
+                ),
+            ) {
+                Text("Queue next", fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -1921,13 +1945,40 @@ private fun ChatScreen(
     onPermissionResponse: (ChatMessage, Boolean) -> Unit,
 ) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val rotaryFocusRequester = remember { FocusRequester() }
     val horizontalPadding = roundAwareHorizontalPadding(round = 27.dp, square = 18.dp)
+    val isRound = LocalConfiguration.current.isScreenRound
     val chat = state.chat
     val messages = chat?.messages.orEmpty()
+    val hasActionablePermission = messages.any { message ->
+        message.kind == ChatMessageKind.PERMISSION && message.canControl && !message.resolved
+    }
+    val showRoundEdgeAction = isRound && !hasActionablePermission
+    val nearLatest by remember {
+        derivedStateOf {
+            val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
+            visible >= listState.layoutInfo.totalItemsCount - 2
+        }
+    }
+    var positionedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
+    var previousMessageCount by remember { mutableStateOf(0) }
+    LaunchedEffect(chat?.threadId, messages.size) {
+        val currentThreadId = chat?.threadId ?: return@LaunchedEffect
+        val firstPosition = positionedThreadId != currentThreadId
+        val appendedWhileFollowing = messages.size > previousMessageCount && nearLatest
+        previousMessageCount = messages.size
+        if (firstPosition || appendedWhileFollowing) {
+            delay(1)
+            val lastIndex = listState.layoutInfo.totalItemsCount - 1
+            if (lastIndex >= 0) listState.scrollToItem(lastIndex)
+            positionedThreadId = currentThreadId
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Live session", onBack)
-        LazyColumn(
+        Box(Modifier.fillMaxSize()) {
+            LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .requestFocusOnHierarchyActive()
@@ -1939,11 +1990,11 @@ private fun ChatScreen(
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
-                bottom = 42.dp,
+                bottom = if (showRoundEdgeAction) 116.dp else 76.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(0.dp),
-        ) {
-            item {
+            ) {
+                item {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2035,13 +2086,61 @@ private fun ChatScreen(
                     )
                 }
             }
-            item {
+            }
+            if (showRoundEdgeAction) {
+                val retrying = state.error != null
+                EdgeButton(
+                    onClick = if (retrying) onRetry else onReply,
+                    enabled = !state.pending,
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                    buttonSize = EdgeButtonSize.Small,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (retrying) Coral else Cyan,
+                        contentColor = Ink,
+                        disabledContainerColor = PanelRaised,
+                        disabledContentColor = Muted,
+                    ),
+                ) {
+                    Text(if (retrying) "Retry chat" else "Voice reply", fontWeight = FontWeight.Bold)
+                }
+            } else if (!isRound) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = horizontalPadding, vertical = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 ) {
                     ActionButton("Retry", false, onRetry, enabled = !state.pending)
                     ActionButton("Voice reply", true, onReply, enabled = !state.pending)
+                }
+            }
+            if (!nearLatest) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(
+                            bottom = if (showRoundEdgeAction) 128.dp else 72.dp,
+                        )
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(PanelRaised)
+                        .border(1.dp, Cyan.copy(alpha = 0.62f), CircleShape)
+                        .clickable(role = Role.Button) {
+                            scope.launch {
+                                val lastIndex = listState.layoutInfo.totalItemsCount - 1
+                                if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+                            }
+                        }
+                        .semantics { contentDescription = "Jump to latest message" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = null,
+                        tint = Cyan,
+                        modifier = Modifier.size(22.dp),
+                    )
                 }
             }
         }

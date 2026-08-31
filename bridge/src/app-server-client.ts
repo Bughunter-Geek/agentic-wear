@@ -253,6 +253,7 @@ export class AppServerClient {
   private readonly deliveredTerminalEvents = new Set<string>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
+  private readonly optimisticUserMessages = new Map<string, Map<string, CachedChatMessage>>();
   // A foreign notLoaded thread is shown as Ready only while this bridge has
   // proved it can start an exact Watch submission. Observation-only history
   // and queue probes do not prove that another client released its writer.
@@ -369,7 +370,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     const initialized = initializeResponseSchema.parse(await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.7" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.8" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -497,12 +498,11 @@ export class AppServerClient {
     model: string | null = null,
     effort = "medium",
     clientUserMessageId: string | null = null,
-    beforeExternalDispatch?: (baseline: ExternalTurnBaseline, mode: ActiveFollowUpMode) => Promise<void>,
+    _beforeExternalDispatch?: (baseline: ExternalTurnBaseline, mode: ActiveFollowUpMode) => Promise<void>,
     followUpAction: FollowUpAction = "default",
   ): Promise<TurnSubmissionResult> {
     let thread: CodexThread;
     let startQueuedSubmission = false;
-    let waitForSelection = false;
     let acceptedState: "running" | "queued" | null = null;
     let activeFollowUpMode: ActiveFollowUpMode | null = null;
     let previousTurnId: string | null = null;
@@ -539,6 +539,7 @@ export class AppServerClient {
         }));
         this.controlledTurnIds.set(thread.id, started.turn.id);
         this.watchReadyThreads.add(thread.id);
+        this.stageOptimisticUserMessage(thread.id, started.turn.id, messageId, text);
       } catch (error) {
         await this.releaseThread(thread.id);
         throw error;
@@ -558,50 +559,31 @@ export class AppServerClient {
           if (latest?.status === "inProgress") {
             activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
             if (activeFollowUpMode === "queue") {
-              const persisted = this.readThreadSettings(current.id);
-              const selectionAlreadyApplied = persisted !== null &&
-                (model === null || persisted.model === model) &&
-                persisted.effort === effort;
-              if (!selectionAlreadyApplied) waitForSelection = true;
+              // Settings are sticky for the next turn and do not mutate the
+              // already-running inference. Apply them before queueing so the
+              // Watch selection is captured without a second client relay.
+              await this.updateThreadSettings(current.id, model, effort);
             } else {
-              const externalResult = await this.submitExternalTurn(
+              await this.steerControlledTurn(
                 current.id,
+                latest.id,
                 text,
                 model,
                 effort,
                 messageId,
-                activeFollowUpMode,
-                beforeExternalDispatch,
               );
-              if (externalResult === "accepted") acceptedState = "running";
-              else waitForSelection = true;
+              this.controlledThreads.add(current.id);
+              this.controlledTurnIds.set(current.id, latest.id);
+              acceptedState = "running";
             }
             return current;
           }
-          const persisted = this.readThreadSettings(current.id);
-          const selectionAlreadyApplied = persisted !== null &&
-            (model === null || persisted.model === model) &&
-            persisted.effort === effort;
-          if (selectionAlreadyApplied) return current;
-          const externalResult = await this.submitExternalTurn(
-            current.id,
-            text,
-            model,
-            effort,
-            messageId,
-            this.resolveFollowUpMode(followUpAction),
-            beforeExternalDispatch,
-          );
-          if (externalResult === "accepted") {
-            acceptedState = "queued";
-            return current;
-          }
-          if (externalResult === "uncertain") {
-            waitForSelection = true;
-            return current;
-          }
+          await this.updateThreadSettings(current.id, model, effort);
           if (!await this.acquireDormantThread(current.id, model, effort)) {
-            this.watchReadyThreads.delete(current.id);
+            // Another client can retain an idle writer. The durable queue is
+            // still canonical and uses the Watch UUID as its idempotency key;
+            // that owning client will start it with the sticky selection.
+            this.watchReadyThreads.add(current.id);
             return current;
           }
           startQueuedSubmission = true;
@@ -611,30 +593,14 @@ export class AppServerClient {
           activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
           const controlledTurnId = this.controlledTurnIds.get(current.id);
           if (activeFollowUpMode === "queue") {
-            if (controlledTurnId) {
-              await this.updateThreadSettings(current.id, model, effort);
-            } else {
-              const persisted = this.readThreadSettings(current.id);
-              const selectionAlreadyApplied = persisted !== null &&
-                (model === null || persisted.model === model) &&
-                persisted.effort === effort;
-              if (!selectionAlreadyApplied) waitForSelection = true;
-            }
-          } else if (controlledTurnId) {
-            await this.steerControlledTurn(current.id, controlledTurnId, text, model, effort, messageId);
-            acceptedState = "running";
+            await this.updateThreadSettings(current.id, model, effort);
           } else {
-            const externalResult = await this.submitExternalTurn(
-              current.id,
-              text,
-              model,
-              effort,
-              messageId,
-              activeFollowUpMode,
-              beforeExternalDispatch,
-            );
-            if (externalResult === "accepted") acceptedState = "running";
-            else waitForSelection = true;
+            const activeTurnId = controlledTurnId ?? (await this.latestTurn(current.id))?.id;
+            if (!activeTurnId) throw new Error("Codex did not expose the active turn to steer");
+            await this.steerControlledTurn(current.id, activeTurnId, text, model, effort, messageId);
+            this.controlledThreads.add(current.id);
+            this.controlledTurnIds.set(current.id, activeTurnId);
+            acceptedState = "running";
           }
           return current;
         }
@@ -659,31 +625,6 @@ export class AppServerClient {
       };
     }
 
-    if (waitForSelection) {
-      return {
-        threadId: thread.id,
-        created: false,
-        state: "waiting",
-        selectionApplied: false,
-        ...(activeFollowUpMode ? { followUpMode: activeFollowUpMode } : {}),
-      };
-    }
-
-    if (thread.status.type === "notLoaded" && !startQueuedSubmission) {
-      const persisted = this.readThreadSettings(thread.id);
-      const selectionAlreadyApplied = persisted !== null &&
-        (model === null || persisted.model === model) &&
-        persisted.effort === effort;
-      if (!selectionAlreadyApplied) {
-        return {
-          threadId: thread.id,
-          created: false,
-          state: "waiting",
-          selectionApplied: false,
-        };
-      }
-    }
-
     // The watch request UUID is the App Server idempotency key. Retrying a
     // transient pre-acceptance cancellation therefore cannot create a second
     // queued message.
@@ -694,6 +635,12 @@ export class AppServerClient {
         clientUserMessageId: messageId,
       }));
     });
+    this.stageOptimisticUserMessage(
+      thread.id,
+      `queued:${queued.queuedSubmission.id}`,
+      messageId,
+      text,
+    );
     if (startQueuedSubmission) {
       await this.startControlledQueuedSubmission(
         thread.id,
@@ -745,43 +692,7 @@ export class AppServerClient {
     });
     if (steered.turnId !== turnId) throw new Error("Codex steered an unexpected turn");
     this.watchReadyThreads.add(threadId);
-  }
-
-  private async submitExternalTurn(
-    threadId: string,
-    text: string,
-    model: string | null,
-    effort: string,
-    requestId: string,
-    followUpMode: ActiveFollowUpMode,
-    beforeExternalDispatch?: (baseline: ExternalTurnBaseline, mode: ActiveFollowUpMode) => Promise<void>,
-  ): Promise<"accepted" | "unavailable" | "uncertain"> {
-    if (!this.codexAppTools) return "unavailable";
-    let dispatchPrepared = false;
-    try {
-      await this.codexAppTools.sendMessageToThread({
-        threadId,
-        prompt: text,
-        model,
-        thinking: effort,
-        requestId,
-      }, async () => {
-        dispatchPrepared = true;
-        const baseline = await this.externalTurnBaseline(threadId);
-        await beforeExternalDispatch?.(baseline, followUpMode);
-      });
-      this.watchReadyThreads.add(threadId);
-      return "accepted";
-    } catch (error) {
-      this.watchReadyThreads.delete(threadId);
-      console.warn(JSON.stringify({
-        level: "warn",
-        message: "Same-chat Codex app handoff is waiting",
-        threadId,
-        error: safeError(error),
-      }));
-      return dispatchPrepared ? "uncertain" : "unavailable";
-    }
+    this.stageOptimisticUserMessage(threadId, turnId, messageId, text);
   }
 
   private async acquireDormantThread(
@@ -798,9 +709,6 @@ export class AppServerClient {
     try {
       responseWithThreadSchema.parse(await this.request("thread/resume", resumeParams));
       this.controlledThreads.add(threadId);
-      const stickySettings: Record<string, unknown> = { threadId, effort };
-      if (model !== null) stickySettings.model = model;
-      await this.request("thread/settings/update", stickySettings);
       return true;
     } catch (error) {
       if (this.controlledThreads.has(threadId)) await this.releaseThread(threadId);
@@ -869,12 +777,6 @@ export class AppServerClient {
     return Date.now() - attempt.attemptedAt < EXTERNAL_DELIVERY_GRACE_MS
       ? "waiting"
       : "retry";
-  }
-
-  private async externalTurnBaseline(threadId: string): Promise<ExternalTurnBaseline> {
-    return {
-      userMessageIds: (await this.recentUserMessages(threadId)).map(({ id }) => id),
-    };
   }
 
   private async recentUserMessages(threadId: string): Promise<Array<{ id: string; text: string }>> {
@@ -953,6 +855,15 @@ export class AppServerClient {
       .flatMap((turn) => turn.items
         .map((item) => chatMessageFromItem(turn.id, item))
         .filter((message): message is CachedChatMessage => message !== null));
+    const optimistic = this.optimisticUserMessages.get(threadId);
+    if (optimistic) {
+      const canonicalIds = new Set(messages.map(({ id }) => id));
+      for (const [messageId, message] of optimistic) {
+        if (canonicalIds.has(messageId)) optimistic.delete(messageId);
+        else messages.push({ ...message });
+      }
+      if (optimistic.size === 0) this.optimisticUserMessages.delete(threadId);
+    }
 
     const cache: CachedChat = {
       threadId,
@@ -1449,6 +1360,48 @@ export class AppServerClient {
     cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
   }
 
+  private stageOptimisticUserMessage(
+    threadId: string,
+    turnId: string,
+    messageId: string,
+    text: string,
+  ): void {
+    const message: CachedChatMessage = {
+      id: messageId,
+      turnId,
+      role: "user",
+      kind: "message",
+      text: boundedChatText(text),
+      phase: "unknown",
+      approvalId: null,
+      canControl: false,
+      resolved: false,
+    };
+    let pending = this.optimisticUserMessages.get(threadId);
+    if (!pending) {
+      pending = new Map();
+      this.optimisticUserMessages.set(threadId, pending);
+      trimOldestMapEntry(this.optimisticUserMessages, MAX_CACHED_CHATS);
+    }
+    pending.set(messageId, message);
+    while (pending.size > MAX_OPTIMISTIC_USER_MESSAGES) {
+      pending.delete(pending.keys().next().value ?? "");
+    }
+    const cached = this.chatCaches.get(threadId);
+    if (cached) {
+      cached.messages = cached.messages.filter(({ id }) => id !== messageId);
+      cached.messages.push(message);
+      cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
+    }
+    void this.onAgentOutput(threadId).catch((error: unknown) => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "Could not stream the accepted Watch prompt",
+        error: safeError(error),
+      }));
+    });
+  }
+
   private updateCachedChatStatus(threadId: string, status: SessionView["status"]): void {
     const cached = this.chatCaches.get(threadId);
     if (cached) cached.status = status;
@@ -1849,6 +1802,7 @@ const MAX_CHAT_HISTORY_TURNS = 6;
 const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CHAT_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGES = 12;
+const MAX_OPTIMISTIC_USER_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGE_CHARS = 24_000;
 const MAX_CACHED_CHATS = 20;
 const MAX_PENDING_PERMISSION_MESSAGES = 100;
