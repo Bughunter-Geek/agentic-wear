@@ -13,6 +13,13 @@ class ChatReplyPolicyTest {
     }
 
     @Test
+    fun turnErrorsRequireTheCurrentlyPendingWatchRequest() {
+        assertFalse(shouldAcceptTurnError(null, "request-old"))
+        assertFalse(shouldAcceptTurnError("request-new", "request-old"))
+        assertTrue(shouldAcceptTurnError("request-new", "request-new"))
+    }
+
+    @Test
     fun snapshotsMustBelongToTheSelectedThreadAndCurrentRequest() {
         assertFalse(shouldAcceptChatSnapshot("thread-a", "request-new", 200, "thread-b", "request-new", 300))
         assertFalse(shouldAcceptChatSnapshot("thread-a", "request-new", 200, "thread-a", "request-old", 300))

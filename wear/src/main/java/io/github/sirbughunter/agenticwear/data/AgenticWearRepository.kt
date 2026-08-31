@@ -368,8 +368,7 @@ class AgenticWearRepository(private val context: Context) {
                 val errorKind = payload.optString("kind")
                 val requestId = payload.optString("requestId")
                 val staleTurnError = errorKind == "turn.error" &&
-                    preferences.pendingTurnRequestId != null &&
-                    requestId != preferences.pendingTurnRequestId
+                    !shouldAcceptTurnError(preferences.pendingTurnRequestId, requestId)
                 if (!staleTurnError) preferences.pending = false
                 if (errorKind == "transcription.error") {
                     preferences.revisionBase?.let { preferences.transcript = it }
@@ -394,7 +393,7 @@ class AgenticWearRepository(private val context: Context) {
                     preferences.lastError = alert?.detail
                         ?: payload.optString("message", "The request could not be completed")
                 }
-                if (alert != null) {
+                if (alert != null && !staleTurnError) {
                     preferences.latestAlert = alert
                     val firstDelivery = preferences.markEventHandled(alert.eventId)
                     if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
@@ -504,3 +503,8 @@ internal fun shouldAcceptChatError(
     incomingThreadId == selectedThreadId &&
     pendingRequestId != null &&
     incomingRequestId == pendingRequestId
+
+internal fun shouldAcceptTurnError(
+    pendingRequestId: String?,
+    incomingRequestId: String,
+): Boolean = pendingRequestId != null && incomingRequestId == pendingRequestId

@@ -4,10 +4,23 @@ Every public build remains an Alpha GitHub Pre-release until the project is expl
 
 ## Unreleased
 
+## 0.6.3-alpha — 2026-08-31
+
+This is a public Alpha prerelease for remote OTA testing. Automated checks pass and an independent-client harness verifies the repaired resume/start handoff; physical Pixel Watch acceptance remains pending.
+
 - Loads watch chat history through Codex's bounded summary view instead of serializing reasoning, command output, file changes, and tool payloads that the watch discards. This prevents large cross-client chats from exceeding the daemon transport limit or surfacing internal cancellations such as `bs1 was cancelled`.
 - Retries transient App Server history cancellations and replaces internal task identifiers with actionable recovery text if bounded retries are exhausted.
-- Queues messages directly into mobile/Desktop-owned `notLoaded` sessions instead of first attempting a settings update that App Server rejects as `thread not found`. Transient synchronization and queue cancellations retry with the same watch request UUID, preserving exactly-once submission.
+- Queues messages directly into mobile/Desktop-owned `notLoaded` sessions, wakes an otherwise dormant queue, starts the exact submission, and handles the App Server resume/auto-start race without duplicating the Watch request UUID.
+- Keeps the launchd bridge alive when Codex Desktop is closed by falling back to a private background App Server. The private process is recycled after its Watch-controlled turn so Android and iOS can resume the same chat.
+- Adds an explicit green `Ready` state only after the bridge has successfully read the chat and probed its cross-client queue; merely listed chats remain gray `Available`.
+- Replaces local image paths and attachment metadata with a compact singular/plural image notice directing the user to Android or iOS.
+- Ignores delayed `turn.error` payloads unless they match the exact currently pending Watch request, preventing an old `bs1 was cancelled` from replacing a later successful state.
 - Distinguishes a pre-queue send failure from a chat-history failure so the watch never claims a message was sent when App Server did not accept it.
+
+### Test status
+
+- Bridge unit tests, TypeScript checks, Oxlint, Wear unit tests, release lint, R8, and signed release assembly pass.
+- With the Codex Desktop daemon absent, a disposable foreign session accepted and completed exactly one Watch submission. An independent App Server then resumed the same chat and started a new turn after the Watch refreshed its history. Physical OTA acceptance remains unverified for this Alpha.
 
 ## 0.6.2-alpha — 2026-08-30
 

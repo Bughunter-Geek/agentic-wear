@@ -138,6 +138,7 @@ export class BridgeService {
           this.watchedThreadId = payload.threadId;
           this.watchExpiresAt = Date.now() + CHAT_WATCH_TTL_MS;
           await this.sendChatSnapshot(payload.threadId, payload.requestId);
+          await this.sendSessions();
           return;
         case "chat.unwatch":
           if (this.watchedThreadId === payload.threadId) {

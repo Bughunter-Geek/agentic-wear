@@ -137,6 +137,7 @@ import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
+import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import io.github.sirbughunter.agenticwear.update.UpdateStage
 import io.github.sirbughunter.agenticwear.update.UpdateUiState
@@ -422,7 +423,10 @@ private fun HomeScreen(
                     ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    StatusDot(state.selectedSession?.status ?: SessionStatus.NOT_LOADED)
+                    StatusDot(
+                        state.selectedSession?.status ?: SessionStatus.NOT_LOADED,
+                        state.selectedSession?.watchReady == true,
+                    )
                     Spacer(Modifier.width(if (compact) 8.dp else 11.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
@@ -434,8 +438,8 @@ private fun HomeScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = state.selectedSession?.status?.label ?: "No session selected",
-                            color = Muted,
+                            text = state.selectedSession?.displayLabel ?: "No session selected",
+                            color = if (state.selectedSession?.showsReady == true) Mint else Muted,
                             fontSize = if (compact) 9.sp else 11.sp,
                         )
                     }
@@ -734,17 +738,17 @@ private fun SessionsScreen(state: WearUiState, onBack: () -> Unit, onSelect: (St
                         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        StatusDot(session.status)
+                        StatusDot(session.status, session.watchReady)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(session.title, color = Frost, fontSize = 13.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
                             Spacer(Modifier.height(2.dp))
                             Text(
                                 buildString {
-                                    append(session.status.label)
+                                    append(session.displayLabel)
                                     if (session.ownedByWear) append(" · watch-owned")
                                 },
-                                color = Muted,
+                                color = if (session.showsReady) Mint else Muted,
                                 fontSize = 10.sp,
                             )
                         }
@@ -2893,12 +2897,12 @@ private fun ScreenHeader(title: String, onBack: () -> Unit, horizontalPadding: D
 }
 
 @Composable
-private fun StatusDot(status: SessionStatus) {
+private fun StatusDot(status: SessionStatus, watchReady: Boolean = false) {
     val color = when (status) {
         SessionStatus.ACTIVE -> Cyan
         SessionStatus.IDLE -> Mint
         SessionStatus.ERROR -> Coral
-        SessionStatus.NOT_LOADED -> Muted
+        SessionStatus.NOT_LOADED -> if (watchReady) Mint else Muted
     }
     Box(Modifier.size(11.dp).clip(CircleShape).background(color.copy(alpha = 0.18f)).border(2.dp, color, CircleShape))
 }
@@ -3052,3 +3056,9 @@ private val SessionStatus.label: String
         SessionStatus.NOT_LOADED -> "Available"
         SessionStatus.ERROR -> "Needs attention"
     }
+
+private val AgentSession.showsReady: Boolean
+    get() = status == SessionStatus.IDLE || (watchReady && status == SessionStatus.NOT_LOADED)
+
+private val AgentSession.displayLabel: String
+    get() = if (showsReady) "Ready" else status.label

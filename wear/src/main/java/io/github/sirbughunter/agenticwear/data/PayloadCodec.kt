@@ -96,6 +96,7 @@ object PayloadCodec {
                         status = status,
                         ownedByWear = value.optBoolean("ownedByWear", false),
                         canAcceptDirectInput = value.optBoolean("canAcceptDirectInput", false),
+                        watchReady = value.optBoolean("watchReady", false),
                     ),
                 )
             }
@@ -339,7 +340,8 @@ object PayloadCodec {
                     .put("updatedAt", session.updatedAtMillis)
                     .put("status", session.status.name)
                     .put("ownedByWear", session.ownedByWear)
-                    .put("canAcceptDirectInput", session.canAcceptDirectInput),
+                    .put("canAcceptDirectInput", session.canAcceptDirectInput)
+                    .put("watchReady", session.watchReady),
             )
         }
     }.toString()
@@ -401,6 +403,7 @@ object PayloadCodec {
                             .getOrDefault(SessionStatus.NOT_LOADED),
                         ownedByWear = item.optBoolean("ownedByWear"),
                         canAcceptDirectInput = item.optBoolean("canAcceptDirectInput"),
+                        watchReady = item.optBoolean("watchReady"),
                     ),
                 )
             }

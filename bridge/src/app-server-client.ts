@@ -28,6 +28,7 @@ export type SessionView = {
   status: "active" | "idle" | "error" | "notLoaded";
   ownedByWear: boolean;
   canAcceptDirectInput: boolean;
+  watchReady: boolean;
 };
 
 export type ModelView = {
@@ -150,6 +151,19 @@ const queuedSubmissionResponseSchema = z.object({
     clientUserMessageId: z.string().min(1).max(128),
   }).passthrough(),
 }).passthrough();
+const queueListResponseSchema = z.object({
+  data: z.array(z.object({
+    id: z.string().min(1).max(128),
+    clientUserMessageId: z.string().min(1).max(128),
+  }).passthrough()),
+  nextCursor: z.string().nullable(),
+}).passthrough();
+const queueStartResponseSchema = z.object({
+  turn: z.object({
+    id: z.string().min(1).max(128),
+  }).passthrough(),
+}).passthrough();
+const queueDeleteResponseSchema = z.object({ deleted: z.boolean() }).passthrough();
 const permissionPathSchema = z.string().min(1).max(4_096);
 const fileSystemPathSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("path"), path: permissionPathSchema }).strict(),
@@ -209,8 +223,13 @@ export class AppServerClient {
   private readonly deliveredTerminalEvents = new Set<string>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
+  // A thread is shown as Ready only after this bridge has successfully read
+  // its bounded history and probed the cross-client queue, or after it has
+  // started an exact Watch submission itself.
+  private readonly watchReadyThreads = new Set<string>();
   private readonly pendingPermissionMessages = new Map<string, { threadId: string; message: CachedChatMessage }>();
   private modelCache: ModelView[] | null = null;
+  private privateRestartTask: Promise<void> | null = null;
   private stopping = false;
 
   constructor(
@@ -223,8 +242,22 @@ export class AppServerClient {
 
   async connect(transport: "daemon" | "stdio" = "daemon"): Promise<void> {
     if (this.child || this.socket) return;
-    if (transport === "daemon") await this.openDaemonSocket();
-    else this.openStdio();
+    if (transport === "daemon") {
+      try {
+        await this.openDaemonSocket();
+      } catch (error) {
+        const failedSocket = this.socket as WebSocket | null;
+        this.socket = null;
+        failedSocket?.removeAllListeners();
+        failedSocket?.terminate();
+        console.warn(JSON.stringify({
+          level: "warn",
+          message: "Codex Desktop daemon unavailable; using the private background App Server",
+          error: safeError(error),
+        }));
+        this.openStdio();
+      }
+    } else this.openStdio();
     await this.initialize();
     // Listing and reading are observation-only. Do not resume or subscribe to
     // sessions at startup: doing so retains a cross-client lease that can make
@@ -246,8 +279,12 @@ export class AppServerClient {
         console.error(JSON.stringify(record));
       }
     });
-    child.once("error", (error) => this.handleFatal(error));
-    child.once("exit", (code) => this.handleFatal(new Error(`Codex App Server exited (${code ?? "unknown"})`)));
+    child.once("error", (error) => {
+      if (this.child === child) this.handleFatal(error);
+    });
+    child.once("exit", (code) => {
+      if (this.child === child) this.handleFatal(new Error(`Codex App Server exited (${code ?? "unknown"})`));
+    });
     this.lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.lines.on("line", (line) => {
       void this.handleLine(line).catch((error: unknown) => {
@@ -299,7 +336,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     const initialized = initializeResponseSchema.parse(await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.4.7" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.3" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.
@@ -424,6 +461,9 @@ export class AppServerClient {
     clientUserMessageId: string | null = null,
   ): Promise<{ threadId: string; created: boolean }> {
     let thread: CodexThread;
+    let dormantQueueNeedsWake = false;
+    let foreignTurnInProgress = false;
+    let previousTurnId: string | null = null;
     const messageId = clientUserMessageId ?? randomUUID();
     if (threadId === null) {
       const raw = await this.request("thread/start", {
@@ -449,11 +489,12 @@ export class AppServerClient {
       if (!await this.releaseThread(thread.id)) {
         throw new Error("Codex created the new session but could not release its writer. The prompt was not queued; refresh Sessions before retrying.");
       }
+      dormantQueueNeedsWake = true;
     } else {
       // Queueing is the cross-client handoff primitive in App Server 0.150+.
-      // It never resumes or steals the thread's writer: an idle queue starts
-      // automatically, while an active queue waits for the owning client to
-      // finish. This keeps the same chat readable on iOS, Android, and Desktop.
+      // An active foreign turn keeps its writer and receives this submission
+      // afterward. A dormant notLoaded queue is woken below for this exact
+      // submission, then released at its terminal state.
       thread = await this.retryTransientThreadOperation(threadId, async () => {
         const current = await this.readThread(threadId, true);
         // A mobile/Desktop-owned thread is intentionally visible as notLoaded
@@ -461,7 +502,13 @@ export class AppServerClient {
         // state even though thread/queue/add is the supported cross-client
         // handoff. Do not let a redundant sticky-settings write prevent the
         // user's message from reaching the queue.
-        if (current.status.type === "notLoaded") return current;
+        if (current.status.type === "notLoaded") {
+          dormantQueueNeedsWake = true;
+          const latest = await this.latestTurn(current.id);
+          previousTurnId = latest?.id ?? null;
+          foreignTurnInProgress = latest?.status === "inProgress";
+          return current;
+        }
         const stickySettings: Record<string, unknown> = {
           threadId: current.id,
           effort,
@@ -475,14 +522,83 @@ export class AppServerClient {
     // The watch request UUID is the App Server idempotency key. Retrying a
     // transient pre-acceptance cancellation therefore cannot create a second
     // queued message.
-    await this.retryTransientThreadOperation(thread.id, async () => {
-      queuedSubmissionResponseSchema.parse(await this.request("thread/queue/add", {
+    const queued = await this.retryTransientThreadOperation(thread.id, async () => {
+      return queuedSubmissionResponseSchema.parse(await this.request("thread/queue/add", {
         threadId: thread.id,
         input: [textInput(text)],
         clientUserMessageId: messageId,
       }));
     });
+    if (dormantQueueNeedsWake && !foreignTurnInProgress) {
+      await this.startDormantQueuedSubmission(
+        thread.id,
+        queued.queuedSubmission.id,
+        model,
+        effort,
+        previousTurnId,
+      );
+    }
+    this.watchReadyThreads.add(thread.id);
     return { threadId: thread.id, created: threadId === null };
+  }
+
+  private async startDormantQueuedSubmission(
+    threadId: string,
+    queuedSubmissionId: string,
+    model: string | null,
+    effort: string,
+    previousTurnId: string | null,
+  ): Promise<void> {
+    const resumeParams: Record<string, unknown> = {
+      threadId,
+      excludeTurns: true,
+    };
+    if (model !== null) resumeParams.model = model;
+    let startAttempted = false;
+    try {
+      responseWithThreadSchema.parse(await this.request("thread/resume", resumeParams));
+      this.controlledThreads.add(threadId);
+      const stickySettings: Record<string, unknown> = { threadId, effort };
+      if (model !== null) stickySettings.model = model;
+      await this.request("thread/settings/update", stickySettings);
+      startAttempted = true;
+      const started = queueStartResponseSchema.parse(await this.request("thread/queue/start", {
+        threadId,
+        queuedSubmissionId,
+      }));
+      this.controlledTurnIds.set(threadId, started.turn.id);
+      this.watchReadyThreads.add(threadId);
+    } catch (error) {
+      const deleted = await this.request("thread/queue/delete", {
+        threadId,
+        queuedSubmissionId,
+      }).then((response) => queueDeleteResponseSchema.parse(response).deleted).catch(() => false);
+      if (startAttempted && !deleted) {
+        const latest = await this.latestTurn(threadId).catch(() => null);
+        if (latest && latest.id !== previousTurnId) {
+          this.watchReadyThreads.add(threadId);
+          if (latest.status === "inProgress") {
+            this.controlledTurnIds.set(threadId, latest.id);
+          } else {
+            await this.releaseThread(threadId);
+            await this.restartPrivateAppServer();
+          }
+          return;
+        }
+      }
+      if (this.controlledThreads.has(threadId)) await this.releaseThread(threadId);
+      throw error;
+    }
+  }
+
+  private async latestTurn(threadId: string): Promise<z.infer<typeof turnListResponseSchema>["data"][number] | null> {
+    const raw = await this.request("thread/turns/list", {
+      threadId,
+      limit: 1,
+      sortDirection: "desc",
+      itemsView: "notLoaded",
+    });
+    return turnListResponseSchema.parse(raw).data[0] ?? null;
   }
 
   async chatSnapshot(threadId: string, forceRefresh = false): Promise<ChatSnapshot> {
@@ -512,7 +628,12 @@ export class AppServerClient {
   }
 
   private async loadFreshChatSnapshot(threadId: string): Promise<ChatSnapshot> {
-    const thread = await this.readThread(threadId, true);
+    // A normal Watch selection always comes from listSessions(), so its
+    // metadata is already cached. Reuse that observation-only record: calling
+    // thread/read after terminal release can load the thread on this client
+    // again and make iOS/Android wait for another handoff.
+    const thread = this.threadCache.get(threadId) ?? await this.readThread(threadId, true);
+    const releaseAfterRead = thread.status.type === "notLoaded" && !this.controlledThreads.has(threadId);
     // The full view contains reasoning, command output, file changes, and tool
     // payloads that Agentic Wear intentionally discards. Long Codex chats can
     // make those responses exceed the daemon transport limit or cancel the
@@ -525,6 +646,17 @@ export class AppServerClient {
       itemsView: "summary",
     });
     const response = chatTurnListResponseSchema.parse(raw);
+    try {
+      queueListResponseSchema.parse(await this.request("thread/queue/list", {
+        threadId,
+        limit: 1,
+      }));
+      this.watchReadyThreads.add(threadId);
+    } catch {
+      // History remains useful even when the queue probe is temporarily
+      // unavailable. Keep the state gray rather than failing the whole chat.
+      this.watchReadyThreads.delete(threadId);
+    }
     const messages = response.data
       .slice()
       .reverse()
@@ -546,6 +678,9 @@ export class AppServerClient {
     cache.messages = cache.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
     this.chatCaches.set(threadId, cache);
     trimOldestMapEntry(this.chatCaches, MAX_CACHED_CHATS);
+    if (releaseAfterRead && !await this.releaseObservedThread(threadId)) {
+      this.watchReadyThreads.delete(threadId);
+    }
     return materializeChat(cache);
   }
 
@@ -745,7 +880,11 @@ export class AppServerClient {
           else revision.reject(new Error(event.turn.error?.message ?? "Smart revision did not produce an updated draft"));
           return;
         }
-        const thread = await this.readThread(event.threadId, true);
+        // Terminal metadata is already present from the session registry for
+        // normal user threads. Avoid thread/read here: a late completion
+        // notification can arrive just after unsubscribe and would otherwise
+        // load the released thread again on the bridge.
+        const thread = this.threadCache.get(event.threadId) ?? await this.readThread(event.threadId, true);
         if (!isTopLevelUserThread(thread)) return;
         const occurredAt = event.turn.completedAt ? event.turn.completedAt * 1_000 : Date.now();
         const kind = `terminal.${event.turn.status}` as TerminalEvent["kind"];
@@ -764,7 +903,10 @@ export class AppServerClient {
           occurredAt,
         });
       } finally {
-        if (shouldRelease) await this.releaseThread(event.threadId);
+        if (shouldRelease) {
+          await this.releaseThread(event.threadId);
+          await this.restartPrivateAppServer();
+        }
       }
       return;
     }
@@ -775,9 +917,12 @@ export class AppServerClient {
         // chat state already requested by the watch.
         const cached = this.chatCaches.get(update.data.threadId);
         if (cached) {
-          const thread = await this.readThread(update.data.threadId, true);
-          cached.title = threadTitle(thread);
-          cached.status = this.sessionView(thread).status;
+          await this.listSessions();
+          const thread = this.threadCache.get(update.data.threadId);
+          if (thread) {
+            cached.title = threadTitle(thread);
+            cached.status = this.sessionView(thread).status;
+          }
         }
       }
       return;
@@ -887,6 +1032,7 @@ export class AppServerClient {
         }).parse(await this.request("thread/unsubscribe", { threadId }));
         this.controlledThreads.delete(threadId);
         this.controlledTurnIds.delete(threadId);
+        this.markThreadNotLoaded(threadId);
         console.info(JSON.stringify({
           level: "info",
           message: "Released App Server thread subscription",
@@ -910,6 +1056,66 @@ export class AppServerClient {
       }
     }
     return false;
+  }
+
+  private async releaseObservedThread(threadId: string): Promise<boolean> {
+    try {
+      z.object({
+        status: z.enum(["notLoaded", "notSubscribed", "unsubscribed"]),
+      }).parse(await this.request("thread/unsubscribe", { threadId }));
+      this.markThreadNotLoaded(threadId);
+      return true;
+    } catch (error) {
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: "Could not release the observation-only chat subscription",
+        threadId,
+        error: safeError(error),
+      }));
+      return false;
+    }
+  }
+
+  private markThreadNotLoaded(threadId: string): void {
+    const cachedThread = this.threadCache.get(threadId);
+    if (!cachedThread) return;
+    this.threadCache.set(threadId, {
+      ...cachedThread,
+      status: { type: "notLoaded" },
+      canAcceptDirectInput: false,
+    });
+  }
+
+  private restartPrivateAppServer(): Promise<void> {
+    if (!this.child || this.stopping) return Promise.resolve();
+    if (this.privateRestartTask) return this.privateRestartTask;
+    this.privateRestartTask = this.performPrivateAppServerRestart().finally(() => {
+      this.privateRestartTask = null;
+    });
+    return this.privateRestartTask;
+  }
+
+  private async performPrivateAppServerRestart(): Promise<void> {
+    const previous = this.child;
+    if (!previous) return;
+    this.lines?.close();
+    this.lines = null;
+    this.child = null;
+    // App Server writer ownership is process-scoped. Unsubscribe removes the
+    // event subscription, but a private process can still block another
+    // client from resuming the thread until that process exits.
+    this.failAll(new Error("Codex App Server is restarting after releasing the Watch turn"));
+    const exited = new Promise<void>((resolve) => previous.once("exit", () => resolve()));
+    previous.kill("SIGTERM");
+    await Promise.race([exited, handoffDelay(PRIVATE_SERVER_EXIT_TIMEOUT_MS)]);
+    if (previous.exitCode === null && previous.signalCode === null) {
+      previous.kill("SIGKILL");
+      await Promise.race([exited, handoffDelay(PRIVATE_SERVER_KILL_TIMEOUT_MS)]);
+    }
+    if (this.stopping) return;
+    this.openStdio();
+    await this.initialize();
+    await this.listSessions();
   }
 
   private updateCachedAgentMessage(
@@ -1044,6 +1250,7 @@ export class AppServerClient {
       status: thread.status.type === "systemError" ? "error" : thread.status.type,
       ownedByWear: this.watchOwnedThreadIds.has(thread.id),
       canAcceptDirectInput: thread.canAcceptDirectInput === true,
+      watchReady: this.watchReadyThreads.has(thread.id),
     };
   }
 
@@ -1169,11 +1376,24 @@ function chatMessageFromItem(
     };
   }
   if (item.type !== "userMessage") return null;
-  const text = item.content
+  const imageCount = item.content
+    ?.filter((content) => content.type === "image" || content.type === "localImage")
+    .length ?? 0;
+  const rawText = item.content
     ?.filter((content) => content.type === "text" && content.text?.trim())
     .map((content) => content.text!.trim())
     .join("\n\n")
-    .trim();
+    .trim() ?? "";
+  const requestText = imageCount > 0
+    ? rawText.replace(
+      /^# Files mentioned by the user:\s*[\s\S]*?## My request(?: for Codex)?:\s*/u,
+      "",
+    ).trim()
+    : rawText;
+  const imageNotice = imageCount === 1
+    ? "Image attached. View on Android or iOS."
+    : `${imageCount} images attached. View on Android or iOS.`;
+  const text = [requestText, imageCount > 0 ? imageNotice : ""].filter(Boolean).join("\n\n");
   if (!text) return null;
   return {
     id: item.id,
@@ -1233,6 +1453,8 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 const MAX_APP_SERVER_MESSAGE_BYTES = 16 * 1_024 * 1_024;
 const UNSUBSCRIBE_ATTEMPTS = 3;
 const UNSUBSCRIBE_RETRY_MS = 200;
+const PRIVATE_SERVER_EXIT_TIMEOUT_MS = 2_000;
+const PRIVATE_SERVER_KILL_TIMEOUT_MS = 500;
 const THREAD_SYNC_ATTEMPTS = 7;
 const THREAD_SYNC_RETRY_MS = 250;
 const MAX_CHAT_HISTORY_TURNS = 6;

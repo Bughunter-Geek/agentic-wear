@@ -18,12 +18,12 @@ Watch-to-bridge traffic is live-only. This deliberately trades offline voice-com
 
 The bridge:
 
-- Connects to the managed Codex App Server’s local Unix WebSocket.
+- Connects to the managed Codex App Server’s local Unix WebSocket when Codex Desktop is running, and falls back to its own background App Server when that socket is absent so launchd remains usable with the desktop app closed.
 - Subscribes to loaded sessions and reconciles their persisted terminal turns every 20 seconds.
 - Emits one idempotent event per final turn status.
 - Uses a persistent local MLX Whisper worker for audio by default, keeping the multilingual model warm between prompts.
 - Maintains a bounded, role-aware cache for a watched session and streams assistant-message deltas without forwarding reasoning or tool output.
-- Rejoins idle tasks owned by another Codex client, applies selected sticky model settings, and starts the turn through the shared daemon so every connected client receives live updates. Busy cross-client tasks remain untouched; active watch-owned turns are steered only when the daemon explicitly permits direct input.
+- Adds every Watch prompt to Codex's idempotent cross-client queue. If a foreign idle task leaves that queue dormant, the bridge briefly resumes it, applies the selected model settings, starts that exact queued submission, and releases the subscription at terminal completion. Busy foreign tasks remain untouched and process the queued submission after their active turn.
 - Routes explicit response feedback through Codex App Server without attaching local logs.
 - Reconciles an explicitly requested correction through one low-effort ephemeral Codex turn, restoring the prior draft on failure.
 - Supports hosted GPT Transcribe only as an explicit deployment-owner opt-in.

@@ -9,6 +9,7 @@ data class AgentSession(
     val status: SessionStatus,
     val ownedByWear: Boolean,
     val canAcceptDirectInput: Boolean,
+    val watchReady: Boolean = false,
 )
 
 /**

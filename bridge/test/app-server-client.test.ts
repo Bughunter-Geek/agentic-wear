@@ -8,6 +8,10 @@ type ClientInternals = {
   write: (message: Record<string, unknown>) => void;
   controlledThreads: Set<string>;
   controlledTurnIds: Map<string, string>;
+  openDaemonSocket: () => Promise<void>;
+  openStdio: () => void;
+  initialize: () => Promise<void>;
+  listSessions: () => Promise<unknown[]>;
   emitRecentTerminals: (
     session: {
       id: string;
@@ -16,6 +20,7 @@ type ClientInternals = {
       status: "active" | "idle" | "error" | "notLoaded";
       ownedByWear: boolean;
       canAcceptDirectInput: boolean;
+      watchReady?: boolean;
     },
     newerThanMs: number,
   ) => Promise<void>;
@@ -26,6 +31,7 @@ type ClientInternals = {
     status: "active" | "idle" | "error" | "notLoaded";
     ownedByWear: boolean;
     canAcceptDirectInput: boolean;
+    watchReady?: boolean;
   }) => Promise<void>;
 };
 
@@ -56,11 +62,37 @@ function queuedResponse(params: unknown) {
   };
 }
 
+function terminalTurnsResponse() {
+  return { data: [{ id: "turn-old", status: "completed", completedAt: 1_787_900_000 }], nextCursor: null, backwardsCursor: null };
+}
+
+function startedQueueResponse() {
+  return { turn: { id: "turn-watch", status: "inProgress" } };
+}
+
 function client(): AppServerClient {
   return new AppServerClient(new Set(), async () => {}, async () => {});
 }
 
 describe("AppServerClient session delivery", () => {
+  it("falls back to a private App Server when Codex Desktop is closed", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.openDaemonSocket = vi.fn().mockRejectedValue(new Error("connect ENOENT app-server-control.sock"));
+    internals.openStdio = vi.fn();
+    internals.initialize = vi.fn().mockResolvedValue(undefined);
+    internals.listSessions = vi.fn().mockResolvedValue([]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await target.connect("daemon");
+
+    expect(internals.openStdio).toHaveBeenCalledTimes(1);
+    expect(internals.initialize).toHaveBeenCalledTimes(1);
+    expect(internals.listSessions).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("private background App Server"));
+    warn.mockRestore();
+  });
+
   it("requires the App Server release that provides cross-client queueing", () => {
     expect(supportsThreadQueue("codex_cli_rs/0.149.0")).toBe(false);
     expect(supportsThreadQueue("codex_cli_rs/0.150.0-alpha.12.2")).toBe(true);
@@ -78,14 +110,18 @@ describe("AppServerClient session delivery", () => {
     expect(internals.request).not.toHaveBeenCalled();
   });
 
-  it("queues an unloaded session without resuming or acquiring its writer", async () => {
+  it("wakes an idle unloaded session and starts the exact queued submission", async () => {
     const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
     internals.request = vi.fn((method: string, params: unknown) => {
       methods.push(method);
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
       if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -94,7 +130,90 @@ describe("AppServerClient session delivery", () => {
       created: false,
     });
 
-    expect(methods).toEqual(["thread/read", "thread/queue/add"]);
+    expect(methods).toEqual([
+      "thread/read",
+      "thread/turns/list",
+      "thread/queue/add",
+      "thread/resume",
+      "thread/settings/update",
+      "thread/queue/start",
+    ]);
+    expect(vi.mocked(internals.request).mock.calls.at(-1)?.[1]).toEqual({
+      threadId: "thread-1",
+      queuedSubmissionId: "queued-1",
+    });
+    expect(internals.controlledTurnIds.get("thread-1")).toBe("turn-watch");
+  });
+
+  it("queues behind a genuinely active foreign turn without taking over its writer", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{ id: "turn-mobile", status: "inProgress", completedAt: null }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn("thread-1", "After the phone finishes.", "/tmp"))
+      .resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/add"]);
+    expect(methods).not.toContain("thread/resume");
+    expect(methods).not.toContain("thread/queue/start");
+  });
+
+  it("recognizes resume auto-start without retrying the Watch message", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    let turnReads = 0;
+    let queueAdds = 0;
+    internals.request = vi.fn((method: string, params: unknown) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") {
+        turnReads += 1;
+        return Promise.resolve({
+          data: [{
+            id: turnReads === 1 ? "turn-old" : "turn-watch",
+            status: turnReads === 1 ? "completed" : "completed",
+            completedAt: 1_787_900_000 + turnReads,
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/queue/add") {
+        queueAdds += 1;
+        return Promise.resolve(queuedResponse(params));
+      }
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/start") return Promise.reject(new Error("queued submission not found: queued-1"));
+      if (method === "thread/queue/delete") return Promise.resolve({ deleted: false });
+      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Run once despite the resume race.",
+      "/tmp",
+      null,
+      "medium",
+      "watch-race-1",
+    )).resolves.toEqual({ threadId: "thread-1", created: false });
+
+    expect(queueAdds).toBe(1);
+    expect(turnReads).toBe(2);
+    expect(internals.controlledTurnIds.has("thread-1")).toBe(false);
   });
 
   it("retries transient synchronization before queueing an existing session exactly once", async () => {
@@ -111,10 +230,14 @@ describe("AppServerClient session delivery", () => {
         return Promise.resolve({ thread: thread("notLoaded") });
       }
       if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
       if (method === "thread/queue/add") {
         queuedParams = params as Record<string, unknown>;
         return Promise.resolve(queuedResponse(params));
       }
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -142,11 +265,15 @@ describe("AppServerClient session delivery", () => {
     internals.request = vi.fn((method: string, params: unknown) => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
       if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
       if (method === "thread/queue/add") {
         queueIds.push((params as Record<string, unknown>).clientUserMessageId);
         if (queueIds.length === 1) return Promise.reject(new Error("bs1 was cancelled"));
         return Promise.resolve(queuedResponse(params));
       }
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -433,6 +560,8 @@ describe("AppServerClient session delivery", () => {
       if (method === "thread/settings/update") return Promise.resolve({});
       if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
       if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
 
@@ -443,6 +572,9 @@ describe("AppServerClient session delivery", () => {
       "thread/settings/update",
       "thread/unsubscribe",
       "thread/queue/add",
+      "thread/resume",
+      "thread/settings/update",
+      "thread/queue/start",
     ]);
   });
 
@@ -641,6 +773,49 @@ describe("AppServerClient session delivery", () => {
     ]);
   });
 
+  it("replaces attachment metadata and local image paths with a compact watch notice", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-images",
+            items: [{
+              id: "user-images",
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "# Files mentioned by the user:\n\n## Photo 1.jpg: /tmp/codex-remote-attachments/secret/Photo-1.jpg\n## Photo 2.jpg: /tmp/codex-remote-attachments/secret/Photo-2.jpg\n\n## My request:\nPlease diagnose these screenshots.",
+                },
+                { type: "localImage", path: "/tmp/codex-remote-attachments/secret/Photo-1.jpg" },
+                { type: "localImage", path: "/tmp/codex-remote-attachments/secret/Photo-2.jpg" },
+              ],
+            }],
+          }],
+          nextCursor: null,
+        });
+      }
+      if (method === "thread/list") {
+        return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      }
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    const snapshot = await target.chatSnapshot("thread-1", true);
+    expect(snapshot.messages[0]?.text).toBe(
+      "Please diagnose these screenshots.\n\n2 images attached. View on Android or iOS.",
+    );
+    expect(snapshot.messages[0]?.text).not.toContain("/tmp/");
+    expect(snapshot.messages[0]?.text).not.toContain("Files mentioned");
+
+    const sessions = await target.listSessions();
+    expect(sessions[0]?.watchReady).toBe(true);
+  });
+
   it("retries a transient missing rollout before declaring a listed chat unavailable", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
@@ -756,7 +931,7 @@ describe("AppServerClient session delivery", () => {
 
     expect(snapshot.paragraphs.at(-1)?.text).toBe("Working safely");
     expect(outputThreads).toEqual(["thread-1"]);
-    expect(methods).toEqual(["thread/read", "thread/turns/list"]);
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/list"]);
   });
 
   it("uploads explicit thumbs feedback without logs and tags the exact response", async () => {
