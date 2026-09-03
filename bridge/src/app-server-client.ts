@@ -578,7 +578,6 @@ export class AppServerClient {
             }
             return current;
           }
-          await this.updateThreadSettings(current.id, model, effort);
           if (!await this.acquireDormantThread(current.id, model, effort)) {
             // Another client can retain an idle writer. The durable queue is
             // still canonical and uses the Watch UUID as its idempotency key;
@@ -586,6 +585,7 @@ export class AppServerClient {
             this.watchReadyThreads.add(current.id);
             return current;
           }
+          await this.updateThreadSettings(current.id, model, effort);
           startQueuedSubmission = true;
           return current;
         }

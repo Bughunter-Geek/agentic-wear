@@ -148,8 +148,8 @@ describe("AppServerClient session delivery", () => {
     expect(methods).toEqual([
       "thread/read",
       "thread/turns/list",
-      "thread/settings/update",
       "thread/resume",
+      "thread/settings/update",
       "thread/queue/add",
       "thread/queue/start",
     ]);
@@ -449,8 +449,8 @@ describe("AppServerClient session delivery", () => {
     expect(methods).toEqual([
       "thread/read",
       "thread/turns/list",
-      "thread/settings/update",
       "thread/resume",
+      "thread/settings/update",
       "thread/queue/add",
       "thread/queue/start",
     ]);
@@ -509,8 +509,8 @@ describe("AppServerClient session delivery", () => {
     expect(methods).toEqual([
       "thread/read",
       "thread/turns/list",
-      "thread/settings/update",
       "thread/resume",
+      "thread/settings/update",
       "thread/queue/add",
       "thread/queue/start",
     ]);
@@ -675,7 +675,6 @@ describe("AppServerClient session delivery", () => {
     expect(methods).toEqual([
       "thread/read",
       "thread/turns/list",
-      "thread/settings/update",
       "thread/resume",
       "thread/queue/add",
     ]);
