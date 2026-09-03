@@ -550,7 +550,7 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
   if (/unauthori[sz]ed|sign(?:ed)? out|log in/iu.test(message)) {
     return "Codex is signed out on the bridge host. Sign in there, then retry.";
   }
-  if (/not found|no rollout/iu.test(message)) {
+  if (/not found|no rollout|not loaded/iu.test(message)) {
     if (kind === "turn.submit") {
       return "Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry.";
     }

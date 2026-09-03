@@ -1,11 +1,130 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const label = "io.github.sirbughunter.agenticwear.bridge";
+
+export type LaunchAgentMetadata = {
+  workingDirectory: string | null;
+  cliPath: string | null;
+  codexPath: string | null;
+  nodePath: string | null;
+};
+
+export type LaunchAgentInspection = {
+  installed: boolean;
+  running: boolean;
+  plistPath: string;
+  workingDirectory: string | null;
+  cliPath: string | null;
+  codexPath: string | null;
+  matchesRepo: boolean;
+  pid: number | null;
+};
+
+export function parseLaunchAgentPlist(content: string): LaunchAgentMetadata {
+  const workingDirMatch = /<key>WorkingDirectory<\/key>\s*<string>([^<]+)<\/string>/u.exec(content);
+  const workingDirectory = workingDirMatch?.[1]?.trim() ?? null;
+  const programArgsMatch = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/u.exec(content);
+  let nodePath: string | null = null;
+  let cliPath: string | null = null;
+  const argsBlock = programArgsMatch?.[1];
+  if (argsBlock) {
+    const stringTags = [...argsBlock.matchAll(/<string>([^<]+)<\/string>/gu)]
+      .map((m) => m[1]?.trim())
+      .filter((s): s is string => typeof s === "string");
+    if (stringTags.length >= 1) nodePath = stringTags[0] ?? null;
+    if (stringTags.length >= 2) cliPath = stringTags[1] ?? null;
+  }
+  const codexPathMatch = /<key>AGENTIC_WEAR_CODEX_PATH<\/key>\s*<string>([^<]+)<\/string>/u.exec(content);
+  const codexPath = codexPathMatch?.[1]?.trim() ?? null;
+  return { workingDirectory, cliPath, codexPath, nodePath };
+}
+
+export async function inspectLaunchAgent(expectedRepoRoot: string): Promise<LaunchAgentInspection> {
+  if (process.platform !== "darwin") {
+    return {
+      installed: false,
+      running: false,
+      plistPath: launchAgentPath(),
+      workingDirectory: null,
+      cliPath: null,
+      codexPath: null,
+      matchesRepo: false,
+      pid: null,
+    };
+  }
+  const plistPath = launchAgentPath();
+  if (!existsSync(plistPath)) {
+    return {
+      installed: false,
+      running: false,
+      plistPath,
+      workingDirectory: null,
+      cliPath: null,
+      codexPath: null,
+      matchesRepo: false,
+      pid: null,
+    };
+  }
+  let content = "";
+  try {
+    content = await readFile(plistPath, "utf8");
+  } catch {
+    // If unreadable, proceed with empty metadata
+  }
+  const { workingDirectory, cliPath, codexPath } = parseLaunchAgentPlist(content);
+
+  const normalizedExpected = resolve(expectedRepoRoot);
+  const normalizedWorking = workingDirectory ? resolve(workingDirectory) : null;
+  const expectedCli = resolve(normalizedExpected, "bridge", "dist", "cli.js");
+  const normalizedCli = cliPath ? resolve(cliPath) : null;
+
+  const matchesRepo = normalizedWorking === normalizedExpected && normalizedCli === expectedCli;
+
+  let running = false;
+  let pid: number | null = null;
+  try {
+    const { stdout } = await execFileAsync("launchctl", ["print", `${domain()}/${label}`], {
+      timeout: 10_000,
+      maxBuffer: 64 * 1_024,
+    });
+    const pidMatch = /\bpid = (\d+)/u.exec(stdout);
+    const rawPid = pidMatch?.[1];
+    if (rawPid) {
+      pid = Number.parseInt(rawPid, 10);
+      running = pid > 0;
+    } else {
+      running = /state = running/u.test(stdout);
+    }
+  } catch {
+    running = false;
+  }
+
+  return {
+    installed: true,
+    running,
+    plistPath,
+    workingDirectory,
+    cliPath,
+    codexPath,
+    matchesRepo,
+    pid,
+  };
+}
+
+export function generateLaunchAgentPlist(
+  nodePath: string,
+  cliPath: string,
+  repoRoot: string,
+  codexPath: string,
+): string {
+  return plist(nodePath, cliPath, repoRoot, codexPath);
+}
 
 export async function installLaunchAgent(
   repoRoot: string,

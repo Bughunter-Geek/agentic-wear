@@ -34,7 +34,11 @@ import {
   resolveTranscriptionProvider,
   setupLocalWhisper,
 } from "./local-whisper.js";
-import { installLaunchAgent, launchAgentStatus, uninstallLaunchAgent } from "./launchd.js";
+import {
+  inspectLaunchAgent,
+  installLaunchAgent,
+  uninstallLaunchAgent,
+} from "./launchd.js";
 import { uninstallCodexRelayConfig } from "./codex-relay-config.js";
 
 const execFileAsync = promisify(execFile);
@@ -72,7 +76,11 @@ async function service(args: string[]): Promise<void> {
     // background MCP process can recreate tool-context-only prompts.
     await uninstallCodexRelayConfig();
     const path = await installLaunchAgent(root, process.execPath, codexPath);
-    console.log(`Background bridge installed: ${path}`);
+    const verification = await inspectLaunchAgent(root);
+    if (!verification.matchesRepo) {
+      throw new Error(`Service installation failed verification: plist points to ${verification.workingDirectory ?? "unknown"} instead of ${root}`);
+    }
+    console.log(`Background bridge installed and verified: ${path} (PID ${verification.pid ?? "active"})`);
     return;
   }
   if (action === "uninstall") {
@@ -82,9 +90,25 @@ async function service(args: string[]): Promise<void> {
     return;
   }
   if (action === "status") {
-    const running = await launchAgentStatus();
-    console.log(running ? "Background bridge is loaded." : "Background bridge is not loaded.");
-    if (!running) process.exitCode = 1;
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+    const inspection = await inspectLaunchAgent(root);
+    if (!inspection.installed) {
+      console.log("Background bridge is not installed.");
+      if (process.platform === "darwin") process.exitCode = 1;
+      return;
+    }
+    if (!inspection.matchesRepo) {
+      console.warn(`WARNING: Background bridge is installed from a different checkout: ${inspection.workingDirectory ?? "unknown"} (current repo: ${root})`);
+      console.warn("Run `agentic-wear service install` to migrate to this checkout.");
+      process.exitCode = 1;
+      return;
+    }
+    console.log(
+      inspection.running
+        ? `Background bridge is running (PID ${inspection.pid ?? "active"}). Working directory: ${inspection.workingDirectory}`
+        : "Background bridge is loaded but not running.",
+    );
+    if (!inspection.running) process.exitCode = 1;
     return;
   }
   throw new Error("Use `agentic-wear service install|uninstall|status`");

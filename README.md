@@ -110,9 +110,10 @@ The bridge creates and displays an eight-character code locally. Enter it with t
 ```bash
 node bridge/dist/cli.js doctor
 node bridge/dist/cli.js service install
+node bridge/dist/cli.js service status
 ```
 
-The background service reads `.env.local`, stores its relay credential and ECDH private key in macOS Keychain, and reconnects after login or a crash. The pairing bootstrap credential may also be kept in Keychain under `relay-bootstrap-v1`; an explicit `AGENTIC_WEAR_BOOTSTRAP_SECRET` still takes precedence. The service does not place secrets in the launchd property list.
+The background service reads `.env.local`, stores its relay credential and ECDH private key in macOS Keychain, and reconnects after login or a crash. The pairing bootstrap credential may also be kept in Keychain under `relay-bootstrap-v1`; an explicit `AGENTIC_WEAR_BOOTSTRAP_SECRET` still takes precedence. The service does not place secrets in the launchd property list. If you work across multiple worktrees or lanes, `service status` warns if the running launchd service points to another checkout, and `service install` migrates the launchd job to the current checkout without modifying pairing or Keychain data.
 
 ## 4. Build the watch app
 

@@ -301,6 +301,10 @@ describe("publicRequestError", () => {
   it("states that a failed send was not queued instead of calling it a chat-load error", () => {
     expect(publicRequestError(new Error("thread not found"), "turn.submit"))
       .toBe("Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry.");
+    expect(publicRequestError(new Error("thread not loaded: 00000000-0000-0000-0000-000000000000"), "turn.submit"))
+      .toBe("Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry.");
+    expect(publicRequestError(new Error("thread not loaded: 00000000-0000-0000-0000-000000000000"), "chat.watch"))
+      .toBe("The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears.");
   });
 
   it("does not expose an internal cancelled task id after retries", () => {
