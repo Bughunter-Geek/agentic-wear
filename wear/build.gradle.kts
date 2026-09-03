@@ -183,6 +183,9 @@ dependencies {
     implementation("com.google.firebase:firebase-messaging")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("dev.chrisbanes.haze:haze-android:1.6.10")
+    implementation("androidx.wear.tiles:tiles:1.6.2")
+    implementation("androidx.wear.protolayout:protolayout-material:1.4.2")
+    implementation("androidx.concurrent:concurrent-futures:1.3.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")

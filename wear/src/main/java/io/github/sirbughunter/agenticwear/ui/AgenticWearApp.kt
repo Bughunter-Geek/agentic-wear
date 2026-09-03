@@ -34,6 +34,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -2401,13 +2402,23 @@ private fun ChatScreen(
         val currentThreadId = chat?.threadId ?: return@LaunchedEffect
         val firstPosition = positionedThreadId != currentThreadId
         val appendedWhileFollowing = messages.size > previousMessageCount && nearLatest
-        val thinkingStarted = agentThinking && !previousAgentThinking
+        val thinkingStarted = agentThinking && !previousAgentThinking && (nearLatest || firstPosition)
         previousMessageCount = messages.size
         previousAgentThinking = agentThinking
         if (firstPosition || appendedWhileFollowing || thinkingStarted) {
-            delay(1)
-            val lastIndex = listState.layoutInfo.totalItemsCount - 1
-            if (lastIndex >= 0) listState.scrollToItem(lastIndex)
+            delay(16)
+            val targetIndex = if (agentThinking && messages.isNotEmpty()) {
+                messages.size // Index of the newest message (item 0 is the session header)
+            } else {
+                (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+            }
+            if (targetIndex >= 0) {
+                if (firstPosition) {
+                    listState.scrollToItem(targetIndex)
+                } else {
+                    listState.animateScrollToItem(targetIndex)
+                }
+            }
             positionedThreadId = currentThreadId
         }
     }
@@ -2656,6 +2667,8 @@ private fun AgentThinkingIndicator(modifier: Modifier = Modifier) {
     val animationsEnabled = ValueAnimator.areAnimatorsEnabled()
     val transition = rememberInfiniteTransition(label = "agent thinking")
     val shape = RoundedCornerShape(18.dp)
+    val isSquare = !LocalConfiguration.current.isScreenRound
+    val compact = LocalConfiguration.current.screenWidthDp < 200
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -2674,30 +2687,33 @@ private fun AgentThinkingIndicator(modifier: Modifier = Modifier) {
                 stateDescription = "Agent is thinking"
                 liveRegion = LiveRegionMode.Polite
             }
-            .padding(horizontal = 9.dp, vertical = 7.dp),
+            .padding(horizontal = if (compact && isSquare) 7.dp else 9.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact && isSquare) 5.dp else 7.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(25.dp)
+                .size(if (compact && isSquare) 22.dp else 25.dp)
                 .clip(CircleShape)
                 .background(Ink.copy(alpha = 0.72f))
-                .border(1.dp, Cyan.copy(alpha = 0.38f), CircleShape),
+                .border(1.dp, Cyan.copy(alpha = 0.38f), CircleShape)
+                .clearAndSetSemantics { },
             contentAlignment = Alignment.Center,
         ) {
             AgentGlyph(
                 recording = false,
                 pending = true,
-                modifier = Modifier.size(15.dp),
+                modifier = Modifier.size(if (compact && isSquare) 13.dp else 15.dp),
             )
         }
         Text(
-            "Agent is thinking",
+            text = if (compact && isSquare) "Thinking…" else "Agent is thinking",
             color = Frost,
-            fontSize = 10.sp,
+            fontSize = if (compact && isSquare) 9.sp else 10.sp,
             lineHeight = 12.sp,
             fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         Row(

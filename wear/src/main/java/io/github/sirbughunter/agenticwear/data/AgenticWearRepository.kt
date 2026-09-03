@@ -9,6 +9,7 @@ import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
+import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -342,6 +343,7 @@ class AgenticWearRepository(private val context: Context) {
         preferences.lastSendNotice = null
         preferences.pending = false
         preferences.lastError = null
+        RecentSessionsTileService.requestUpdate(context)
         broadcastStateChanged()
     }
 
@@ -363,6 +365,7 @@ class AgenticWearRepository(private val context: Context) {
                 preferences.sessions = PayloadCodec.decodeSessions(payload)
                 if (payload.has("models")) preferences.models = PayloadCodec.decodeModels(payload)
                 preferences.lastError = null
+                RecentSessionsTileService.requestUpdate(context)
             }
             "transcription.ready" -> {
                 val transcript = PayloadCodec.decodeTranscript(payload) ?: return

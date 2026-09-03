@@ -27,7 +27,7 @@ must be dependable before it becomes broad.
 ## Later
 
 - [x] User-message context, Markdown, and response feedback in the compact conversation view.
-- A recent-sessions tile backed by the watch's encrypted local cache.
+- [x] A recent-sessions tile backed by the watch's encrypted local cache.
 - An active-session complication that remains useful without holding a socket open.
 
 ## Deliberate non-goals

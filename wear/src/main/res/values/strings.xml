@@ -3,4 +3,6 @@
     <string name="notification_channel_complete">Completed work</string>
     <string name="notification_channel_permission">Permission requests</string>
     <string name="notification_channel_error">Errors and interruptions</string>
+    <string name="tile_recent_sessions_label">Recent sessions</string>
+    <string name="tile_recent_sessions_description">Quickly browse and resume recent Codex sessions.</string>
 </resources>

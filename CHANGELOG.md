@@ -2,6 +2,17 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.12-alpha — 2026-09-03
+
+- Adds the Recent-Sessions Tile (`RecentSessionsTileService`) backed by the watch's encrypted local cache, providing instant glanceable access to active and recent Codex sessions with tap-to-resume navigation.
+- Fixes chat conversation scroll positioning on round and compact-square viewports so entering a live session displays the newest conversation content with the live thinking indicator positioned beneath it, without pushing earlier messages off-screen.
+- Refines `AgentThinkingIndicator` for compact square screens with responsive padding and single-line layout to prevent awkward wrapping while preserving polite accessibility announcements.
+- Automatically requests Tile updates from `AgenticWearRepository` whenever session snapshots arrive or connections change.
+
+### Test status
+
+- All 115 bridge tests, 18 relay tests, Wear unit tests, and lint pass with 0 errors. R8 shrinking, release signing with versionCode 38, checksum verification, and emulator interaction checks pass across 454×454 round and 360×360 compact-square viewports.
+
 ## 0.6.9-alpha — 2026-08-31
 
 - Rebuilds the Home session selector as a full-width Material 3 stadium button with a proper session-state hierarchy and directional affordance.

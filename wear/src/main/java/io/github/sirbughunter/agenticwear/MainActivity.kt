@@ -134,12 +134,18 @@ class MainActivity : ComponentActivity() {
         if (intent?.hasExtra(EXTRA_ALERT_EVENT_ID) == true) {
             viewModel.openAlert(intent.getStringExtra(EXTRA_ALERT_EVENT_ID))
         }
+        if (intent?.hasExtra(EXTRA_THREAD_ID) == true) {
+            intent.getStringExtra(EXTRA_THREAD_ID)?.let { threadId ->
+                viewModel.openSession(threadId)
+            }
+        }
     }
 
     companion object {
         const val EXTRA_DEMO_STATE = "io.github.sirbughunter.agenticwear.DEMO_STATE"
         const val EXTRA_ALERT_EVENT_ID = "io.github.sirbughunter.agenticwear.ALERT_EVENT_ID"
         const val EXTRA_PAIRING_CODE = "io.github.sirbughunter.agenticwear.PAIRING_CODE"
+        const val EXTRA_THREAD_ID = "io.github.sirbughunter.agenticwear.THREAD_ID"
     }
 }
 

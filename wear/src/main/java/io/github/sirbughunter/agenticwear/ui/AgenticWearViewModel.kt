@@ -179,6 +179,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         reload(WearScreen.HOME)
     }
 
+    fun openSession(threadId: String) {
+        preferences.selectedThreadId = threadId
+        preferences.chatSnapshot = null
+        openChat(threadId)
+    }
+
     fun openSelectedChat() {
         val threadId = _state.value.selectedSession?.id ?: return showError("Choose a Codex session first")
         openChat(threadId)
