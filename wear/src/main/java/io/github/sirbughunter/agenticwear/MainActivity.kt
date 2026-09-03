@@ -131,13 +131,12 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra(EXTRA_PAIRING_CODE)?.let { value ->
             extractPairingCode(value)?.let { pairingCodePrefill = it }
         }
-        if (intent?.hasExtra(EXTRA_ALERT_EVENT_ID) == true) {
-            viewModel.openAlert(intent.getStringExtra(EXTRA_ALERT_EVENT_ID))
-        }
         if (intent?.hasExtra(EXTRA_THREAD_ID) == true) {
             intent.getStringExtra(EXTRA_THREAD_ID)?.let { threadId ->
                 viewModel.openSession(threadId)
             }
+        } else if (intent?.hasExtra(EXTRA_ALERT_EVENT_ID) == true) {
+            viewModel.openAlert(intent.getStringExtra(EXTRA_ALERT_EVENT_ID))
         }
     }
 

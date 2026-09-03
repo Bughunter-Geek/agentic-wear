@@ -1340,8 +1340,18 @@ export class AppServerClient {
     phase: ChatParagraph["phase"] = "unknown",
     replace = false,
   ): void {
-    const cached = this.chatCaches.get(threadId);
-    if (!cached) return;
+    let cached = this.chatCaches.get(threadId);
+    if (!cached) {
+      const thread = this.threadCache.get(threadId);
+      cached = {
+        threadId,
+        title: thread ? threadTitle(thread) : "Codex session",
+        status: "active",
+        messages: [],
+      };
+      this.chatCaches.set(threadId, cached);
+      trimOldestMapEntry(this.chatCaches, MAX_CACHED_CHATS);
+    }
     const existing = cached.messages.find((message) => message.id === itemId);
     if (existing) {
       existing.text = boundedChatText(replace ? text : existing.text + text);
@@ -1389,12 +1399,22 @@ export class AppServerClient {
     while (pending.size > MAX_OPTIMISTIC_USER_MESSAGES) {
       pending.delete(pending.keys().next().value ?? "");
     }
-    const cached = this.chatCaches.get(threadId);
-    if (cached) {
-      cached.messages = cached.messages.filter(({ id }) => id !== messageId);
-      cached.messages.push(message);
-      cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
+    let cached = this.chatCaches.get(threadId);
+    if (!cached) {
+      const thread = this.threadCache.get(threadId);
+      cached = {
+        threadId,
+        title: thread ? threadTitle(thread) : "Codex session",
+        status: "active",
+        messages: [],
+      };
+      this.chatCaches.set(threadId, cached);
+      trimOldestMapEntry(this.chatCaches, MAX_CACHED_CHATS);
     }
+    cached.status = "active";
+    cached.messages = cached.messages.filter(({ id }) => id !== messageId);
+    cached.messages.push(message);
+    cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
     void this.onAgentOutput(threadId).catch((error: unknown) => {
       console.error(JSON.stringify({
         level: "error",
@@ -1405,8 +1425,20 @@ export class AppServerClient {
   }
 
   private updateCachedChatStatus(threadId: string, status: SessionView["status"]): boolean {
-    const cached = this.chatCaches.get(threadId);
-    if (!cached || cached.status === status) return false;
+    let cached = this.chatCaches.get(threadId);
+    if (!cached) {
+      const thread = this.threadCache.get(threadId);
+      cached = {
+        threadId,
+        title: thread ? threadTitle(thread) : "Codex session",
+        status,
+        messages: [],
+      };
+      this.chatCaches.set(threadId, cached);
+      trimOldestMapEntry(this.chatCaches, MAX_CACHED_CHATS);
+      return true;
+    }
+    if (cached.status === status) return false;
     cached.status = status;
     return true;
   }

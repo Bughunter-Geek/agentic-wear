@@ -187,6 +187,8 @@ export class BridgeService {
               result.followUpMode ?? payload.followUpAction,
             ));
           } else await this.removePendingTurn(payload.requestId);
+          this.watchedThreadId = result.threadId;
+          this.watchExpiresAt = Date.now() + CHAT_WATCH_TTL_MS;
           await this.send({
             version: 1,
             kind: "turn.accepted",
@@ -196,6 +198,7 @@ export class BridgeService {
             selectionApplied: result.selectionApplied,
             message: turnAcceptedMessage(result),
           });
+          await this.sendChatSnapshot(result.threadId).catch(() => undefined);
           await this.sendSessions();
           return;
         }

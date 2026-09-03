@@ -71,8 +71,12 @@ object AgentNotifier {
             PackageManager.PERMISSION_GRANTED
         ) return
 
-        val intent = Intent(context, MainActivity::class.java)
-            .putExtra(MainActivity.EXTRA_ALERT_EVENT_ID, alert.eventId)
+        val intent = Intent(context, MainActivity::class.java).apply {
+            putExtra(MainActivity.EXTRA_ALERT_EVENT_ID, alert.eventId)
+            if (alert.threadId.isNotBlank()) {
+                putExtra(MainActivity.EXTRA_THREAD_ID, alert.threadId)
+            }
+        }
         val pendingIntent = PendingIntent.getActivity(
             context,
             alert.eventId.hashCode(),

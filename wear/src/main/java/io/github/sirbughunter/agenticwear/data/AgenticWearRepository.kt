@@ -12,6 +12,7 @@ import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotificati
 import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -162,6 +163,10 @@ class AgenticWearRepository(private val context: Context) {
             preferences.lastError?.let(::error)
             return preferences.lastAcceptedThreadId
                 ?: error("Codex accepted the request without returning a session. Refresh Sessions and retry.")
+        } catch (cancelled: CancellationException) {
+            if (preferences.pendingTurnRequestId == requestId) preferences.pendingTurnRequestId = null
+            preferences.pending = false
+            throw cancelled
         } catch (error: Throwable) {
             if (preferences.pendingTurnRequestId == requestId) preferences.pendingTurnRequestId = null
             preferences.pending = false
@@ -237,6 +242,12 @@ class AgenticWearRepository(private val context: Context) {
                 error("Codex did not acknowledge the permission decision. Keep the private bridge running, then retry.")
             }
             preferences.lastError?.let(::error)
+        } catch (cancelled: CancellationException) {
+            if (preferences.pendingApprovalRequestId == requestId) {
+                preferences.pendingApprovalRequestId = null
+            }
+            preferences.pending = false
+            throw cancelled
         } catch (error: Throwable) {
             if (preferences.pendingApprovalRequestId == requestId) {
                 preferences.pendingApprovalRequestId = null
@@ -270,6 +281,11 @@ class AgenticWearRepository(private val context: Context) {
                 error("Codex did not acknowledge the feedback. Keep the private bridge running, then retry.")
             }
             preferences.lastError?.let(::error)
+        } catch (cancelled: CancellationException) {
+            if (preferences.pendingFeedbackRequestId == requestId) {
+                preferences.pendingFeedbackRequestId = null
+            }
+            throw cancelled
         } catch (error: Throwable) {
             if (preferences.pendingFeedbackRequestId == requestId) {
                 preferences.pendingFeedbackRequestId = null
@@ -480,7 +496,11 @@ class AgenticWearRepository(private val context: Context) {
                 if (payload.optString("requestId") == preferences.pendingTurnRequestId) {
                     val requestId = payload.optString("requestId")
                     preferences.pendingTurnRequestId = null
-                    preferences.lastAcceptedThreadId = payload.optString("threadId").takeIf(String::isNotBlank)
+                    val acceptedThreadId = payload.optString("threadId").takeIf(String::isNotBlank)
+                    preferences.lastAcceptedThreadId = acceptedThreadId
+                    if (acceptedThreadId != null) {
+                        preferences.selectedThreadId = acceptedThreadId
+                    }
                     preferences.lastAcceptedTurnRequestId = requestId
                     preferences.lastSendNotice = payload.optString("message").takeIf(String::isNotBlank)
                     preferences.transcript = null
@@ -579,7 +599,8 @@ internal fun shouldAcceptChatSnapshot(
     incomingRequestId: String?,
     incomingGeneratedAtMillis: Long,
 ): Boolean {
-    if (selectedThreadId == null || incomingThreadId != selectedThreadId) return false
+    if (selectedThreadId != null && incomingThreadId != selectedThreadId) return false
+    if (selectedThreadId == null && (pendingRequestId == null || incomingRequestId != pendingRequestId)) return false
     if (currentGeneratedAtMillis != null && incomingGeneratedAtMillis < currentGeneratedAtMillis) return false
     return incomingRequestId == null || pendingRequestId == null || incomingRequestId == pendingRequestId
 }

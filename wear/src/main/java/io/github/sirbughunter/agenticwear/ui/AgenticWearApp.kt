@@ -306,6 +306,7 @@ fun AgenticWearApp(
                     onBack = { viewModel.navigate(WearScreen.HOME) },
                     onApprove = { viewModel.respondToApproval(true) },
                     onDecline = { viewModel.respondToApproval(false) },
+                    onOpenChat = viewModel::openSession,
                 )
                 WearScreen.SETTINGS -> SettingsScreen(
                     state = state,
@@ -2388,7 +2389,8 @@ private fun ChatScreen(
     val hasActionablePermission = messages.any { message ->
         message.kind == ChatMessageKind.PERMISSION && message.canControl && !message.resolved
     }
-    val agentThinking = chat?.status == SessionStatus.ACTIVE &&
+    val isWorking = (chat?.status == SessionStatus.ACTIVE || (state.pending && chat != null))
+    val agentThinking = isWorking &&
         !hasPendingPermission && state.error == null
     val showRoundEdgeAction = isRound && !hasActionablePermission
     val nearLatest by remember {
@@ -2409,11 +2411,7 @@ private fun ChatScreen(
         previousAgentThinking = agentThinking
         if (firstPosition || appendedWhileFollowing || thinkingStarted) {
             delay(16)
-            val targetIndex = if (agentThinking && messages.isNotEmpty()) {
-                messages.size // Index of the newest message (item 0 is the session header)
-            } else {
-                (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-            }
+            val targetIndex = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
             if (targetIndex >= 0) {
                 if (firstPosition) {
                     listState.scrollToItem(targetIndex)
@@ -3294,6 +3292,7 @@ private fun AlertScreen(
     onBack: () -> Unit,
     onApprove: () -> Unit,
     onDecline: () -> Unit,
+    onOpenChat: (String) -> Unit,
 ) {
     val color = when (alert?.kind) {
         AlertKind.COMPLETE -> Mint
@@ -3378,6 +3377,18 @@ private fun AlertScreen(
                 ActionButton("Decline", false, onDecline, !pending)
                 ActionButton("Allow", true, onApprove, !pending, accent = Amber)
             }
+        }
+        if (alert != null && alert.threadId.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            val isControllablePermission = alert.kind == AlertKind.PERMISSION &&
+                alert.canControl &&
+                approvalMode == ApprovalMode.ALLOW_CONTROLS
+            ActionButton(
+                label = "Open chat",
+                primary = !isControllablePermission,
+                onClick = { onOpenChat(alert.threadId) },
+                enabled = !pending,
+            )
         }
         Spacer(Modifier.height(48.dp))
     }

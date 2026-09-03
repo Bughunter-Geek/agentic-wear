@@ -37,6 +37,7 @@ import io.github.sirbughunter.agenticwear.voice.VoiceSessionService
 import io.github.sirbughunter.agenticwear.voice.VoiceSessionSnapshot
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -367,20 +368,27 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun submitTranscript(followUpAction: FollowUpAction = FollowUpAction.DEFAULT) {
         val transcript = _state.value.transcript ?: return
-        launchTask {
-            val current = _state.value
+        val current = _state.value
+        val draftText = transcript.text
+        val targetThreadId = threadIdForDraftSubmission(current)
+        if (targetThreadId != null) {
+            preferences.selectedThreadId = targetThreadId
+        }
+        _state.update { it.copy(screen = WearScreen.CHAT, pending = true, error = null) }
+        launchTask(showPending = false) {
             val threadId = repository.submitTurn(
-                threadId = threadIdForDraftSubmission(current),
-                text = transcript.text,
+                threadId = targetThreadId,
+                text = draftText,
                 model = current.selectedModel,
                 effort = current.reasoningEffort,
                 followUpAction = followUpAction,
             )
             preferences.selectedThreadId = threadId
             preferences.submitDraftAsNewSession = false
-            repository.watchChat(threadId)
             reload(WearScreen.CHAT)
             startChatStream(threadId)
+            repository.watchChat(threadId)
+            reload(WearScreen.CHAT)
         }
     }
 
@@ -870,17 +878,21 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         stopChatStream(sendUnwatch = false)
         _state.update { current -> current.copy(screen = WearScreen.CHAT, pending = true, error = null) }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.watchChat(threadId) }
-                .onSuccess { snapshot ->
-                    if (snapshot == null) {
-                        showError("The bridge did not return this chat. Keep Codex running, then tap Retry.")
-                    } else {
-                        reload(WearScreen.CHAT)
-                        startChatStream(threadId)
-                    }
+            try {
+                val snapshot = repository.watchChat(threadId)
+                if (snapshot == null) {
+                    showError("The bridge did not return this chat. Keep Codex running, then tap Retry.")
+                } else {
+                    reload(WearScreen.CHAT)
+                    startChatStream(threadId)
                 }
-                .onFailure(::showError)
-            _state.update { current -> current.copy(pending = false) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Throwable) {
+                showError(error)
+            } finally {
+                _state.update { current -> current.copy(pending = false) }
+            }
         }
     }
 
@@ -890,12 +902,15 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             var ticks = 0
             while (isActive && _state.value.screen == WearScreen.CHAT) {
                 delay(CHAT_POLL_INTERVAL_MS)
-                runCatching { repository.refreshChatInbox() }
-                    .onFailure { error ->
-                        _state.update { current ->
-                            current.copy(error = error.message ?: "Live chat refresh failed")
-                        }
+                try {
+                    repository.refreshChatInbox()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (error: Throwable) {
+                    _state.update { current ->
+                        current.copy(error = error.message ?: "Live chat refresh failed")
                     }
+                }
                 ticks += 1
                 val refreshTicks = if (_state.value.chat?.status == SessionStatus.ACTIVE) {
                     CHAT_ACTIVE_REFRESH_TICKS
@@ -904,7 +919,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 }
                 if (ticks >= refreshTicks) {
                     ticks = 0
-                    runCatching { repository.requestChatRefresh(threadId) }
+                    try {
+                        repository.requestChatRefresh(threadId)
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (_: Throwable) {
+                    }
                 }
             }
         }
@@ -1002,9 +1022,17 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private fun updateErrorMessage(error: Throwable): String =
         error.message ?: "Could not prepare the update"
 
-    private fun showError(error: Throwable) = showError(error.message ?: "Something went wrong")
+    private fun showError(error: Throwable) {
+        if (error is CancellationException) return
+        showError(error.message ?: "Something went wrong")
+    }
 
     private fun showError(message: String) {
+        if (message.contains("was cancelled", ignoreCase = true) ||
+            message.contains("CancellationException", ignoreCase = true)
+        ) {
+            return
+        }
         voiceAttemptGeneration += 1
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
@@ -1025,16 +1053,26 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private fun launchTask(showPending: Boolean = true, block: suspend () -> Unit) {
         if (showPending) _state.update { it.copy(pending = true, error = null) }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { block() }
-                .onFailure(::showError)
-                .onSuccess { if (showPending) _state.update { it.copy(pending = false) } }
+            try {
+                block()
+                if (showPending) _state.update { it.copy(pending = false) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Throwable) {
+                showError(error)
+            }
         }
     }
 
     private fun reload(screen: WearScreen? = null) {
         if (_state.value.demo) return
         val current = _state.value
-        val restored = readState(screen ?: current.screen)
+        val effectiveScreen = screen ?: if (current.screen == WearScreen.TRANSCRIPT && preferences.transcript == null) {
+            WearScreen.CHAT
+        } else {
+            current.screen
+        }
+        val restored = readState(effectiveScreen)
         val transcriptReady = restored.transcript != null
         val transcriptDismissed = current.transcript != null && restored.transcript == null
         val transcriptionFailed = restored.error != null
