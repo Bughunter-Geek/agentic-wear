@@ -110,6 +110,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
@@ -329,6 +330,7 @@ fun AgenticWearApp(
                     .fillMaxWidth()
                     .padding(horizontal = horizontalPadding)
                     .padding(bottom = bottomPadding),
+                initiallyOpen = state.showErrorDetails,
             )
         }
         AnimatedVisibility(
@@ -1335,7 +1337,7 @@ private fun TranscriptScreen(
             }
             state.error?.let { error ->
                 Spacer(Modifier.height(7.dp))
-                ErrorPill(error, Modifier.fillMaxWidth())
+                ErrorPill(error, Modifier.fillMaxWidth(), initiallyOpen = state.showErrorDetails)
                 val recoveryActions = recoveryActionsForError(error)
                 if (ErrorRecoveryAction.REFRESH_SESSIONS in recoveryActions) {
                     Spacer(Modifier.height(7.dp))
@@ -2477,7 +2479,7 @@ private fun ChatScreen(
             state.error?.let { message ->
                 item {
                     Box(Modifier.padding(bottom = 8.dp)) {
-                        ErrorPill(message, Modifier.fillMaxWidth())
+                        ErrorPill(message, Modifier.fillMaxWidth(), initiallyOpen = state.showErrorDetails)
                     }
                 }
             }
@@ -3939,8 +3941,12 @@ private fun StatusDot(status: SessionStatus, watchReady: Boolean = false) {
 }
 
 @Composable
-private fun ErrorPill(message: String, modifier: Modifier = Modifier) {
-    var detailsOpen by rememberSaveable(message) { mutableStateOf(false) }
+private fun ErrorPill(
+    message: String,
+    modifier: Modifier = Modifier,
+    initiallyOpen: Boolean = false,
+) {
+    var detailsOpen by rememberSaveable(message, initiallyOpen) { mutableStateOf(initiallyOpen) }
     val presentation = errorDetailPresentation(message)
     Text(
         presentation.compactLabel,
@@ -3968,8 +3974,13 @@ private fun ErrorPill(message: String, modifier: Modifier = Modifier) {
 @Composable
 private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -> Unit) {
     val scrollState = rememberScrollState()
-    val canScrollForward by remember { derivedStateOf { scrollState.canScrollForward } }
+    val density = LocalDensity.current
+    val scrollRemainingThreshold = remember(density) { with(density) { 56.dp.roundToPx() } }
+    val showScrollIndicator by remember {
+        derivedStateOf { (scrollState.maxValue - scrollState.value) > scrollRemainingThreshold }
+    }
     val round = LocalConfiguration.current.isScreenRound
+    val rotaryFocusRequester = remember { FocusRequester() }
     var visible by remember { mutableStateOf(false) }
     var closing by remember { mutableStateOf(false) }
     val dismiss = {
@@ -3979,7 +3990,10 @@ private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -
         }
     }
 
-    LaunchedEffect(Unit) { visible = true }
+    LaunchedEffect(Unit) {
+        visible = true
+        rotaryFocusRequester.requestFocus()
+    }
     LaunchedEffect(message) { scrollState.scrollTo(0) }
     LaunchedEffect(closing) {
         if (closing) {
@@ -4024,12 +4038,18 @@ private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -
                 Column(
                     Modifier
                         .fillMaxSize()
+                        .rotaryScrollable(
+                            behavior = RotaryScrollableDefaults.behavior(scrollState),
+                            focusRequester = rotaryFocusRequester,
+                        )
+                        .verticalScroll(scrollState)
                         .padding(
-                            start = if (round) 52.dp else 28.dp,
-                            end = if (round) 52.dp else 28.dp,
-                            top = if (round) 40.dp else 20.dp,
-                            bottom = if (round) 44.dp else 20.dp,
+                            start = if (round) 20.dp else 12.dp,
+                            end = if (round) 20.dp else 12.dp,
+                            top = if (round) 24.dp else 14.dp,
+                            bottom = if (round) 30.dp else 16.dp,
                         ),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
                         title,
@@ -4045,25 +4065,31 @@ private fun FullTextDetailDialog(title: String, message: String, onDismiss: () -
                         color = Frost,
                         fontSize = 12.sp,
                         lineHeight = 16.sp,
-                        modifier = Modifier.weight(1f).verticalScroll(scrollState),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
                     )
-                    detailScrollAffordance(canScrollForward)?.let { affordance ->
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            affordance,
-                            color = Mint,
-                            fontSize = 10.sp,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .semantics {
-                                    contentDescription = "Swipe to read more. Full error text is scrollable."
-                                },
-                        )
-                    }
                     Spacer(Modifier.height(12.dp))
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        ActionButton("Close", true, dismiss, enabled = true)
+                    ActionButton("Close", true, dismiss, enabled = true)
+                }
+                if (showScrollIndicator) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 6.dp)
+                            .clip(CircleShape)
+                            .background(Ink.copy(alpha = 0.85f))
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                            .semantics {
+                                contentDescription = "More text below. Scroll to read more."
+                            },
+                    ) {
+                        Text(
+                            "↓",
+                            color = Mint,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                        )
                     }
                 }
             }

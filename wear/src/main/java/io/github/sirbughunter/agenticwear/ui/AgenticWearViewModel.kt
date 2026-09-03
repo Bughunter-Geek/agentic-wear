@@ -77,6 +77,7 @@ data class WearUiState(
     val appUpdate: UpdateUiState = UpdateUiState(),
     val showInstallPermissionPrompt: Boolean = false,
     val showSendModeOverlay: Boolean = false,
+    val showErrorDetails: Boolean = false,
     val demo: Boolean = false,
 ) {
     val selectedSession: AgentSession?
@@ -544,7 +545,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val homeUpdateDownloadingDemo = normalized == "home-update-downloading"
         val homeUpdateReadyDemo = normalized == "home-update-ready"
         val homeErrorDemo = normalized == "home-error"
-        val chatDemo = normalized in setOf("chat", "chat-error", "chat-permission")
+        val chatDemo = normalized in setOf("chat", "chat-error", "chat-permission", "sync-error")
         val alert = when (normalized) {
             "home-alert" -> AgentAlert("demo-home-alert", AlertKind.COMPLETE, "demo-build", sessions[0].title, "The latest Watch prompt completed successfully.", now)
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
@@ -560,7 +561,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
                 "transcript", "transcript-foreign-error", "send-mode" -> WearScreen.TRANSCRIPT
-                "chat", "chat-error", "chat-permission" -> WearScreen.CHAT
+                "chat", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
                 else -> WearScreen.HOME
@@ -571,7 +572,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             selectedThreadId = "demo-build",
             latestAlert = alert,
             transcript = transcript,
-            chat = if (chatDemo) {
+            chat = if (chatDemo && normalized != "sync-error") {
                 io.github.sirbughunter.agenticwear.model.ChatSnapshot(
                     threadId = "demo-build",
                     title = sessions[0].title,
@@ -677,8 +678,10 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             },
             showInstallPermissionPrompt = updatePermissionDemo,
             showSendModeOverlay = normalized == "send-mode",
+            showErrorDetails = normalized in setOf("sync-error", "error-detail", "error-details"),
             error = when {
                 homeErrorDemo -> "I didn't catch enough audio. Tap and try again."
+                normalized in setOf("sync-error", "error-detail", "error-details") -> "Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry."
                 normalized == "chat-error" -> "The bridge could not load this session after resyncing. Agentic Wear kept your selection. Refresh sessions and retry; choose another chat only if this one no longer appears."
                 normalized == "transcript-foreign-error" -> "Codex still owns this session in another client. Agentic Wear did not queue or send your prompt; the complete draft remains on this watch. Refresh sessions to re-check ownership, then retry only after the other client finishes. If it remains busy, choose Start new; your draft will stay on this watch and nothing is created or sent until you explicitly tap Send."
                 else -> null

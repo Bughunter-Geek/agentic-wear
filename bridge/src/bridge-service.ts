@@ -255,6 +255,9 @@ export class BridgeService {
         message: publicRequestError(error, payload.kind),
         occurredAt: Date.now(),
       });
+      if (payload.kind === "turn.submit" || payload.kind === "chat.watch") {
+        await this.sendSessions().catch(() => undefined);
+      }
     }
   }
 

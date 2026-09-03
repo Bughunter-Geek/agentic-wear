@@ -2,6 +2,17 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.13-alpha — 2026-09-03
+
+- Expands `FullTextDetailDialog` reading space on round and compact-square viewports: makes the entire dialog scrollable with rotary crown support, expands text width from 123 dp to 187 dp on round displays (20 dp padding), and moves the Close button to the end of content so full error messages display cleanly on a single screen without scrolling.
+- Replaces the intrusive static scroll affordance with a subtle floating indicator that only appears when significant text remains below the fold, taking zero vertical layout space away from text.
+- Expands `ErrorRecoveryPolicy` to recognize session synchronization errors, presenting both "Refresh sessions" and "Start new" options so users can easily recover their drafts or start a fresh session.
+- Proactively syncs fresh session lists from the bridge to the watch whenever a session synchronization error occurs, clearing stale or deleted threads automatically.
+
+### Test status
+
+- All 115 bridge tests, 18 relay tests, Wear unit tests, and lint pass with 0 errors. Release signing with versionCode 39, checksum verification, and visual interaction checks pass across 454×454 round and 360×360 compact-square viewports.
+
 ## 0.6.12-alpha — 2026-09-03
 
 - Adds the Recent-Sessions Tile (`RecentSessionsTileService`) backed by the watch's encrypted local cache, providing instant glanceable access to active and recent Codex sessions with tap-to-resume navigation.

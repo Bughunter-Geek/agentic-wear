@@ -34,7 +34,8 @@ internal fun recoveryActionsForError(message: String?): Set<ErrorRecoveryAction>
         Regex(
             "active writer|actively writing this session|active session in another client|" +
                 "session is (currently )?active in another client|owns this session in another client|" +
-                "another Codex client|session is busy|does not support queued watch prompts",
+                "another Codex client|session is busy|does not support queued watch prompts|" +
+                "could not synchronize this session|synchronize this session",
             RegexOption.IGNORE_CASE,
         ).containsMatchIn(message)
     ) {

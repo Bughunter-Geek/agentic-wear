@@ -60,6 +60,10 @@ class ErrorRecoveryPolicyTest {
             expected,
             recoveryActionsForError("This Codex App Server does not support queued watch prompts"),
         )
+        assertEquals(
+            expected,
+            recoveryActionsForError("Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry."),
+        )
     }
 
     @Test
