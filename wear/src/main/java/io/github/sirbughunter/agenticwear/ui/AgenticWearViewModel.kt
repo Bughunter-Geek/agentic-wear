@@ -422,7 +422,10 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun retryChat() {
-        val threadId = _state.value.selectedSession?.id ?: return
+        val threadId = _state.value.selectedSession?.id
+            ?: _state.value.chat?.threadId
+            ?: preferences.selectedThreadId
+            ?: return
         openChat(threadId)
     }
 
@@ -880,6 +883,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val snapshot = repository.watchChat(threadId)
+                    ?: preferences.chatSnapshot?.takeIf { it.threadId == threadId }
                 if (snapshot == null) {
                     showError("The bridge did not return this chat. Keep Codex running, then tap Retry.")
                 } else {

@@ -21,6 +21,9 @@ import javax.crypto.spec.SecretKeySpec
 class CryptoBox {
     private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
+    @Volatile
+    private var cachedKey: Pair<String, SecretKeySpec>? = null
+
     fun publicKeyBase64(): String {
         ensurePairingKey()
         val publicKey = keyStore.getCertificate(PAIRING_ALIAS)?.publicKey
@@ -29,6 +32,7 @@ class CryptoBox {
     }
 
     fun clearPairingKey() {
+        cachedKey = null
         if (keyStore.containsAlias(PAIRING_ALIAS)) keyStore.deleteEntry(PAIRING_ALIAS)
     }
 
@@ -77,19 +81,47 @@ class CryptoBox {
     }
 
     private fun deriveKey(pairId: String, peerPublicKeyBase64: String): SecretKeySpec {
-        ensurePairingKey()
-        val privateKey = keyStore.getKey(PAIRING_ALIAS, null)
-        val peerPublicKey = KeyFactory.getInstance("EC").generatePublic(
-            X509EncodedKeySpec(Base64.decode(peerPublicKeyBase64, Base64.NO_WRAP)),
-        )
-        val sharedSecret = KeyAgreement.getInstance("ECDH").run {
-            init(privateKey)
-            doPhase(peerPublicKey, true)
-            generateSecret()
+        val cacheKey = "$pairId:$peerPublicKeyBase64"
+        cachedKey?.let { (key, secret) ->
+            if (key == cacheKey) return secret
         }
-        val salt = MessageDigest.getInstance("SHA-256")
-            .digest("agentic-wear-v1:$pairId".toByteArray(StandardCharsets.UTF_8))
-        return SecretKeySpec(hkdf(sharedSecret, salt, "relay-e2ee".toByteArray(), 32), "AES")
+        return synchronized(this) {
+            cachedKey?.let { (key, secret) ->
+                if (key == cacheKey) return secret
+            }
+            ensurePairingKey()
+            val privateKey = keyStore.getKey(PAIRING_ALIAS, null)
+                ?: error("Pairing private key is unavailable")
+            val peerPublicKey = KeyFactory.getInstance("EC").generatePublic(
+                X509EncodedKeySpec(Base64.decode(peerPublicKeyBase64, Base64.NO_WRAP)),
+            )
+            val sharedSecret = try {
+                val agreement = try {
+                    KeyAgreement.getInstance("ECDH", "AndroidKeyStore")
+                } catch (_: Throwable) {
+                    KeyAgreement.getInstance("ECDH")
+                }
+                agreement.run {
+                    init(privateKey)
+                    doPhase(peerPublicKey, true)
+                    generateSecret()
+                }
+            } catch (error: Exception) {
+                keyStore.load(null)
+                val reloadedKey = keyStore.getKey(PAIRING_ALIAS, null) ?: throw error
+                val agreement = KeyAgreement.getInstance("ECDH")
+                agreement.run {
+                    init(reloadedKey)
+                    doPhase(peerPublicKey, true)
+                    generateSecret()
+                }
+            }
+            val salt = MessageDigest.getInstance("SHA-256")
+                .digest("agentic-wear-v1:$pairId".toByteArray(StandardCharsets.UTF_8))
+            val derived = SecretKeySpec(hkdf(sharedSecret, salt, "relay-e2ee".toByteArray(), 32), "AES")
+            cachedKey = cacheKey to derived
+            derived
+        }
     }
 
     private fun ensurePairingKey() {

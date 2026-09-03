@@ -14,11 +14,18 @@ data class ErrorDetailPresentation(
 )
 
 internal fun errorDetailPresentation(message: String): ErrorDetailPresentation {
-    val separator = if (message.trimEnd().lastOrNull() in setOf('.', '!', '?')) " " else ". "
+    val displayMessage = if (message.contains("Keystore operation failed", ignoreCase = true) ||
+        message.contains("KeyStoreException", ignoreCase = true)
+    ) {
+        "Watch security hardware was temporarily busy. Tap Retry."
+    } else {
+        message
+    }
+    val separator = if (displayMessage.trimEnd().lastOrNull() in setOf('.', '!', '?')) " " else ". "
     return ErrorDetailPresentation(
         compactLabel = "Error — tap for details",
-        fullText = message,
-        contentDescription = "Error: $message${separator}Tap for full details.",
+        fullText = displayMessage,
+        contentDescription = "Error: $displayMessage${separator}Tap for full details.",
     )
 }
 
@@ -35,7 +42,8 @@ internal fun recoveryActionsForError(message: String?): Set<ErrorRecoveryAction>
             "active writer|actively writing this session|active session in another client|" +
                 "session is (currently )?active in another client|owns this session in another client|" +
                 "another Codex client|session is busy|does not support queued watch prompts|" +
-                "could not synchronize this session|synchronize this session",
+                "could not synchronize this session|synchronize this session|Keystore operation failed|" +
+                "security hardware was temporarily busy",
             RegexOption.IGNORE_CASE,
         ).containsMatchIn(message)
     ) {

@@ -22,15 +22,24 @@ class SecurePairingStore(context: Context) {
     private val prefs = context.getSharedPreferences("agentic_wear_pairing", Context.MODE_PRIVATE)
     private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
+    @Volatile
+    private var cachedPairing: Pairing? = null
+
     fun read(): Pairing? {
-        if (prefs.getInt(KEY_PROTOCOL_VERSION, 0) != PROTOCOL_VERSION) return null
-        val relayUrl = prefs.getString(KEY_RELAY_URL, null) ?: return null
-        val pairId = prefs.getString(KEY_PAIR_ID, null) ?: return null
-        val bridgePublicKey = prefs.getString(KEY_BRIDGE_PUBLIC_KEY, null) ?: return null
-        val encryptedCredential = prefs.getString(KEY_CREDENTIAL, null) ?: return null
-        return runCatching {
-            Pairing(relayUrl, pairId, decrypt(encryptedCredential), bridgePublicKey)
-        }.getOrNull()
+        cachedPairing?.let { return it }
+        return synchronized(this) {
+            cachedPairing?.let { return it }
+            if (prefs.getInt(KEY_PROTOCOL_VERSION, 0) != PROTOCOL_VERSION) return null
+            val relayUrl = prefs.getString(KEY_RELAY_URL, null) ?: return null
+            val pairId = prefs.getString(KEY_PAIR_ID, null) ?: return null
+            val bridgePublicKey = prefs.getString(KEY_BRIDGE_PUBLIC_KEY, null) ?: return null
+            val encryptedCredential = prefs.getString(KEY_CREDENTIAL, null) ?: return null
+            val pairing = runCatching {
+                Pairing(relayUrl, pairId, decrypt(encryptedCredential), bridgePublicKey)
+            }.getOrNull()
+            cachedPairing = pairing
+            pairing
+        }
     }
 
     fun write(pairing: Pairing) {
@@ -41,9 +50,13 @@ class SecurePairingStore(context: Context) {
             putString(KEY_BRIDGE_PUBLIC_KEY, pairing.bridgePublicKey)
             putString(KEY_CREDENTIAL, encrypt(pairing.watchCredential))
         }
+        cachedPairing = pairing
     }
 
-    fun clear() = prefs.edit(commit = true) { clear() }
+    fun clear() {
+        cachedPairing = null
+        prefs.edit(commit = true) { clear() }
+    }
 
     private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
@@ -58,6 +71,15 @@ class SecurePairingStore(context: Context) {
     private fun decrypt(value: String): String {
         val combined = Base64.decode(value, Base64.NO_WRAP)
         require(combined.size > 28) { "Invalid stored credential" }
+        return try {
+            performDecrypt(combined)
+        } catch (_: Exception) {
+            keyStore.load(null)
+            performDecrypt(combined)
+        }
+    }
+
+    private fun performDecrypt(combined: ByteArray): String {
         val plaintext = Cipher.getInstance("AES/GCM/NoPadding").run {
             init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, combined.copyOfRange(0, 12)))
             doFinal(combined.copyOfRange(12, combined.size))
