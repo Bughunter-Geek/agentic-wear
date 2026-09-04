@@ -22,7 +22,7 @@ class AgenticWearRepository(private val context: Context) {
     private var pendingChatRefreshStartedAtMillis = 0L
     private val pairingStore = SecurePairingStore(context)
     private val preferences = AppPreferences(context)
-    private val crypto = CryptoBox()
+    private val crypto = CryptoBox(context)
     private val relay = RelayApi()
 
     val isPaired: Boolean get() = pairingStore.read() != null

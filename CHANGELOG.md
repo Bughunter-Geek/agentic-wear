@@ -2,6 +2,16 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.18-alpha — 2026-09-04
+
+- Moves relay ECDH off the watch's failing KeyMint EC operation while preserving P-256, the existing wire protocol, and end-to-end encryption.
+- Encrypts the software ECDH private key at rest with a dedicated Android Keystore AES-GCM key and binds the stored public key as authenticated data.
+- Advances the local pairing protocol so upgraded watches require one intentional re-pair instead of silently mixing the bridge's old registered key with the replacement key.
+
+### Test status
+
+- Wear unit tests, debug lint, and debug assembly cover the replacement software ECDH path. Release signing, APK metadata, checksum, and OTA-manifest checks are completed during release preparation. Physical-watch acceptance remains pending until the published Alpha reaches the remote watch and is re-paired once.
+
 ## 0.6.17-alpha — 2026-09-04
 
 - Replaces sub-second Keystore retries with Android's reported recovery policy: backend-busy hints are honored directly, evacuated crypto operations are recreated immediately, and KeyMint exponential backoff starts at the documented five-second minimum.

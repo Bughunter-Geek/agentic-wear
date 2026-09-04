@@ -106,7 +106,9 @@ class SecurePairingStore(context: Context) {
         private const val KEY_CREDENTIAL = "watch_credential"
         private const val KEY_BRIDGE_PUBLIC_KEY = "bridge_public_key"
         private const val KEY_PROTOCOL_VERSION = "protocol_version"
-        private const val PROTOCOL_VERSION = 2
+        // Version 3 registers the software P-256 key introduced after some Pixel Watch
+        // KeyMint implementations rejected hardware-backed ECDH with ERROR_KEYMINT_FAILURE.
+        private const val PROTOCOL_VERSION = 3
 
         @Volatile
         private var cachedPairing: Pairing? = null
