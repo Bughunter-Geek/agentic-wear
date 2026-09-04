@@ -188,6 +188,7 @@ export const chatTurnListResponseSchema = z.object({
     items: z.array(z.object({
       id: safeId,
       type: z.string(),
+      clientId: safeId.nullable().optional(),
       text: z.string().optional(),
       phase: z.enum(["commentary", "final_answer"]).nullable().optional(),
       content: z.array(z.object({

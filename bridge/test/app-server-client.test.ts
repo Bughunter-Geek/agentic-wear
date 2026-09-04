@@ -332,7 +332,7 @@ describe("AppServerClient session delivery", () => {
     expect(sendMessageToThread).not.toHaveBeenCalled();
   });
 
-  it("shows an accepted Watch prompt immediately while canonical history catches up", async () => {
+  it("shows an accepted Watch prompt immediately and replaces it with canonical history", async () => {
     const onAgentOutput = vi.fn().mockResolvedValue(undefined);
     const target = new AppServerClient(
       new Set(),
@@ -350,7 +350,28 @@ describe("AppServerClient session delivery", () => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("active", false) });
       if (method === "thread/turns/list") {
         historyReads += 1;
-        return Promise.resolve({ data: [], nextCursor: null, backwardsCursor: null });
+        if (historyReads === 1) {
+          return Promise.resolve({ data: [], nextCursor: null, backwardsCursor: null });
+        }
+        return Promise.resolve({
+          data: [{
+            id: "turn-canonical",
+            status: "completed",
+            items: [{
+              id: "canonical-user-1",
+              clientId: "watch-visible-1",
+              type: "userMessage",
+              content: [{ type: "text", text: "Visible on the Watch immediately." }],
+            }, {
+              id: "canonical-assistant-1",
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "Canonical reply.",
+            }],
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
       }
       if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
       if (method === "thread/settings/update") return Promise.resolve({});
@@ -378,6 +399,14 @@ describe("AppServerClient session delivery", () => {
     }));
     expect(historyReads).toBe(1);
     expect(onAgentOutput).toHaveBeenCalledWith("thread-1");
+
+    const canonical = await target.chatSnapshot("thread-1", true);
+    expect(canonical.messages.map(({ id }) => id)).toEqual([
+      "canonical-user-1",
+      "canonical-assistant-1",
+    ]);
+    expect(canonical.messages.filter(({ role }) => role === "user")).toHaveLength(1);
+    expect(historyReads).toBe(2);
   });
 
   it("submits a different Watch configuration through the same-chat desktop route", async () => {

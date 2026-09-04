@@ -884,9 +884,19 @@ export class AppServerClient {
     const optimistic = this.optimisticUserMessages.get(threadId);
     if (optimistic) {
       const canonicalIds = new Set(messages.map(({ id }) => id));
+      const canonicalClientIds = new Set(response.data.flatMap((turn) => turn.items
+        .flatMap((item) => item.type === "userMessage" && item.clientId ? [item.clientId] : [])));
       for (const [messageId, message] of optimistic) {
-        if (canonicalIds.has(messageId)) optimistic.delete(messageId);
-        else messages.push({ ...message });
+        const sameTurnMessage = messages.some((candidate) =>
+          candidate.role === "user" &&
+          candidate.turnId === message.turnId &&
+          candidate.text === message.text
+        );
+        if (canonicalIds.has(messageId) || canonicalClientIds.has(messageId) || sameTurnMessage) {
+          optimistic.delete(messageId);
+          continue;
+        }
+        messages.push({ ...message });
       }
       if (optimistic.size === 0) this.optimisticUserMessages.delete(threadId);
     }
