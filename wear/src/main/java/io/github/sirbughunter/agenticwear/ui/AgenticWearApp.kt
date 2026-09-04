@@ -66,11 +66,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.List
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speed
@@ -3028,21 +3030,32 @@ private fun UserChatMessage(
     ) {
         Column(
             Modifier
-                .fillMaxWidth(0.86f)
+                .fillMaxWidth(0.84f)
                 .clip(shape)
-                .background(Color(0xFF292338))
-                .border(1.dp, Violet.copy(alpha = 0.46f), shape)
+                .background(Color(0xFF102D37))
+                .border(1.dp, Cyan.copy(alpha = 0.72f), shape)
                 .padding(horizontal = 12.dp, vertical = 9.dp),
         ) {
-            Text(
-                "YOU",
-                color = Violet.copy(alpha = 0.92f),
-                fontSize = 8.sp,
-                lineHeight = 9.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 0.8.sp,
+            Row(
                 modifier = Modifier.align(Alignment.End),
-            )
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "YOU",
+                    color = Cyan,
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.8.sp,
+                )
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Rounded.Person,
+                    contentDescription = null,
+                    tint = Cyan,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
             Spacer(Modifier.height(3.dp))
             MarkdownMessageText(
                 markdown = message.text,
@@ -3105,68 +3118,80 @@ private fun UpdateChatMessage(
         bottomEnd = 20.dp,
         bottomStart = 20.dp,
     )
-    Column(
-        modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(Panel)
-            .border(1.dp, Color(0xFF34384D), shape)
-            .semantics {
-                stateDescription = if (collapsed) "Collapsed" else "Expanded"
-            }
-            .clickable(
-                interactionSource = interactions,
-                indication = null,
-                role = Role.Button,
-            ) {
-                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
-                collapsed = !collapsed
-            }
-            .padding(start = 13.dp, end = 9.dp, top = 9.dp, bottom = 9.dp),
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "UPDATE",
-                color = Cyan.copy(alpha = 0.92f),
-                fontSize = 8.sp,
-                lineHeight = 9.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 0.8.sp,
-            )
-            Spacer(Modifier.weight(1f))
-            Icon(
-                imageVector = Icons.Rounded.KeyboardArrowDown,
-                contentDescription = null,
-                tint = Muted,
-                modifier = Modifier
-                    .size(18.dp)
-                    .graphicsLayer { rotationZ = chevronRotation },
-            )
-        }
-        Spacer(Modifier.height(3.dp))
-        AnimatedContent(
-            targetState = collapsed,
-            modifier = Modifier.fillMaxWidth(),
-            transitionSpec = {
-                (fadeIn(tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut)) togetherWith
-                    fadeOut(tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut))).using(
-                    SizeTransform(clip = true) { _, _ ->
-                        tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut)
-                    },
+        Column(
+            Modifier
+                .fillMaxWidth(0.94f)
+                .clip(shape)
+                .background(Color(0xFF241F36))
+                .border(1.dp, Violet.copy(alpha = 0.62f), shape)
+                .semantics {
+                    stateDescription = if (collapsed) "Collapsed" else "Expanded"
+                }
+                .clickable(
+                    interactionSource = interactions,
+                    indication = null,
+                    role = Role.Button,
+                ) {
+                    haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                    collapsed = !collapsed
+                }
+                .padding(start = 11.dp, end = 9.dp, top = 9.dp, bottom = 9.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Rounded.AutoAwesome,
+                    contentDescription = null,
+                    tint = Violet,
+                    modifier = Modifier.size(12.dp),
                 )
-            },
-            contentAlignment = Alignment.TopStart,
-            label = "update body",
-        ) { showPreview ->
-            MarkdownMessageText(
-                markdown = message.text,
-                color = Frost,
-                accent = Cyan,
-                codeBackground = Ink.copy(alpha = 0.78f),
-                modifier = Modifier.fillMaxWidth().padding(end = 4.dp),
-                maxLines = if (showPreview) 2 else Int.MAX_VALUE,
-                overflow = if (showPreview) TextOverflow.Ellipsis else TextOverflow.Clip,
-            )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "AGENT UPDATE",
+                    color = Violet,
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.65.sp,
+                )
+                Spacer(Modifier.weight(1f))
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = Muted,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = chevronRotation },
+                )
+            }
+            Spacer(Modifier.height(3.dp))
+            AnimatedContent(
+                targetState = collapsed,
+                modifier = Modifier.fillMaxWidth(),
+                transitionSpec = {
+                    (fadeIn(tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut)) togetherWith
+                        fadeOut(tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut))).using(
+                        SizeTransform(clip = true) { _, _ ->
+                            tween(UpdateCollapseDurationMillis, easing = AgenticEaseOut)
+                        },
+                    )
+                },
+                contentAlignment = Alignment.TopStart,
+                label = "update body",
+            ) { showPreview ->
+                MarkdownMessageText(
+                    markdown = message.text,
+                    color = Frost,
+                    accent = Violet,
+                    codeBackground = Ink.copy(alpha = 0.78f),
+                    modifier = Modifier.fillMaxWidth().padding(end = 4.dp),
+                    maxLines = if (showPreview) 2 else Int.MAX_VALUE,
+                    overflow = if (showPreview) TextOverflow.Ellipsis else TextOverflow.Clip,
+                )
+            }
         }
     }
 }
@@ -3186,37 +3211,50 @@ private fun AnswerChatMessage(
         bottomEnd = 20.dp,
         bottomStart = 20.dp,
     )
-    Column(
-        modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(PanelRaised)
-            .border(1.dp, Violet.copy(alpha = 0.48f), shape)
-            .padding(start = 13.dp, end = 9.dp, top = 9.dp, bottom = 4.dp),
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Text(
-            if (message.phase == ChatPhase.FINAL_ANSWER) "ANSWER" else "CODEX",
-            color = Violet.copy(alpha = 0.92f),
-            fontSize = 8.sp,
-            lineHeight = 9.sp,
-            fontWeight = FontWeight.ExtraBold,
-            letterSpacing = 0.8.sp,
-        )
-        Spacer(Modifier.height(3.dp))
-        MarkdownMessageText(
-            markdown = message.text,
-            color = Frost,
-            accent = Violet,
-            codeBackground = Ink.copy(alpha = 0.78f),
-            modifier = Modifier.fillMaxWidth().padding(end = 4.dp),
-        )
-        Spacer(Modifier.height(2.dp))
-        ChatFeedbackControls(
-            selectedRating = feedback,
-            pending = feedbackPending,
-            enabled = feedbackEnabled,
-            onRate = { rating -> onRateMessage(message, rating) },
-        )
+        Column(
+            Modifier
+                .fillMaxWidth(0.94f)
+                .clip(shape)
+                .background(Color(0xFF241F36))
+                .border(1.dp, Violet.copy(alpha = 0.62f), shape)
+                .padding(start = 11.dp, end = 9.dp, top = 9.dp, bottom = 4.dp),
+        ) {
+            MarkdownMessageText(
+                markdown = message.text,
+                color = Frost,
+                accent = Violet,
+                codeBackground = Ink.copy(alpha = 0.78f),
+                modifier = Modifier.fillMaxWidth().padding(end = 4.dp),
+            )
+            Spacer(Modifier.height(5.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Rounded.AutoAwesome,
+                    contentDescription = null,
+                    tint = Violet,
+                    modifier = Modifier.size(12.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    if (message.phase == ChatPhase.FINAL_ANSWER) "AGENT ANSWER" else "AGENT",
+                    color = Violet,
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.65.sp,
+                )
+            }
+            ChatFeedbackControls(
+                selectedRating = feedback,
+                pending = feedbackPending,
+                enabled = feedbackEnabled,
+                onRate = { rating -> onRateMessage(message, rating) },
+            )
+        }
     }
 }
 

@@ -13,6 +13,7 @@ type ClientInternals = {
   openStdio: () => void;
   initialize: () => Promise<void>;
   listSessions: () => Promise<unknown[]>;
+  restartStalePrivateAppServer: () => Promise<boolean>;
   emitRecentTerminals: (
     session: {
       id: string;
@@ -886,6 +887,46 @@ describe("AppServerClient session delivery", () => {
       threadId: "thread-1",
       clientUserMessageId: "watch-request-1",
     });
+  });
+
+  it("restarts a stale private App Server when session synchronization exhausts its retries", async () => {
+    vi.useFakeTimers();
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    let readAttempts = 0;
+    internals.restartStalePrivateAppServer = vi.fn().mockResolvedValue(true);
+    internals.request = vi.fn((method: string, params: unknown) => {
+      if (method === "thread/read") {
+        readAttempts += 1;
+        if (readAttempts <= 7) return Promise.reject(new Error("No rollout found for thread thread-1"));
+        return Promise.resolve({ thread: thread("notLoaded") });
+      }
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    const submission = target.submitTurn(
+      "thread-1",
+      "Recover this session safely.",
+      "/tmp",
+      null,
+      "medium",
+      "watch-stale-server-1",
+    );
+    await vi.runAllTimersAsync();
+    await expect(submission).resolves.toMatchObject({ threadId: "thread-1", state: "running" });
+
+    expect(readAttempts).toBe(8);
+    expect(internals.restartStalePrivateAppServer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(internals.request).mock.calls.filter(([method]) => method === "thread/queue/add"))
+      .toHaveLength(1);
+    vi.useRealTimers();
   });
 
   it("reuses the watch idempotency key when queue serialization is cancelled", async () => {

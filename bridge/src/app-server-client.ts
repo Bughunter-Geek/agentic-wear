@@ -551,7 +551,7 @@ export class AppServerClient {
         selectionApplied: true,
       };
     } else {
-      thread = await this.retryTransientThreadOperation(threadId, async () => {
+      thread = await this.retryThreadSynchronization(threadId, async () => {
         const current = await this.readThread(threadId, true);
         if (current.status.type === "notLoaded") {
           const latest = await this.latestTurn(current.id);
@@ -801,7 +801,33 @@ export class AppServerClient {
     const cached = this.chatCaches.get(threadId);
     if (cached && !forceRefresh) return materializeChat(cached);
 
-    return this.retryTransientThreadOperation(threadId, () => this.loadFreshChatSnapshot(threadId));
+    return this.retryThreadSynchronization(threadId, () => this.loadFreshChatSnapshot(threadId));
+  }
+
+  private async retryThreadSynchronization<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await this.retryTransientThreadOperation(threadId, operation);
+    } catch (error) {
+      if (!isTransientThreadAvailabilityError(error) || !await this.restartStalePrivateAppServer()) {
+        throw error;
+      }
+      // A long-lived private App Server can retain a stale rollout index even
+      // after thread/list sees the task. A fresh process reads the shared state
+      // again; replay is safe because Watch submissions use their request UUID
+      // as the App Server idempotency key.
+      this.threadCache.delete(threadId);
+      return operation();
+    }
+  }
+
+  private async restartStalePrivateAppServer(): Promise<boolean> {
+    if (!this.child || this.stopping) return false;
+    console.warn(JSON.stringify({
+      level: "warn",
+      message: "Restarting stale private App Server after session synchronization retries",
+    }));
+    await this.restartPrivateAppServer();
+    return true;
   }
 
   private async retryTransientThreadOperation<T>(threadId: string, operation: () => Promise<T>): Promise<T> {

@@ -2,6 +2,16 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.22-alpha — 2026-09-04
+
+- Makes chat roles unmistakable without relying on color alone: user prompts are right-aligned cyan cards labeled **YOU** with a person icon, while agent updates and answers are left-aligned violet cards labeled **AGENT UPDATE** or **AGENT ANSWER** with a spark icon.
+- Keeps the agent identity visible beside the response controls when a long final answer is positioned at the newest content on a round display.
+- Recovers a long-running private Codex App Server whose rollout index has gone stale: after bounded synchronization retries, the bridge restarts that private process once and safely replays the same idempotent Watch request instead of surfacing a persistent synchronization error.
+
+### Test status
+
+- All 125 bridge tests, 18 relay tests, Wear unit tests, debug lint, and debug assembly pass. The role treatments were rendered on the 454 × 454 round Wear OS 7 / Android 17 emulator at disabled and normal animation scales; production bridge pairing and live-task synchronization pass. Physical-watch acceptance of the published APK remains pending.
+
 ## 0.6.21-alpha — 2026-09-04
 
 - Keeps live chat pinned to the exact newest content while the reader remains near the bottom, including same-message streaming revisions and the final transition out of `Agent is thinking`, without pulling the reader back after an intentional upward scroll.

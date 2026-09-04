@@ -556,7 +556,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val homeUpdateDownloadingDemo = normalized == "home-update-downloading"
         val homeUpdateReadyDemo = normalized == "home-update-ready"
         val homeErrorDemo = normalized == "home-error"
-        val chatDemo = normalized in setOf("chat", "chat-idle", "chat-error", "chat-permission", "sync-error")
+        val chatDemo = normalized in setOf("chat", "chat-idle", "chat-roles", "chat-error", "chat-permission", "sync-error")
         val alert = when (normalized) {
             "home-alert" -> AgentAlert("demo-home-alert", AlertKind.COMPLETE, "demo-build", sessions[0].title, "The latest Watch prompt completed successfully.", now)
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
@@ -572,7 +572,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
                 "transcript", "transcript-foreign-error", "send-mode" -> WearScreen.TRANSCRIPT
-                "chat", "chat-idle", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
+                "chat", "chat-idle", "chat-roles", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
                 else -> WearScreen.HOME
@@ -587,7 +587,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 io.github.sirbughunter.agenticwear.model.ChatSnapshot(
                     threadId = "demo-build",
                     title = sessions[0].title,
-                    status = if (normalized == "chat-idle") SessionStatus.IDLE else SessionStatus.ACTIVE,
+                    status = if (normalized in setOf("chat-idle", "chat-roles")) SessionStatus.IDLE else SessionStatus.ACTIVE,
                     paragraphs = listOf(
                         io.github.sirbughunter.agenticwear.model.ChatParagraph(
                             "demo-chat-1",
@@ -601,7 +601,24 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                         ),
                     ),
                     generatedAtMillis = now,
-                    messages = if (normalized == "chat-idle") {
+                    messages = if (normalized == "chat-roles") {
+                        listOf(
+                            ChatMessage(
+                                id = "demo-role-user",
+                                turnId = "demo-role-turn",
+                                role = ChatRole.USER,
+                                text = "Make chat roles unmistakable.",
+                                phase = io.github.sirbughunter.agenticwear.model.ChatPhase.UNKNOWN,
+                            ),
+                            ChatMessage(
+                                id = "demo-role-agent",
+                                turnId = "demo-role-turn",
+                                role = ChatRole.ASSISTANT,
+                                text = "Done — user and agent messages are distinct at a glance.",
+                                phase = io.github.sirbughunter.agenticwear.model.ChatPhase.FINAL_ANSWER,
+                            ),
+                        )
+                    } else if (normalized == "chat-idle") {
                         listOf(
                             ChatMessage(
                                 id = "demo-chat-idle",
