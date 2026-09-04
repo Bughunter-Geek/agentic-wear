@@ -156,9 +156,11 @@ class ErrorRecoveryPolicyTest {
     fun `keystore operation failed maps to actionable user guidance`() {
         val presentation = errorDetailPresentation("Keystore operation failed")
 
-        assertEquals("Watch security hardware was temporarily busy. Tap Retry.", presentation.fullText)
-        assertTrue(presentation.contentDescription.contains("Watch security hardware was temporarily busy"))
-        val actions = recoveryActionsForError("Keystore operation failed")
-        assertTrue(actions.contains(ErrorRecoveryAction.REFRESH_SESSIONS))
+        assertEquals(
+            "Watch security hardware stayed busy after automatic retries. Close this message, then try Send again.",
+            presentation.fullText,
+        )
+        assertTrue(presentation.contentDescription.contains("after automatic retries"))
+        assertTrue(recoveryActionsForError("Keystore operation failed").isEmpty())
     }
 }

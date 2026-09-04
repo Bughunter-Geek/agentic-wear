@@ -17,7 +17,7 @@ internal fun errorDetailPresentation(message: String): ErrorDetailPresentation {
     val displayMessage = if (message.contains("Keystore operation failed", ignoreCase = true) ||
         message.contains("KeyStoreException", ignoreCase = true)
     ) {
-        "Watch security hardware was temporarily busy. Tap Retry."
+        "Watch security hardware stayed busy after automatic retries. Close this message, then try Send again."
     } else {
         message
     }
@@ -42,8 +42,7 @@ internal fun recoveryActionsForError(message: String?): Set<ErrorRecoveryAction>
             "active writer|actively writing this session|active session in another client|" +
                 "session is (currently )?active in another client|owns this session in another client|" +
                 "another Codex client|session is busy|does not support queued watch prompts|" +
-                "could not synchronize this session|synchronize this session|Keystore operation failed|" +
-                "security hardware was temporarily busy",
+                "could not synchronize this session|synchronize this session",
             RegexOption.IGNORE_CASE,
         ).containsMatchIn(message)
     ) {

@@ -2,6 +2,17 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.16-alpha — 2026-09-04
+
+- Serializes Android Keystore access across the foreground UI, voice service, and inbox worker so concurrent startup/sync work cannot contend for the watch's security hardware.
+- Shares decrypted pairing data and the derived relay key process-wide, avoiding redundant hardware-backed decryptions and ECDH operations after an app update or process restart.
+- Retries only transient Keystore/provider failures with bounded backoff and a freshly loaded Keystore facade on every attempt; permanent key invalidation and credential-integrity failures still surface immediately.
+- Replaces the misleading "Tap Retry" security-hardware text with instructions that match the actual Close and Send controls, and removes unrelated session-switch recovery actions from this failure.
+
+### Test status
+
+- Wear unit tests, debug lint, and debug assembly pass. Minified release signing, APK metadata, checksum, and OTA-manifest checks are completed during release preparation. Physical-watch acceptance remains pending until the published Alpha reaches the remote watch.
+
 ## 0.6.13-alpha — 2026-09-03
 
 - Expands `FullTextDetailDialog` reading space on round and compact-square viewports: makes the entire dialog scrollable with rotary crown support, expands text width from 123 dp to 187 dp on round displays (20 dp padding), and moves the Close button to the end of content so full error messages display cleanly on a single screen without scrolling.

@@ -9,6 +9,8 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.NoSuchAlgorithmException
+import java.security.NoSuchProviderException
 import java.security.SecureRandom
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
@@ -19,21 +21,20 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 class CryptoBox {
-    private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-
-    @Volatile
-    private var cachedKey: Pair<String, SecretKeySpec>? = null
-
     fun publicKeyBase64(): String {
-        ensurePairingKey()
-        val publicKey = keyStore.getCertificate(PAIRING_ALIAS)?.publicKey
-            ?: error("Pairing public key is unavailable")
-        return Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP)
+        return AndroidKeyStoreAccess.execute { keyStore ->
+            ensurePairingKey(keyStore)
+            val publicKey = keyStore.getCertificate(PAIRING_ALIAS)?.publicKey
+                ?: error("Pairing public key is unavailable")
+            Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP)
+        }
     }
 
     fun clearPairingKey() {
-        cachedKey = null
-        if (keyStore.containsAlias(PAIRING_ALIAS)) keyStore.deleteEntry(PAIRING_ALIAS)
+        AndroidKeyStoreAccess.execute { keyStore ->
+            cachedKey = null
+            if (keyStore.containsAlias(PAIRING_ALIAS)) keyStore.deleteEntry(PAIRING_ALIAS)
+        }
     }
 
     fun encrypt(pairId: String, peerPublicKeyBase64: String, plaintext: String): JSONObject {
@@ -85,36 +86,20 @@ class CryptoBox {
         cachedKey?.let { (key, secret) ->
             if (key == cacheKey) return secret
         }
-        return synchronized(this) {
+        return AndroidKeyStoreAccess.execute { keyStore ->
             cachedKey?.let { (key, secret) ->
-                if (key == cacheKey) return secret
+                if (key == cacheKey) return@execute secret
             }
-            ensurePairingKey()
+            ensurePairingKey(keyStore)
             val privateKey = keyStore.getKey(PAIRING_ALIAS, null)
                 ?: error("Pairing private key is unavailable")
             val peerPublicKey = KeyFactory.getInstance("EC").generatePublic(
                 X509EncodedKeySpec(Base64.decode(peerPublicKeyBase64, Base64.NO_WRAP)),
             )
-            val sharedSecret = try {
-                val agreement = try {
-                    KeyAgreement.getInstance("ECDH", "AndroidKeyStore")
-                } catch (_: Throwable) {
-                    KeyAgreement.getInstance("ECDH")
-                }
-                agreement.run {
-                    init(privateKey)
-                    doPhase(peerPublicKey, true)
-                    generateSecret()
-                }
-            } catch (error: Exception) {
-                keyStore.load(null)
-                val reloadedKey = keyStore.getKey(PAIRING_ALIAS, null) ?: throw error
-                val agreement = KeyAgreement.getInstance("ECDH")
-                agreement.run {
-                    init(reloadedKey)
-                    doPhase(peerPublicKey, true)
-                    generateSecret()
-                }
+            val sharedSecret = keyAgreement().run {
+                init(privateKey)
+                doPhase(peerPublicKey, true)
+                generateSecret()
             }
             val salt = MessageDigest.getInstance("SHA-256")
                 .digest("agentic-wear-v1:$pairId".toByteArray(StandardCharsets.UTF_8))
@@ -124,7 +109,15 @@ class CryptoBox {
         }
     }
 
-    private fun ensurePairingKey() {
+    private fun keyAgreement(): KeyAgreement = try {
+        KeyAgreement.getInstance("ECDH", "AndroidKeyStore")
+    } catch (_: NoSuchProviderException) {
+        KeyAgreement.getInstance("ECDH")
+    } catch (_: NoSuchAlgorithmException) {
+        KeyAgreement.getInstance("ECDH")
+    }
+
+    private fun ensurePairingKey(keyStore: KeyStore) {
         if (keyStore.containsAlias(PAIRING_ALIAS)) return
         KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore").apply {
             initialize(
@@ -170,5 +163,8 @@ class CryptoBox {
         private const val MAX_FUTURE_SKEW_MS = 5L * 60L * 1_000L
         private const val MAX_CIPHERTEXT_BYTES = 768 * 1_024
         private val secureRandom = SecureRandom()
+
+        @Volatile
+        private var cachedKey: Pair<String, SecretKeySpec>? = null
     }
 }
