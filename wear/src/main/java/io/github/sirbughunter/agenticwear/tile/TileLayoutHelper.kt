@@ -27,6 +27,7 @@ internal const val COLOR_CYAN = 0xFF4DEEEA.toInt()
 internal const val COLOR_VIOLET = 0xFF9B51E0.toInt()
 internal const val COLOR_FROST = 0xFFE0E6ED.toInt()
 internal const val COLOR_CORAL = 0xFFFF5A78.toInt()
+internal const val COLOR_MINT = 0xFF64E6AE.toInt()
 internal const val COLOR_MUTED = 0xFF7A8394.toInt()
 
 object TileLayoutHelper {
@@ -157,9 +158,9 @@ object TileLayoutHelper {
 
     internal fun statusDisplay(session: AgentSession): Pair<String, Int> = when (session.status) {
         SessionStatus.ACTIVE -> "Working" to COLOR_CYAN
-        SessionStatus.IDLE -> "Ready" to COLOR_FROST
+        SessionStatus.IDLE -> "Ready" to COLOR_MINT
         SessionStatus.ERROR -> "Needs attention" to COLOR_CORAL
-        SessionStatus.NOT_LOADED -> "Waiting" to COLOR_MUTED
+        SessionStatus.NOT_LOADED -> "Available" to COLOR_MINT
     }
 
     internal fun openAppClickable(context: Context, id: String): ModifiersBuilders.Clickable {

@@ -2,6 +2,16 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.19-alpha — 2026-09-04
+
+- Anchors an idle live session at its newest response directly above Voice reply instead of preserving an empty working-state region.
+- Marks accessible unloaded sessions with a mint-green indicator and matching `Available` label in the app and Recent-Sessions Tile.
+- Keeps foreign mobile/Desktop-owned turns `Working` across forced chat refreshes by deriving live state from the newest App Server turn instead of the local thread-load state.
+
+### Test status
+
+- All 119 bridge tests, 18 relay tests, Wear unit tests, debug lint, and debug assembly pass. The three reported states were visually verified on the 454 × 454 round Wear OS 7 / Android 17 emulator, including a seven-second active-state hold. Gemini 3.7 Flash independently passed the change-specific visual gate at the closest available Antigravity effort (Medium; High was unavailable). Release signing, APK metadata, checksum, and OTA-manifest checks pass for versionCode 45.
+
 ## 0.6.18-alpha — 2026-09-04
 
 - Moves relay ECDH off the watch's failing KeyMint EC operation while preserving P-256, the existing wire protocol, and end-to-end encryption.

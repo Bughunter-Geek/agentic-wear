@@ -183,6 +183,7 @@ export const itemCompletedSchema = z.object({
 export const chatTurnListResponseSchema = z.object({
   data: z.array(z.object({
     id: safeId,
+    status: z.enum(["completed", "interrupted", "failed", "inProgress"]).optional(),
     items: z.array(z.object({
       id: safeId,
       type: z.string(),

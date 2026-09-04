@@ -1384,6 +1384,42 @@ describe("AppServerClient session delivery", () => {
     await expect(target.chatSnapshot("thread-1")).resolves.toMatchObject({ status: "active" });
   });
 
+  it("keeps a foreign active turn working across forced chat refreshes", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    let newestStatus: "completed" | "inProgress" = "completed";
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-1",
+            status: newestStatus,
+            items: [{ id: "assistant-1", type: "agentMessage", phase: "final_answer", text: "Latest reply" }],
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.listSessions();
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toMatchObject({ status: "idle" });
+    await internals.handleNotification("turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-1" },
+    });
+    newestStatus = "inProgress";
+
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toMatchObject({ status: "active" });
+
+    newestStatus = "completed";
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toMatchObject({ status: "idle" });
+  });
+
   it("streams observed thread status changes without waiting for the idle poll", async () => {
     const onAgentOutput = vi.fn().mockResolvedValue(undefined);
     const target = new AppServerClient(

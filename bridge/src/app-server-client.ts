@@ -825,6 +825,7 @@ export class AppServerClient {
     // metadata is already cached. Reuse that observation-only record: calling
     // thread/read after terminal release can load the thread on this client
     // again and make iOS/Android wait for another handoff.
+    const previousStatus = this.chatCaches.get(threadId)?.status;
     const thread = this.threadCache.get(threadId) ?? await this.readThread(threadId, true);
     const releaseAfterRead = thread.status.type === "notLoaded" && !this.controlledThreads.has(threadId);
     // The full view contains reasoning, command output, file changes, and tool
@@ -868,7 +869,11 @@ export class AppServerClient {
     const cache: CachedChat = {
       threadId,
       title: threadTitle(thread),
-      status: this.sessionView(thread).status,
+      status: freshChatStatus(
+        this.sessionView(thread).status,
+        response.data[0]?.status,
+        previousStatus,
+      ),
       messages: messages.slice(-MAX_CACHED_CHAT_MESSAGES),
     };
     for (const pending of this.pendingPermissionMessages.values()) {
@@ -1642,6 +1647,21 @@ function splitParagraphs(message: CachedChatMessage): ChatParagraph[] {
   if (message.role !== "assistant" || message.kind !== "message") return [];
   const parts = message.text.trim().split(/\n\s*\n+/u).map((part) => clean(part, 1_200)).filter(Boolean);
   return parts.map((text, index) => ({ id: `${message.id}:${index}`, text, phase: message.phase }));
+}
+
+function freshChatStatus(
+  threadStatus: SessionView["status"],
+  newestTurnStatus: "completed" | "interrupted" | "failed" | "inProgress" | undefined,
+  previousStatus: SessionView["status"] | undefined,
+): SessionView["status"] {
+  if (newestTurnStatus === "inProgress") return "active";
+  if (newestTurnStatus === "failed") return "error";
+  if (newestTurnStatus === "completed" || newestTurnStatus === "interrupted") return "idle";
+  // A foreign mobile/Desktop writer can remain `notLoaded` in this App Server
+  // while its turn is active. Preserve the event-driven active state when an
+  // older daemon omits turn status instead of letting a refresh erase it.
+  if (threadStatus === "notLoaded" && previousStatus === "active") return "active";
+  return threadStatus;
 }
 
 function materializeChat(cache: CachedChat): ChatSnapshot {

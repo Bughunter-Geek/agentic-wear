@@ -531,7 +531,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val now = System.currentTimeMillis()
         val sessions = listOf(
             AgentSession("demo-build", "Build Agentic Wear Alpha 0.4", now, SessionStatus.ACTIVE, true, true),
-            AgentSession("demo-qa", "Review watch interface", now - 318_000, SessionStatus.IDLE, false, true),
+            AgentSession("demo-qa", "Review watch interface", now - 318_000, SessionStatus.NOT_LOADED, false, false),
             AgentSession("demo-docs", "Prepare open-source launch", now - 1_460_000, SessionStatus.ERROR, false, false),
         )
         val models = listOf(
@@ -556,7 +556,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val homeUpdateDownloadingDemo = normalized == "home-update-downloading"
         val homeUpdateReadyDemo = normalized == "home-update-ready"
         val homeErrorDemo = normalized == "home-error"
-        val chatDemo = normalized in setOf("chat", "chat-error", "chat-permission", "sync-error")
+        val chatDemo = normalized in setOf("chat", "chat-idle", "chat-error", "chat-permission", "sync-error")
         val alert = when (normalized) {
             "home-alert" -> AgentAlert("demo-home-alert", AlertKind.COMPLETE, "demo-build", sessions[0].title, "The latest Watch prompt completed successfully.", now)
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
@@ -572,7 +572,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
                 "transcript", "transcript-foreign-error", "send-mode" -> WearScreen.TRANSCRIPT
-                "chat", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
+                "chat", "chat-idle", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
                 else -> WearScreen.HOME
@@ -587,7 +587,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 io.github.sirbughunter.agenticwear.model.ChatSnapshot(
                     threadId = "demo-build",
                     title = sessions[0].title,
-                    status = SessionStatus.ACTIVE,
+                    status = if (normalized == "chat-idle") SessionStatus.IDLE else SessionStatus.ACTIVE,
                     paragraphs = listOf(
                         io.github.sirbughunter.agenticwear.model.ChatParagraph(
                             "demo-chat-1",
@@ -601,7 +601,17 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                         ),
                     ),
                     generatedAtMillis = now,
-                    messages = listOf(
+                    messages = if (normalized == "chat-idle") {
+                        listOf(
+                            ChatMessage(
+                                id = "demo-chat-idle",
+                                turnId = "demo-turn-idle",
+                                role = ChatRole.ASSISTANT,
+                                text = "The latest response is ready to read.",
+                                phase = io.github.sirbughunter.agenticwear.model.ChatPhase.FINAL_ANSWER,
+                            ),
+                        )
+                    } else listOf(
                         ChatMessage(
                             id = "demo-user-1",
                             turnId = "demo-turn-1",

@@ -87,6 +87,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -165,6 +166,7 @@ import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import java.text.DateFormat
 import java.util.Date
+import kotlinx.coroutines.flow.first
 import kotlin.math.roundToInt
 import kotlin.math.hypot
 import kotlin.math.abs
@@ -620,10 +622,7 @@ private fun HomeSessionButton(
         ),
         contentPadding = PaddingValues(horizontal = if (compact) 13.dp else 17.dp),
     ) {
-        StatusDot(
-            session?.status ?: SessionStatus.NOT_LOADED,
-            session?.watchReady == true,
-        )
+        StatusDot(session?.status)
         Spacer(Modifier.width(if (compact) 8.dp else 11.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -636,7 +635,7 @@ private fun HomeSessionButton(
             )
             Text(
                 text = session?.displayLabel ?: "No session selected",
-                color = if (session?.showsReady == true) Mint else Muted,
+                color = session?.status?.accentColor ?: Muted,
                 fontSize = if (compact) 9.sp else 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1174,7 +1173,7 @@ private fun SessionsScreen(state: WearUiState, onBack: () -> Unit, onSelect: (St
                         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        StatusDot(session.status, session.watchReady)
+                        StatusDot(session.status)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(session.title, color = Frost, fontSize = 13.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
@@ -1184,7 +1183,7 @@ private fun SessionsScreen(state: WearUiState, onBack: () -> Unit, onSelect: (St
                                     append(session.displayLabel)
                                     if (session.ownedByWear) append(" · watch-owned")
                                 },
-                                color = if (session.showsReady) Mint else Muted,
+                                color = session.status.accentColor,
                                 fontSize = 10.sp,
                             )
                         }
@@ -2393,16 +2392,26 @@ private fun ChatScreen(
     val agentThinking = isWorking &&
         !hasPendingPermission && state.error == null
     val showRoundEdgeAction = isRound && !hasActionablePermission
+    val lastContentIndex = (
+        1 +
+            (if (state.error != null) 1 else 0) +
+            (if (state.sendNotice != null) 1 else 0) +
+            (if (messages.isEmpty()) 1 else messages.size) +
+            (if (agentThinking) 1 else 0)
+        ) - 1
     val nearLatest by remember {
         derivedStateOf {
             val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
             visible >= listState.layoutInfo.totalItemsCount - 2
         }
     }
-    var positionedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
+    // Re-entering a chat must position its current content again; restoring
+    // this marker across navigation skips the initial jump and exposes stale
+    // top-aligned space from the previous visit.
+    var positionedThreadId by remember { mutableStateOf<String?>(null) }
     var previousMessageCount by remember { mutableStateOf(0) }
     var previousAgentThinking by remember { mutableStateOf(false) }
-    LaunchedEffect(chat?.threadId, messages.size, agentThinking) {
+    LaunchedEffect(chat?.threadId, messages.size, agentThinking, state.error, state.sendNotice) {
         val currentThreadId = chat?.threadId ?: return@LaunchedEffect
         val firstPosition = positionedThreadId != currentThreadId
         val appendedWhileFollowing = messages.size > previousMessageCount && nearLatest
@@ -2410,15 +2419,20 @@ private fun ChatScreen(
         previousMessageCount = messages.size
         previousAgentThinking = agentThinking
         if (firstPosition || appendedWhileFollowing || thinkingStarted) {
-            delay(16)
-            val targetIndex = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-            if (targetIndex >= 0) {
-                if (firstPosition) {
-                    listState.scrollToItem(targetIndex)
-                } else {
-                    listState.animateScrollToItem(targetIndex)
-                }
+            snapshotFlow {
+                listState.layoutInfo.totalItemsCount to listState.layoutInfo.viewportSize.height
+            }.first { (itemCount, viewportHeight) ->
+                itemCount > lastContentIndex && viewportHeight > 0
             }
+            if (firstPosition) {
+                listState.scrollToItem(lastContentIndex)
+            } else {
+                listState.animateScrollToItem(lastContentIndex)
+            }
+            // The item jump aligns the newest item with the viewport start.
+            // Consume the remaining range so bottom content padding clears the
+            // reply control and the response footer is readable immediately.
+            listState.scrollBy(10_000f)
             positionedThreadId = currentThreadId
         }
     }
@@ -2438,9 +2452,9 @@ private fun ChatScreen(
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
-                bottom = if (showRoundEdgeAction) 116.dp else if (isRound) 76.dp else 52.dp,
+                bottom = if (showRoundEdgeAction) 56.dp else if (isRound) 76.dp else 52.dp,
             ),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp, Alignment.Bottom),
             ) {
                 item {
                 Column(
@@ -3941,13 +3955,8 @@ private fun ScreenHeader(title: String, onBack: () -> Unit, horizontalPadding: D
 }
 
 @Composable
-private fun StatusDot(status: SessionStatus, watchReady: Boolean = false) {
-    val color = when (status) {
-        SessionStatus.ACTIVE -> Cyan
-        SessionStatus.IDLE -> Mint
-        SessionStatus.ERROR -> Coral
-        SessionStatus.NOT_LOADED -> if (watchReady) Mint else Muted
-    }
+private fun StatusDot(status: SessionStatus?) {
+    val color = status?.accentColor ?: Muted
     Box(Modifier.size(11.dp).clip(CircleShape).background(color.copy(alpha = 0.18f)).border(2.dp, color, CircleShape))
 }
 
@@ -4117,7 +4126,7 @@ private fun EmptyState(title: String, body: String) {
     }
 }
 
-private val SessionStatus.label: String
+internal val SessionStatus.label: String
     get() = when (this) {
         SessionStatus.ACTIVE -> "Working"
         SessionStatus.IDLE -> "Ready"
@@ -4125,8 +4134,12 @@ private val SessionStatus.label: String
         SessionStatus.ERROR -> "Needs attention"
     }
 
-private val AgentSession.showsReady: Boolean
-    get() = status == SessionStatus.IDLE || (watchReady && status == SessionStatus.NOT_LOADED)
+private val SessionStatus.accentColor: Color
+    get() = when (this) {
+        SessionStatus.ACTIVE -> Cyan
+        SessionStatus.IDLE, SessionStatus.NOT_LOADED -> Mint
+        SessionStatus.ERROR -> Coral
+    }
 
 private val AgentSession.displayLabel: String
-    get() = if (showsReady) "Ready" else status.label
+    get() = status.label

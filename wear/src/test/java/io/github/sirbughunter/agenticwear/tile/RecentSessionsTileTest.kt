@@ -24,15 +24,15 @@ class RecentSessionsTileTest {
 
         val idle = TileLayoutHelper.statusDisplay(baseSession.copy(status = SessionStatus.IDLE))
         assertEquals("Ready", idle.first)
-        assertEquals(COLOR_FROST, idle.second)
+        assertEquals(COLOR_MINT, idle.second)
 
         val error = TileLayoutHelper.statusDisplay(baseSession.copy(status = SessionStatus.ERROR))
         assertEquals("Needs attention", error.first)
         assertEquals(COLOR_CORAL, error.second)
 
         val notLoaded = TileLayoutHelper.statusDisplay(baseSession.copy(status = SessionStatus.NOT_LOADED))
-        assertEquals("Waiting", notLoaded.first)
-        assertEquals(COLOR_MUTED, notLoaded.second)
+        assertEquals("Available", notLoaded.first)
+        assertEquals(COLOR_MINT, notLoaded.second)
     }
 
     @Test
