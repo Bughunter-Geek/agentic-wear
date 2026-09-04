@@ -1418,6 +1418,105 @@ describe("AppServerClient session delivery", () => {
 
     newestStatus = "completed";
     await expect(target.chatSnapshot("thread-1", true)).resolves.toMatchObject({ status: "idle" });
+    expect(internals.request).not.toHaveBeenCalledWith("thread/unsubscribe", { threadId: "thread-1" });
+  });
+
+  it("keeps a newer foreign summary active when the status-only view still reports the prior turn", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string, params: unknown) => {
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") {
+        const itemsView = (params as { itemsView?: string }).itemsView;
+        if (itemsView === "notLoaded") {
+          return Promise.resolve({
+            data: [{ id: "turn-0", status: "completed", completedAt: 1_787_900_010, error: null }],
+            nextCursor: null,
+            backwardsCursor: null,
+          });
+        }
+        return Promise.resolve({
+          data: [{
+            id: "turn-1",
+            items: [{ id: "assistant-1", type: "agentMessage", phase: "commentary", text: "Still working" }],
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.listSessions();
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toMatchObject({
+      status: "active",
+      messages: [expect.objectContaining({ text: "Still working" })],
+    });
+    expect(internals.request).not.toHaveBeenCalledWith("thread/unsubscribe", { threadId: "thread-1" });
+  });
+
+  it("treats the App Server foreign interrupted-without-completion representation as active", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{
+            id: "turn-live",
+            status: "interrupted",
+            completedAt: null,
+            items: [{
+              id: "user-live",
+              type: "userMessage",
+              content: [{ type: "text", text: "Keep working" }],
+            }],
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.listSessions();
+    await expect(target.chatSnapshot("thread-1", true)).resolves.toMatchObject({ status: "active" });
+    expect(internals.request).not.toHaveBeenCalledWith("thread/unsubscribe", { threadId: "thread-1" });
+  });
+
+  it("does not let a foreign notLoaded status notification erase an active turn", async () => {
+    const onAgentOutput = vi.fn().mockResolvedValue(undefined);
+    const target = new AppServerClient(
+      new Set(),
+      async () => {},
+      async () => {},
+      () => {},
+      onAgentOutput,
+    );
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/turns/list") return Promise.resolve({ data: [], nextCursor: null, backwardsCursor: null });
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await target.chatSnapshot("thread-1");
+    await internals.handleNotification("turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-1" },
+    });
+    await internals.handleNotification("thread/status/changed", {
+      threadId: "thread-1",
+      status: { type: "notLoaded" },
+    });
+
+    expect(onAgentOutput).toHaveBeenCalledWith("thread-1");
+    await expect(target.chatSnapshot("thread-1")).resolves.toMatchObject({ status: "active" });
   });
 
   it("streams observed thread status changes without waiting for the idle poll", async () => {
@@ -1592,10 +1691,17 @@ describe("AppServerClient session delivery", () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     let historyAttempts = 0;
-    internals.request = vi.fn((method: string) => {
+    internals.request = vi.fn((method: string, params: unknown) => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
       if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
       if (method === "thread/turns/list") {
+        if ((params as { itemsView?: string }).itemsView === "notLoaded") {
+          return Promise.resolve({
+            data: [{ id: "turn-1", status: "completed", completedAt: 1_787_900_010, error: null }],
+            nextCursor: null,
+            backwardsCursor: null,
+          });
+        }
         historyAttempts += 1;
         if (historyAttempts === 1) return Promise.reject(new Error("No rollout found for thread thread-1"));
         return Promise.resolve({
@@ -1621,10 +1727,17 @@ describe("AppServerClient session delivery", () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     let historyAttempts = 0;
-    internals.request = vi.fn((method: string) => {
+    internals.request = vi.fn((method: string, params: unknown) => {
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
       if (method === "thread/list") return Promise.resolve({ data: [thread("notLoaded")], nextCursor: null });
       if (method === "thread/turns/list") {
+        if ((params as { itemsView?: string }).itemsView === "notLoaded") {
+          return Promise.resolve({
+            data: [{ id: "turn-1", status: "completed", completedAt: 1_787_900_010, error: null }],
+            nextCursor: null,
+            backwardsCursor: null,
+          });
+        }
         historyAttempts += 1;
         if (historyAttempts === 1) return Promise.reject(new Error("bs1 was cancelled"));
         return Promise.resolve({

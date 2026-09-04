@@ -826,8 +826,11 @@ export class AppServerClient {
     // thread/read after terminal release can load the thread on this client
     // again and make iOS/Android wait for another handoff.
     const previousStatus = this.chatCaches.get(threadId)?.status;
-    const thread = this.threadCache.get(threadId) ?? await this.readThread(threadId, true);
-    const releaseAfterRead = thread.status.type === "notLoaded" && !this.controlledThreads.has(threadId);
+    const cachedThread = this.threadCache.get(threadId);
+    const thread = cachedThread ?? await this.readThread(threadId, true);
+    const releaseAfterRead = cachedThread === undefined &&
+      thread.status.type === "notLoaded" &&
+      !this.controlledThreads.has(threadId);
     // The full view contains reasoning, command output, file changes, and tool
     // payloads that Agentic Wear intentionally discards. Long Codex chats can
     // make those responses exceed the daemon transport limit or cancel the
@@ -840,6 +843,28 @@ export class AppServerClient {
       itemsView: "summary",
     });
     const response = chatTurnListResponseSchema.parse(raw);
+    // Some App Server versions omit turn status from the summary view for a
+    // thread owned by another process. The status-only view remains
+    // authoritative and lets a Watch distinguish an active foreign turn from
+    // a merely available, unloaded session.
+    const newestSummaryTurn = response.data[0];
+    const threadStatus = this.sessionView(thread).status;
+    const foreignTurnIsStillRunning = threadStatus === "notLoaded" &&
+      newestSummaryTurn?.status === "interrupted" &&
+      newestSummaryTurn.completedAt == null &&
+      !newestSummaryTurn.items.some((item) => item.type === "agentMessage" && item.phase === "final_answer");
+    let newestTurnStatus = foreignTurnIsStillRunning ? "inProgress" : newestSummaryTurn?.status;
+    if (newestTurnStatus === undefined && threadStatus === "notLoaded") {
+      const newestStatusTurn = await this.latestTurn(threadId);
+      if (newestSummaryTurn && newestStatusTurn?.id === newestSummaryTurn.id) {
+        newestTurnStatus = newestStatusTurn.status;
+      } else if (newestSummaryTurn) {
+        // A foreign writer can expose its new summary before the shared state
+        // row advances. An older completed status must not be applied to that
+        // newer turn; until their IDs converge, the newer summary is live.
+        newestTurnStatus = "inProgress";
+      }
+    }
     try {
       queueListResponseSchema.parse(await this.request("thread/queue/list", {
         threadId,
@@ -870,8 +895,8 @@ export class AppServerClient {
       threadId,
       title: threadTitle(thread),
       status: freshChatStatus(
-        this.sessionView(thread).status,
-        response.data[0]?.status,
+        threadStatus,
+        newestTurnStatus,
         previousStatus,
       ),
       messages: messages.slice(-MAX_CACHED_CHAT_MESSAGES),
@@ -1137,7 +1162,12 @@ export class AppServerClient {
           const thread = this.threadCache.get(update.data.threadId);
           if (thread) {
             cached.title = threadTitle(thread);
-            if (this.updateCachedChatStatus(update.data.threadId, this.sessionView(thread).status)) {
+            const observedStatus = freshChatStatus(
+              this.sessionView(thread).status,
+              undefined,
+              cached.status,
+            );
+            if (this.updateCachedChatStatus(update.data.threadId, observedStatus)) {
               await this.onAgentOutput(update.data.threadId);
             }
           }

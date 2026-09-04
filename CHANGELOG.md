@@ -2,6 +2,16 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.20-alpha — 2026-09-04
+
+- Stops observation-only chat refreshes from unsubscribing an externally owned Codex session, which could make a live turn appear interrupted and remove the Watch thinking indicator.
+- Treats Codex App Server's foreign `interrupted`/no-completion compatibility state as still active, while correlating fallback status records by turn ID so an older completed turn cannot overwrite a newer live one.
+- Preserves the existing physical-watch pairing while supporting a separate isolated emulator pairing for repeatable end-to-end validation.
+
+### Test status
+
+- All 122 bridge tests and static checks pass. A separately paired 454 × 454 Wear OS 7 / Android 17 emulator received a real encrypted Codex session, persisted `ACTIVE`, displayed `Agent is thinking` throughout a 45-second App Server turn, allowed the command to complete normally, returned to `IDLE`, and rendered the final answer directly above Voice reply.
+
 ## 0.6.19-alpha — 2026-09-04
 
 - Anchors an idle live session at its newest response directly above Voice reply instead of preserving an empty working-state region.
