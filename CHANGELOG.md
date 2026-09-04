@@ -2,6 +2,16 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.21-alpha — 2026-09-04
+
+- Keeps live chat pinned to the exact newest content while the reader remains near the bottom, including same-message streaming revisions and the final transition out of `Agent is thinking`, without pulling the reader back after an intentional upward scroll.
+- Uses immediate follow positioning for streaming updates so overlapping deltas cannot cancel an in-flight scroll before the thinking indicator becomes visible; the explicit jump control still animates when system animations are enabled.
+- Recognizes Codex App Server's foreign `interrupted`/no-completion compatibility state as steerable during submission, and makes explicit **Steer now** fail clearly instead of silently becoming a queued message when no active turn is available.
+
+### Test status
+
+- All 124 bridge tests, 18 relay tests, Wear unit tests, debug lint, and debug assembly pass. The exact-bottom thinking state was visually verified on the 454 × 454 round Wear OS 7 / Android 17 emulator at disabled, normal, and 10× animation scales. Physical-watch acceptance of the published APK remains pending until the Watch's routed ADB endpoint is reachable again.
+
 ## 0.6.20-alpha — 2026-09-04
 
 - Stops observation-only chat refreshes from unsubscribing an externally owned Codex session, which could make a live turn appear interrupted and remove the Watch thinking indicator.

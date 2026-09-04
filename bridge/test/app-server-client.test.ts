@@ -241,6 +241,70 @@ describe("AppServerClient session delivery", () => {
     expect(methods).not.toContain("thread/queue/delete");
   });
 
+  it("steers the App Server foreign interrupted-without-completion compatibility state", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") {
+        return Promise.resolve({
+          data: [{ id: "turn-mobile", status: "interrupted", completedAt: null }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "turn/steer") return Promise.resolve({ turnId: "turn-mobile" });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Change course now.",
+      "/tmp",
+      "gpt-5.6-sol",
+      "high",
+      "watch-compat-steer-1",
+      undefined,
+      "steer",
+    )).resolves.toMatchObject({
+      state: "running",
+      steered: true,
+      followUpMode: "steer",
+    });
+
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/settings/update", "turn/steer"]);
+    expect(methods).not.toContain("thread/queue/add");
+  });
+
+  it("never silently queues an explicit steer when no active turn is exposed", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Change course now.",
+      "/tmp",
+      "gpt-5.6-sol",
+      "high",
+      "watch-no-active-steer-1",
+      undefined,
+      "steer",
+    )).rejects.toThrow("Codex did not expose an active turn to steer");
+
+    expect(methods).toEqual(["thread/read", "thread/turns/list"]);
+    expect(methods).not.toContain("thread/queue/add");
+  });
+
   it("uses the Codex default to queue behind a foreign active turn", async () => {
     const sendMessageToThread = vi.fn();
     const target = new AppServerClient(

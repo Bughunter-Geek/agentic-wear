@@ -556,7 +556,7 @@ export class AppServerClient {
         if (current.status.type === "notLoaded") {
           const latest = await this.latestTurn(current.id);
           previousTurnId = latest?.id ?? null;
-          if (latest?.status === "inProgress") {
+          if (latest && turnMayStillBeActive(latest.status, latest.completedAt)) {
             activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
             if (activeFollowUpMode === "queue") {
               // Settings are sticky for the next turn and do not mutate the
@@ -577,6 +577,9 @@ export class AppServerClient {
               acceptedState = "running";
             }
             return current;
+          }
+          if (followUpAction === "steer") {
+            throw new Error("Codex did not expose an active turn to steer");
           }
           if (!await this.acquireDormantThread(current.id, model, effort)) {
             // Another client can retain an idle writer. The durable queue is
@@ -1669,6 +1672,13 @@ export function supportsThreadQueue(userAgent: string): boolean {
   const major = Number(version[1]);
   const minor = Number(version[2]);
   return major > 0 || minor >= 150;
+}
+
+function turnMayStillBeActive(
+  status: "completed" | "interrupted" | "failed" | "inProgress",
+  completedAt: number | null | undefined,
+): boolean {
+  return status === "inProgress" || (status === "interrupted" && completedAt == null);
 }
 
 function textInput(text: string): Record<string, unknown> {

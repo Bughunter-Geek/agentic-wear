@@ -54,6 +54,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -2392,6 +2393,12 @@ private fun ChatScreen(
     val agentThinking = isWorking &&
         !hasPendingPermission && state.error == null
     val showRoundEdgeAction = isRound && !hasActionablePermission
+    val followRevision = ChatFollowRevision(
+        messages = messages,
+        agentThinking = agentThinking,
+        error = state.error,
+        sendNotice = state.sendNotice,
+    )
     val lastContentIndex = (
         1 +
             (if (state.error != null) 1 else 0) +
@@ -2409,30 +2416,26 @@ private fun ChatScreen(
     // this marker across navigation skips the initial jump and exposes stale
     // top-aligned space from the previous visit.
     var positionedThreadId by remember { mutableStateOf<String?>(null) }
-    var previousMessageCount by remember { mutableStateOf(0) }
-    var previousAgentThinking by remember { mutableStateOf(false) }
-    LaunchedEffect(chat?.threadId, messages.size, agentThinking, state.error, state.sendNotice) {
+    var previousFollowRevision by remember(chat?.threadId) {
+        mutableStateOf<ChatFollowRevision?>(null)
+    }
+    LaunchedEffect(chat?.threadId, followRevision) {
         val currentThreadId = chat?.threadId ?: return@LaunchedEffect
         val firstPosition = positionedThreadId != currentThreadId
-        val appendedWhileFollowing = messages.size > previousMessageCount && nearLatest
-        val thinkingStarted = agentThinking && !previousAgentThinking && (nearLatest || firstPosition)
-        previousMessageCount = messages.size
-        previousAgentThinking = agentThinking
-        if (firstPosition || appendedWhileFollowing || thinkingStarted) {
+        val shouldFollowLatest = shouldFollowChatRevision(
+            firstPosition = firstPosition,
+            nearLatest = nearLatest,
+            previous = previousFollowRevision,
+            current = followRevision,
+        )
+        previousFollowRevision = followRevision
+        if (shouldFollowLatest) {
             snapshotFlow {
                 listState.layoutInfo.totalItemsCount to listState.layoutInfo.viewportSize.height
             }.first { (itemCount, viewportHeight) ->
                 itemCount > lastContentIndex && viewportHeight > 0
             }
-            if (firstPosition) {
-                listState.scrollToItem(lastContentIndex)
-            } else {
-                listState.animateScrollToItem(lastContentIndex)
-            }
-            // The item jump aligns the newest item with the viewport start.
-            // Consume the remaining range so bottom content padding clears the
-            // reply control and the response footer is readable immediately.
-            listState.scrollBy(10_000f)
+            listState.scrollChatToBottom(lastContentIndex, animated = false)
             positionedThreadId = currentThreadId
         }
     }
@@ -2658,7 +2661,10 @@ private fun ChatScreen(
                         .clickable(role = Role.Button) {
                             scope.launch {
                                 val lastIndex = listState.layoutInfo.totalItemsCount - 1
-                                if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+                                listState.scrollChatToBottom(
+                                    lastIndex,
+                                    animated = ValueAnimator.areAnimatorsEnabled(),
+                                )
                             }
                         }
                         .semantics { contentDescription = "Jump to latest message" },
@@ -2674,6 +2680,33 @@ private fun ChatScreen(
             }
         }
     }
+}
+
+internal data class ChatFollowRevision(
+    val messages: List<ChatMessage>,
+    val agentThinking: Boolean,
+    val error: String?,
+    val sendNotice: String?,
+)
+
+internal fun shouldFollowChatRevision(
+    firstPosition: Boolean,
+    nearLatest: Boolean,
+    previous: ChatFollowRevision?,
+    current: ChatFollowRevision,
+): Boolean = firstPosition || (previous != current && nearLatest)
+
+private suspend fun LazyListState.scrollChatToBottom(lastContentIndex: Int, animated: Boolean) {
+    if (lastContentIndex < 0) return
+    // Automatic following intentionally snaps: streaming deltas can arrive
+    // faster than an animation finishes and repeatedly cancel its final step.
+    if (animated) animateScrollToItem(lastContentIndex) else scrollToItem(lastContentIndex)
+    val layout = layoutInfo
+    val target = layout.visibleItemsInfo.firstOrNull { it.index == lastContentIndex } ?: return
+    val remainingToBottom = (
+        target.offset + target.size + layout.afterContentPadding - layout.viewportEndOffset
+        ).coerceAtLeast(0)
+    if (remainingToBottom > 0) scrollBy(remainingToBottom.toFloat())
 }
 
 @Composable
