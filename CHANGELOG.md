@@ -2,6 +2,16 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.17-alpha — 2026-09-04
+
+- Replaces sub-second Keystore retries with Android's reported recovery policy: backend-busy hints are honored directly, evacuated crypto operations are recreated immediately, and KeyMint exponential backoff starts at the documented five-second minimum.
+- Reads the underlying Android Keystore error instead of treating every provider failure as temporary hardware contention.
+- Surfaces a sanitized numeric security code and the correct recovery when Android reports a locked watch, connectivity/reboot requirement, or permanently unusable pairing key.
+
+### Test status
+
+- Wear unit tests, debug lint, and debug assembly pass. Minified release signing, APK metadata, checksum, and OTA-manifest checks are completed during release preparation. Physical-watch acceptance remains pending until the published Alpha reaches the remote watch.
+
 ## 0.6.16-alpha — 2026-09-04
 
 - Serializes Android Keystore access across the foreground UI, voice service, and inbox worker so concurrent startup/sync work cannot contend for the watch's security hardware.
