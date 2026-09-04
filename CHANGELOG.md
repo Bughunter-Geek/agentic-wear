@@ -2,6 +2,17 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.23-alpha — 2026-09-04
+
+- Replaces the live-chat **Voice reply** action with **Reply** and a round-safe choice between Voice and Text; Text opens the native Wear keyboard and keeps the selected task, model, reasoning effort, and queue/steer behavior intact.
+- Retries transient Watch-to-relay connection aborts with the exact encrypted request envelope, relying on the existing request ID and replay guard to prevent duplicate submissions.
+- Preserves a Watch draft in the bridge's encrypted pending store when Codex temporarily cannot synchronize a listed task, then retries it automatically instead of rejecting or losing the message.
+- Prevents a stale private App Server from entering a restart loop that can interrupt valid work, and refuses to steer into an empty interrupted turn left behind by a prior restart.
+
+### Test status
+
+- All 128 bridge tests, 18 relay tests, Wear unit tests, debug lint, and debug assembly pass. A separately paired 454 × 454 Wear OS 7 / Android 17 emulator entered a typed reply through the native keyboard, delivered it through the encrypted public relay into the original Codex task exactly once, displayed `Agent is thinking`, and rendered the exact `TEXT-E2E-OK.` response without a synchronization or connection-abort dialog. Gemini 3.7 Flash independently passed the full synthetic-state visual gate at the closest available Antigravity effort (Medium; High was unavailable). Physical-watch acceptance of the published APK remains pending.
+
 ## 0.6.22-alpha — 2026-09-04
 
 - Makes chat roles unmistakable without relying on color alone: user prompts are right-aligned cyan cards labeled **YOU** with a person icon, while agent updates and answers are left-aligned violet cards labeled **AGENT UPDATE** or **AGENT ANSWER** with a spark icon.

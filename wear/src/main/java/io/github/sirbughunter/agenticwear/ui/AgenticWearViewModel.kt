@@ -48,7 +48,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, CHAT, ALERT, SETTINGS }
+enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, REPLY, CHAT, ALERT, SETTINGS }
 
 data class WearUiState(
     val screen: WearScreen = WearScreen.HOME,
@@ -79,6 +79,7 @@ data class WearUiState(
     val showInstallPermissionPrompt: Boolean = false,
     val showSendModeOverlay: Boolean = false,
     val showErrorDetails: Boolean = false,
+    val replyingFromChat: Boolean = false,
     val demo: Boolean = false,
 ) {
     val selectedSession: AgentSession?
@@ -408,6 +409,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun discardTranscript() {
+        val returnToChat = _state.value.replyingFromChat
+        val threadId = _state.value.transcript?.threadId
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
         recordingTimeoutJob?.cancel()
@@ -418,7 +421,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         preferences.submitDraftAsNewSession = false
         preferences.pending = false
         preferences.lastError = null
-        _state.update(::resetForNewTranscription)
+        _state.update { current ->
+            resetForNewTranscription(current).copy(
+                screen = if (returnToChat) WearScreen.CHAT else WearScreen.HOME,
+                replyingFromChat = false,
+            )
+        }
+        if (returnToChat && threadId != null) startChatStream(threadId)
     }
 
     fun retryChat() {
@@ -430,8 +439,31 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun replyFromChat() {
+        _state.update { it.copy(screen = WearScreen.REPLY, error = null) }
+    }
+
+    fun cancelReplyFromChat() {
+        _state.update { it.copy(screen = WearScreen.CHAT, error = null) }
+    }
+
+    fun replyWithVoiceFromChat() {
         stopChatStream()
         _state.update { it.copy(screen = WearScreen.HOME, error = null) }
+    }
+
+    fun replyWithTextFromChat() {
+        val threadId = _state.value.chat?.threadId
+            ?: _state.value.selectedSession?.id
+            ?: preferences.selectedThreadId
+            ?: return showError("Choose a Codex session first")
+        stopChatStream()
+        val draft = Transcript(UUID.randomUUID().toString(), "", threadId)
+        preferences.selectedThreadId = threadId
+        preferences.transcript = draft
+        preferences.revisionBase = null
+        preferences.pending = false
+        preferences.lastError = null
+        _state.update { prepareTextReply(it, draft) }
     }
 
     fun respondToApproval(approve: Boolean) {
@@ -564,14 +596,19 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             "error" -> AgentAlert("demo-error", AlertKind.ERROR, "demo-docs", sessions[2].title, "The agent stopped after a build error.", now)
             else -> null
         }
-        val transcript = if (normalized in setOf("transcript", "transcript-foreign-error", "send-mode")) {
-            Transcript("demo-transcript", "Make the completion state calmer and verify the release build.", "demo-build")
+        val transcript = if (normalized in setOf("transcript", "text-reply", "transcript-foreign-error", "send-mode")) {
+            Transcript(
+                "demo-transcript",
+                if (normalized == "text-reply") "" else "Make the completion state calmer and verify the release build.",
+                "demo-build",
+            )
         } else null
         _state.value = WearUiState(
             screen = when (normalized) {
                 "pair" -> WearScreen.PAIR
                 "sessions" -> WearScreen.SESSIONS
-                "transcript", "transcript-foreign-error", "send-mode" -> WearScreen.TRANSCRIPT
+                "transcript", "text-reply", "transcript-foreign-error", "send-mode" -> WearScreen.TRANSCRIPT
+                "reply" -> WearScreen.REPLY
                 "chat", "chat-idle", "chat-roles", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
                 "settings", "update-permission" -> WearScreen.SETTINGS
@@ -717,6 +754,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             showInstallPermissionPrompt = updatePermissionDemo,
             showSendModeOverlay = normalized == "send-mode",
             showErrorDetails = normalized in setOf("sync-error", "error-detail", "error-details"),
+            replyingFromChat = normalized == "text-reply",
             error = when {
                 homeErrorDemo -> "I didn't catch enough audio. Tap and try again."
                 normalized in setOf("sync-error", "error-detail", "error-details") -> "Codex could not synchronize this session after retrying. Agentic Wear did not queue or send your message, and your draft remains on the watch. Refresh sessions and retry."
@@ -1200,3 +1238,12 @@ internal fun resetForNewTranscription(current: WearUiState): WearUiState = curre
 
 internal fun shouldCancelRecordingWhenActivityStops(engine: TranscriptionEngine): Boolean =
     engine == TranscriptionEngine.DEVICE_SPEECH
+
+internal fun prepareTextReply(current: WearUiState, draft: Transcript): WearUiState = current.copy(
+    screen = WearScreen.TRANSCRIPT,
+    selectedThreadId = draft.threadId,
+    transcript = draft,
+    pending = false,
+    error = null,
+    replyingFromChat = true,
+)

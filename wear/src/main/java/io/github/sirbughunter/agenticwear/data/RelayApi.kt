@@ -6,6 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.delay
@@ -69,6 +70,7 @@ class RelayApi {
             method = "POST",
             bearer = pairing.watchCredential,
             body = envelope.toString(),
+            retryTransientFailures = true,
         )
     }
 
@@ -76,6 +78,7 @@ class RelayApi {
         url = "${pairing.relayUrl}/v1/pairs/${encodePath(pairing.pairId)}/inbox",
         method = "GET",
         bearer = pairing.watchCredential,
+        retryTransientFailures = true,
     ).optJSONArray("messages").toObjectList()
 
     suspend fun acknowledge(pairing: Pairing, messageIds: List<String>) {
@@ -85,6 +88,7 @@ class RelayApi {
             method = "POST",
             bearer = pairing.watchCredential,
             body = JSONObject().put("messageIds", JSONArray(messageIds.take(50))).toString(),
+            retryTransientFailures = true,
         )
     }
 
@@ -94,6 +98,7 @@ class RelayApi {
             method = "PUT",
             bearer = pairing.watchCredential,
             body = JSONObject().put("fcmInstallationId", installationId).toString(),
+            retryTransientFailures = true,
         )
     }
 
@@ -102,6 +107,36 @@ class RelayApi {
         method: String,
         bearer: String? = null,
         body: String? = null,
+        retryTransientFailures: Boolean = false,
+    ): JSONObject {
+        var retryIndex = 0
+        while (true) {
+            try {
+                return requestOnce(url, method, bearer, body)
+            } catch (error: IOException) {
+                val retryDelayMillis = if (retryTransientFailures) {
+                    relayRetryDelayMillis(error, retryIndex)
+                } else {
+                    null
+                }
+                if (retryDelayMillis == null) {
+                    if (!retryTransientFailures) throw error
+                    throw IOException(
+                        "The Watch could not reach the relay after retrying. Check the Watch connection and try again.",
+                        error,
+                    )
+                }
+                retryIndex += 1
+                delay(retryDelayMillis)
+            }
+        }
+    }
+
+    private suspend fun requestOnce(
+        url: String,
+        method: String,
+        bearer: String?,
+        body: String?,
     ): JSONObject = withContext(Dispatchers.IO) {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
@@ -161,5 +196,12 @@ class RelayApi {
         private const val PAIR_CONFIRMATION_TIMEOUT_MS = 30_000L
     }
 }
+
+internal fun relayRetryDelayMillis(error: Throwable, retryIndex: Int): Long? {
+    if (error !is IOException || retryIndex < 0) return null
+    return RELAY_RETRY_DELAYS_MILLIS.getOrNull(retryIndex)
+}
+
+private val RELAY_RETRY_DELAYS_MILLIS = longArrayOf(250L, 750L)
 
 class RelayException(val status: Int, message: String) : Exception(message)

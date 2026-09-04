@@ -82,6 +82,59 @@ describe("BridgeService App Server transport", () => {
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error" }));
   });
 
+  it("persists and acknowledges a prompt when cross-client session sync is transiently unavailable", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const storePendingTurn = vi.fn().mockResolvedValue(undefined);
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      appServer: {
+        submitTurn: vi.fn().mockRejectedValue(new Error("No rollout found for thread thread-1")),
+      },
+      config: { defaultCwd: "/tmp" },
+      send,
+      sendSessions: vi.fn().mockResolvedValue(undefined),
+      storePendingTurn,
+    });
+
+    await (service as unknown as {
+      handleWatchPayload: (payload: {
+        version: 1;
+        kind: "turn.submit";
+        requestId: string;
+        threadId: string;
+        text: string;
+        model: string;
+        effort: string;
+        followUpAction: "steer";
+      }) => Promise<void>;
+    }).handleWatchPayload({
+      version: 1,
+      kind: "turn.submit",
+      requestId: "watch-sync-wait-1",
+      threadId: "thread-1",
+      text: "Deliver this once after synchronization.",
+      model: "gpt-5.6-terra",
+      effort: "high",
+      followUpAction: "steer",
+    });
+
+    expect(storePendingTurn).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: "watch-sync-wait-1",
+      threadId: "thread-1",
+      text: "Deliver this once after synchronization.",
+      followUpAction: "steer",
+    }));
+    expect(storePendingTurn.mock.invocationCallOrder[0]!).toBeLessThan(send.mock.invocationCallOrder[0]!);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "turn.accepted",
+      requestId: "watch-sync-wait-1",
+      state: "waiting",
+      selectionApplied: false,
+      message: expect.stringContaining("send it once"),
+    }));
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error" }));
+  });
+
   it("durably marks an active-turn handoff before acknowledging the steer", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const markPendingExternalAttempt = vi.fn().mockResolvedValue(undefined);

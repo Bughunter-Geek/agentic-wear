@@ -261,6 +261,9 @@ export class AppServerClient {
   private readonly pendingPermissionMessages = new Map<string, { threadId: string; message: CachedChatMessage }>();
   private modelCache: ModelView[] | null = null;
   private privateRestartTask: Promise<void> | null = null;
+  private readonly staleRestartedThreadIds = new Set<string>();
+  private activeThreadSynchronizations = 0;
+  private lastStaleRestartAt = 0;
   private stopping = false;
 
   constructor(
@@ -556,7 +559,7 @@ export class AppServerClient {
         if (current.status.type === "notLoaded") {
           const latest = await this.latestTurn(current.id);
           previousTurnId = latest?.id ?? null;
-          if (latest && turnMayStillBeActive(latest.status, latest.completedAt)) {
+          if (latest && await this.turnIsSteerable(current.id, latest)) {
             activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
             if (activeFollowUpMode === "queue") {
               // Settings are sticky for the next turn and do not mutate the
@@ -598,7 +601,10 @@ export class AppServerClient {
           if (activeFollowUpMode === "queue") {
             await this.updateThreadSettings(current.id, model, effort);
           } else {
-            const activeTurnId = controlledTurnId ?? (await this.latestTurn(current.id))?.id;
+            const latest = controlledTurnId ? null : await this.latestTurn(current.id);
+            const activeTurnId = controlledTurnId ?? (
+              latest && await this.turnIsSteerable(current.id, latest) ? latest.id : null
+            );
             if (!activeTurnId) throw new Error("Codex did not expose the active turn to steer");
             await this.steerControlledTurn(current.id, activeTurnId, text, model, effort, messageId);
             this.controlledThreads.add(current.id);
@@ -767,6 +773,30 @@ export class AppServerClient {
     return turnListResponseSchema.parse(raw).data[0] ?? null;
   }
 
+  private async turnIsSteerable(
+    threadId: string,
+    turn: z.infer<typeof turnListResponseSchema>["data"][number],
+  ): Promise<boolean> {
+    if (turn.status === "inProgress") return true;
+    if (turn.status !== "interrupted" || turn.completedAt != null) return false;
+    // App Server 0.153 represents a genuinely foreign live turn as
+    // interrupted-without-completion, but the same shape can be left behind
+    // by a terminated private App Server before it published any items. Only
+    // steer the compatibility shape when summary history proves that the turn
+    // actually contains live user/agent work.
+    const raw = await this.request("thread/turns/list", {
+      threadId,
+      limit: 1,
+      sortDirection: "desc",
+      itemsView: "summary",
+    });
+    const summary = chatTurnListResponseSchema.parse(raw).data[0];
+    return summary?.id === turn.id && summary.items.some((item) =>
+      item.type === "userMessage" ||
+      (item.type === "agentMessage" && item.phase !== "final_answer")
+    );
+  }
+
   async reconcileExternalTurn(
     threadId: string,
     text: string,
@@ -805,23 +835,42 @@ export class AppServerClient {
   }
 
   private async retryThreadSynchronization<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    this.activeThreadSynchronizations += 1;
     try {
-      return await this.retryTransientThreadOperation(threadId, operation);
-    } catch (error) {
-      if (!isTransientThreadAvailabilityError(error) || !await this.restartStalePrivateAppServer()) {
-        throw error;
+      try {
+        const result = await this.retryTransientThreadOperation(threadId, operation);
+        this.staleRestartedThreadIds.delete(threadId);
+        return result;
+      } catch (error) {
+        if (!isTransientThreadAvailabilityError(error) || !await this.restartStalePrivateAppServer(threadId)) {
+          throw error;
+        }
+        // A long-lived private App Server can retain a stale rollout index even
+        // after thread/list sees the task. A fresh process reads the shared state
+        // again; replay is safe because Watch submissions use their request UUID
+        // as the App Server idempotency key.
+        this.threadCache.delete(threadId);
+        const result = await operation();
+        this.staleRestartedThreadIds.delete(threadId);
+        return result;
       }
-      // A long-lived private App Server can retain a stale rollout index even
-      // after thread/list sees the task. A fresh process reads the shared state
-      // again; replay is safe because Watch submissions use their request UUID
-      // as the App Server idempotency key.
-      this.threadCache.delete(threadId);
-      return operation();
+    } finally {
+      this.activeThreadSynchronizations -= 1;
     }
   }
 
-  private async restartStalePrivateAppServer(): Promise<boolean> {
-    if (!this.child || this.stopping) return false;
+  private async restartStalePrivateAppServer(threadId: string): Promise<boolean> {
+    const now = Date.now();
+    if (
+      !this.child ||
+      this.stopping ||
+      this.controlledThreads.size > 0 ||
+      this.activeThreadSynchronizations > 1 ||
+      this.staleRestartedThreadIds.has(threadId) ||
+      now - this.lastStaleRestartAt < STALE_SERVER_RESTART_COOLDOWN_MS
+    ) return false;
+    this.staleRestartedThreadIds.add(threadId);
+    this.lastStaleRestartAt = now;
     console.warn(JSON.stringify({
       level: "warn",
       message: "Restarting stale private App Server after session synchronization retries",
@@ -1700,13 +1749,6 @@ export function supportsThreadQueue(userAgent: string): boolean {
   return major > 0 || minor >= 150;
 }
 
-function turnMayStillBeActive(
-  status: "completed" | "interrupted" | "failed" | "inProgress",
-  completedAt: number | null | undefined,
-): boolean {
-  return status === "inProgress" || (status === "interrupted" && completedAt == null);
-}
-
 function textInput(text: string): Record<string, unknown> {
   return { type: "text", text, text_elements: [] };
 }
@@ -1928,6 +1970,7 @@ const PRIVATE_SERVER_EXIT_TIMEOUT_MS = 2_000;
 const PRIVATE_SERVER_KILL_TIMEOUT_MS = 500;
 const THREAD_SYNC_ATTEMPTS = 7;
 const THREAD_SYNC_RETRY_MS = 250;
+const STALE_SERVER_RESTART_COOLDOWN_MS = 30_000;
 const EXTERNAL_DELIVERY_GRACE_MS = 60_000;
 const MAX_EXTERNAL_RECONCILIATION_TURNS = 20;
 const MAX_CHAT_HISTORY_TURNS = 6;

@@ -241,6 +241,37 @@ export class BridgeService {
           return;
       }
     } catch (error) {
+      if (
+        payload.kind === "turn.submit" &&
+        payload.threadId !== null &&
+        isRetryablePendingTurnError(error)
+      ) {
+        // A Watch prompt already carries a stable idempotency key. If Codex's
+        // shared rollout is briefly unreadable, persist that exact request
+        // before acknowledging it and let the normal pending-turn worker keep
+        // retrying. This avoids returning a destructive sync error for a
+        // transient cross-client handoff while still guaranteeing one send.
+        await this.storePendingTurn({
+          requestId: payload.requestId,
+          threadId: payload.threadId,
+          text: payload.text,
+          model: payload.model ?? null,
+          effort: payload.effort,
+          followUpAction: payload.followUpAction,
+          createdAt: Date.now(),
+        });
+        await this.send({
+          version: 1,
+          kind: "turn.accepted",
+          requestId: payload.requestId,
+          threadId: payload.threadId,
+          state: "waiting",
+          selectionApplied: false,
+          message: "Prompt saved securely. Codex is synchronizing this chat, and Agentic Wear will send it once without another tap.",
+        });
+        await this.sendSessions().catch(() => undefined);
+        return;
+      }
       const kind = payload.kind === "transcription.create"
         ? "transcription.error"
         : payload.kind === "chat.watch" || payload.kind === "chat.unwatch"

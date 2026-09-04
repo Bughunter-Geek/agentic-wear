@@ -71,6 +71,8 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Security
@@ -97,6 +99,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -116,6 +119,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -293,13 +297,18 @@ fun AgenticWearApp(
                     onRefreshSessions = viewModel::refreshSessionsForRecovery,
                     onStartNewSession = viewModel::startNewSessionForRecovery,
                 )
+                WearScreen.REPLY -> ReplyChoiceScreen(
+                    onBack = viewModel::cancelReplyFromChat,
+                    onVoice = {
+                        viewModel.replyWithVoiceFromChat()
+                        onPushToTalk()
+                    },
+                    onText = viewModel::replyWithTextFromChat,
+                )
                 WearScreen.CHAT -> ChatScreen(
                     state = state,
                     onBack = { viewModel.navigate(WearScreen.HOME) },
-                    onReply = {
-                        viewModel.replyFromChat()
-                        onPushToTalk()
-                    },
+                    onReply = viewModel::replyFromChat,
                     onRetry = viewModel::retryChat,
                     onRateMessage = viewModel::rateChatMessage,
                     onPermissionResponse = viewModel::respondToChatPermission,
@@ -350,6 +359,92 @@ fun AgenticWearApp(
                 onContinue = viewModel::continueInstallAfterWarning,
                 onDismiss = viewModel::dismissInstallPermissionPrompt,
             )
+        }
+    }
+}
+
+@Composable
+private fun ReplyChoiceScreen(
+    onBack: () -> Unit,
+    onVoice: () -> Unit,
+    onText: () -> Unit,
+) {
+    val horizontalPadding = roundAwareHorizontalPadding(round = 30.dp, square = 18.dp)
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = horizontalPadding),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        ScreenHeader("Reply", onBack, horizontalPadding = 0.dp)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "How would you like to reply?",
+            color = Muted,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 18.dp),
+        )
+        Spacer(Modifier.height(10.dp))
+        ReplyModeCard(
+            title = "Voice",
+            subtitle = "Use your voice",
+            icon = Icons.Rounded.Mic,
+            accent = Cyan,
+            onClick = onVoice,
+        )
+        Spacer(Modifier.height(8.dp))
+        ReplyModeCard(
+            title = "Text",
+            subtitle = "Type your reply",
+            icon = Icons.Rounded.Keyboard,
+            accent = Violet,
+            onClick = onText,
+        )
+        Spacer(Modifier.height(18.dp))
+    }
+}
+
+@Composable
+private fun ReplyModeCard(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    TactileCard(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = "$title reply. $subtitle" },
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.16f))
+                    .border(1.dp, accent.copy(alpha = 0.72f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, color = Frost, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    subtitle,
+                    color = Muted,
+                    fontSize = 9.sp,
+                    lineHeight = 11.sp,
+                    maxLines = 1,
+                )
+            }
+            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = accent)
         }
     }
 }
@@ -1214,6 +1309,8 @@ private fun TranscriptScreen(
     val transcript = state.transcript
     val scrollState = rememberScrollState()
     val rotaryFocusRequester = remember { FocusRequester() }
+    val textFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
     val horizontalPadding = roundAwareHorizontalPadding()
     var modelSelectorOpen by rememberSaveable { mutableStateOf(false) }
     var approvalSelectorOpen by rememberSaveable { mutableStateOf(false) }
@@ -1227,6 +1324,13 @@ private fun TranscriptScreen(
     val selectorOpen = modelSelectorOpen || approvalSelectorOpen || sendModeSelectorOpen
     val selectedModel = state.models.firstOrNull { it.model == state.selectedModel }
     val modelLabel = selectedModel?.displayName ?: state.selectedModel ?: "Auto"
+    LaunchedEffect(state.replyingFromChat) {
+        if (state.replyingFromChat) {
+            delay(250)
+            textFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -1239,7 +1343,9 @@ private fun TranscriptScreen(
                     if (selectorOpen) hideFromAccessibility()
                 }
                 .blur(if (sendModeSelectorOpen) 18.dp else 0.dp)
-                .requestFocusOnHierarchyActive()
+                .then(
+                    if (state.replyingFromChat) Modifier else Modifier.requestFocusOnHierarchyActive(),
+                )
                 .rotaryScrollable(
                     behavior = RotaryScrollableDefaults.behavior(scrollState),
                     focusRequester = rotaryFocusRequester,
@@ -1248,13 +1354,24 @@ private fun TranscriptScreen(
                 .padding(horizontal = horizontalPadding),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            ScreenHeader("Review", onBack, horizontalPadding = 28.dp)
+            if (state.replyingFromChat) {
+                // Keep the app-owned header fixed while Wear OS scrolls the
+                // focused editor above its full-screen keyboard.
+                Spacer(Modifier.height(57.dp))
+            } else {
+                ScreenHeader("Review", onBack, horizontalPadding = 28.dp)
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Your prompt", color = Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (state.replyingFromChat) "Your reply" else "Your prompt",
+                    color = Cyan,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
                 state.transcriptionElapsedMillis?.let { elapsedMillis ->
                     val elapsedLabel = formatTranscriptionElapsed(elapsedMillis)
                     Text(
@@ -1279,7 +1396,8 @@ private fun TranscriptScreen(
                     onValueChange = onTextChanged,
                     textStyle = TextStyle(color = Frost, fontSize = 15.sp, lineHeight = 20.sp),
                     cursorBrush = Brush.verticalGradient(listOf(Cyan, Violet)),
-                    modifier = Modifier.fillMaxWidth().height(60.dp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    modifier = Modifier.fillMaxWidth().height(60.dp).focusRequester(textFocusRequester),
                 )
             }
             Spacer(Modifier.height(10.dp))
@@ -1362,9 +1480,13 @@ private fun TranscriptScreen(
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(
-                    if (state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) "Revise" else "Redo",
+                    when {
+                        state.replyingFromChat -> "Cancel"
+                        state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER -> "Revise"
+                        else -> "Redo"
+                    },
                     false,
-                    onRevise,
+                    if (state.replyingFromChat) onBack else onRevise,
                     enabled = !state.pending,
                 )
                 ActionButton(
@@ -1387,7 +1509,7 @@ private fun TranscriptScreen(
                     },
                 )
             }
-            if (state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
+            if (state.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER && !state.replyingFromChat) {
                 Spacer(Modifier.height(7.dp))
                 Text(
                     "Revise uses your private Codex bridge to replace conflicting details.",
@@ -1398,6 +1520,17 @@ private fun TranscriptScreen(
                 )
             }
             Spacer(Modifier.height(48.dp))
+        }
+        if (state.replyingFromChat) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .semantics {
+                        if (selectorOpen) hideFromAccessibility()
+                    },
+            ) {
+                ScreenHeader("Text reply", onBack, horizontalPadding = 50.dp)
+            }
         }
         AnimatedVisibility(
             visible = modelSelectorOpen,
@@ -2526,7 +2659,7 @@ private fun ChatScreen(
                 item {
                     EmptyState(
                         "No conversation yet",
-                        "Tap Voice reply to start or continue this Codex session.",
+                        "Tap Reply to start or continue this Codex session.",
                     )
                 }
             } else {
@@ -2614,7 +2747,7 @@ private fun ChatScreen(
                                 disabledContentColor = Muted,
                             ),
                         ) {
-                            Text(if (retrying) "Retry chat" else "Voice reply", fontWeight = FontWeight.Bold)
+                            Text(if (retrying) "Retry chat" else "Reply", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -2641,7 +2774,7 @@ private fun ChatScreen(
                         )
                     }
                     SquareChatAction(
-                        label = "Voice reply",
+                        label = "Reply",
                         primary = true,
                         onClick = onReply,
                         enabled = !state.pending,

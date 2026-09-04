@@ -13,7 +13,11 @@ type ClientInternals = {
   openStdio: () => void;
   initialize: () => Promise<void>;
   listSessions: () => Promise<unknown[]>;
-  restartStalePrivateAppServer: () => Promise<boolean>;
+  restartStalePrivateAppServer: (threadId: string) => Promise<boolean>;
+  restartPrivateAppServer: () => Promise<void>;
+  child: unknown;
+  activeThreadSynchronizations: number;
+  lastStaleRestartAt: number;
   emitRecentTerminals: (
     session: {
       id: string;
@@ -246,10 +250,26 @@ describe("AppServerClient session delivery", () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
-    internals.request = vi.fn((method: string) => {
+    internals.request = vi.fn((method: string, params: unknown) => {
       methods.push(method);
       if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
       if (method === "thread/turns/list") {
+        if ((params as { itemsView?: string }).itemsView === "summary") {
+          return Promise.resolve({
+            data: [{
+              id: "turn-mobile",
+              status: "interrupted",
+              completedAt: null,
+              items: [{
+                id: "user-mobile",
+                type: "userMessage",
+                content: [{ type: "text", text: "Keep working" }],
+              }],
+            }],
+            nextCursor: null,
+            backwardsCursor: null,
+          });
+        }
         return Promise.resolve({
           data: [{ id: "turn-mobile", status: "interrupted", completedAt: null }],
           nextCursor: null,
@@ -276,8 +296,57 @@ describe("AppServerClient session delivery", () => {
       followUpMode: "steer",
     });
 
-    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/settings/update", "turn/steer"]);
+    expect(methods).toEqual([
+      "thread/read",
+      "thread/turns/list",
+      "thread/turns/list",
+      "thread/settings/update",
+      "turn/steer",
+    ]);
     expect(methods).not.toContain("thread/queue/add");
+  });
+
+  it("starts a new queued turn after an empty interrupted private-server remnant", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn((method: string, params: unknown) => {
+      methods.push(method);
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") {
+        if ((params as { itemsView?: string }).itemsView === "summary") {
+          return Promise.resolve({
+            data: [{ id: "turn-aborted", status: "interrupted", completedAt: null, items: [] }],
+            nextCursor: null,
+            backwardsCursor: null,
+          });
+        }
+        return Promise.resolve({
+          data: [{ id: "turn-aborted", status: "interrupted", completedAt: null }],
+          nextCursor: null,
+          backwardsCursor: null,
+        });
+      }
+      if (method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/settings/update") return Promise.resolve({});
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      if (method === "thread/queue/start") return Promise.resolve(startedQueueResponse());
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    await expect(target.submitTurn(
+      "thread-1",
+      "Start after the aborted empty turn.",
+      "/tmp",
+      null,
+      "medium",
+      "watch-after-abort-1",
+    )).resolves.toMatchObject({ state: "running" });
+
+    expect(methods).toContain("thread/resume");
+    expect(methods).toContain("thread/queue/add");
+    expect(methods).toContain("thread/queue/start");
+    expect(methods).not.toContain("turn/steer");
   });
 
   it("never silently queues an explicit steer when no active turn is exposed", async () => {
@@ -923,10 +992,30 @@ describe("AppServerClient session delivery", () => {
     await expect(submission).resolves.toMatchObject({ threadId: "thread-1", state: "running" });
 
     expect(readAttempts).toBe(8);
-    expect(internals.restartStalePrivateAppServer).toHaveBeenCalledTimes(1);
+    expect(internals.restartStalePrivateAppServer).toHaveBeenCalledOnce();
+    expect(internals.restartStalePrivateAppServer).toHaveBeenCalledWith("thread-1");
     expect(vi.mocked(internals.request).mock.calls.filter(([method]) => method === "thread/queue/add"))
       .toHaveLength(1);
     vi.useRealTimers();
+  });
+
+  it("does not restart the shared private App Server through another active synchronization or controlled turn", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.child = {};
+    internals.restartPrivateAppServer = vi.fn().mockResolvedValue(undefined);
+    internals.activeThreadSynchronizations = 2;
+
+    await expect(internals.restartStalePrivateAppServer("thread-1")).resolves.toBe(false);
+
+    internals.activeThreadSynchronizations = 1;
+    internals.controlledThreads.add("thread-running");
+    await expect(internals.restartStalePrivateAppServer("thread-1")).resolves.toBe(false);
+
+    internals.controlledThreads.clear();
+    await expect(internals.restartStalePrivateAppServer("thread-1")).resolves.toBe(true);
+    await expect(internals.restartStalePrivateAppServer("thread-1")).resolves.toBe(false);
+    expect(internals.restartPrivateAppServer).toHaveBeenCalledTimes(1);
   });
 
   it("reuses the watch idempotency key when queue serialization is cancelled", async () => {
