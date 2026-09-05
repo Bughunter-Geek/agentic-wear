@@ -2,6 +2,15 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.24-alpha — 2026-09-05
+
+- Hides Live session/Back, Reply, and Jump to latest while reading with touch or crown scrolling, then restores them after scrolling settles.
+- Coordinates 280 ms transitions and smoothly collapses the header space to reveal more conversation without abrupt layout changes.
+
+### Test status
+
+- Wear unit tests, debug lint, and assembly pass. Emulator scrolling states verified; the user approved the motion directly on the MacBook emulator in place of external visual approval for this release. Physical-watch acceptance remains pending.
+
 ## 0.6.23-alpha — 2026-09-04
 
 - Replaces the live-chat **Voice reply** action with **Reply** and a round-safe choice between Voice and Text; Text opens the native Wear keyboard and keeps the selected task, model, reasoning effort, and queue/steer behavior intact.

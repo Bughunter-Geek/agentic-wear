@@ -111,6 +111,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
@@ -2514,6 +2517,23 @@ private fun ChatScreen(
     val scope = rememberCoroutineScope()
     val rotaryFocusRequester = remember { FocusRequester() }
     val horizontalPadding = roundAwareHorizontalPadding(round = 27.dp, square = 18.dp)
+    var readingWhileScrolling by remember { mutableStateOf(false) }
+    val readingScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                    readingWhileScrolling = true
+                }
+                return Offset.Zero
+            }
+        }
+    }
+    LaunchedEffect(listState.isScrollInProgress, readingWhileScrolling) {
+        if (readingWhileScrolling && !listState.isScrollInProgress) {
+            delay(300)
+            readingWhileScrolling = false
+        }
+    }
     val isRound = LocalConfiguration.current.isScreenRound
     val voiceReplyHaze = rememberHazeState(blurEnabled = true)
     val chat = state.chat
@@ -2575,12 +2595,21 @@ private fun ChatScreen(
         }
     }
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Live session", onBack)
+        AnimatedVisibility(
+            visible = !readingWhileScrolling,
+            enter = fadeIn(tween(280, easing = AgenticEaseOut)) +
+                expandVertically(tween(280, easing = AgenticEaseOut), expandFrom = Alignment.Top),
+            exit = fadeOut(tween(280, easing = AgenticEaseOut)) +
+                shrinkVertically(tween(280, easing = AgenticEaseOut), shrinkTowards = Alignment.Top),
+        ) {
+            ScreenHeader("Live session", onBack)
+        }
         Box(Modifier.fillMaxSize()) {
             LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .hazeSource(voiceReplyHaze)
+                .nestedScroll(readingScrollConnection)
                 .requestFocusOnHierarchyActive()
                 .rotaryScrollable(
                     behavior = RotaryScrollableDefaults.behavior(listState),
@@ -2697,12 +2726,12 @@ private fun ChatScreen(
             if (isRound) {
                 val retrying = state.error != null
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = showRoundEdgeAction,
+                    visible = showRoundEdgeAction && !readingWhileScrolling,
                     modifier = Modifier.align(Alignment.BottomCenter),
-                    enter = fadeIn(tween(180, easing = AgenticEaseOut)) +
-                        slideInVertically(tween(180, easing = AgenticEaseOut)) { it / 16 },
-                    exit = fadeOut(tween(120, easing = AgenticEaseOut)) +
-                        slideOutVertically(tween(120, easing = AgenticEaseOut)) { it / 24 },
+                    enter = fadeIn(tween(280, easing = AgenticEaseOut)) +
+                        slideInVertically(tween(280, easing = AgenticEaseOut)) { it / 16 },
+                    exit = fadeOut(tween(280, easing = AgenticEaseOut)) +
+                        slideOutVertically(tween(280, easing = AgenticEaseOut)) { it / 16 },
                 ) {
                     Box(
                         Modifier
@@ -2751,10 +2780,15 @@ private fun ChatScreen(
                         }
                     }
                 }
-            } else if (!isRound) {
+            } else {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = !readingWhileScrolling,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                    enter = fadeIn(tween(280, easing = AgenticEaseOut)),
+                    exit = fadeOut(tween(280, easing = AgenticEaseOut)),
+                ) {
                 Row(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .background(
                             Brush.verticalGradient(
@@ -2781,11 +2815,16 @@ private fun ChatScreen(
                         modifier = Modifier.weight(1f),
                     )
                 }
+                }
             }
-            if (!nearLatest) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !nearLatest && !readingWhileScrolling,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = fadeIn(tween(280, easing = AgenticEaseOut)),
+                exit = fadeOut(tween(280, easing = AgenticEaseOut)),
+            ) {
                 Box(
                     Modifier
-                        .align(Alignment.BottomCenter)
                         .padding(
                             bottom = if (showRoundEdgeAction) 128.dp else 72.dp,
                         )
