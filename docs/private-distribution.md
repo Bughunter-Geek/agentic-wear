@@ -70,23 +70,44 @@ A Mac on a different network cannot use these LAN commands directly.
 
 For private ongoing updates across different networks, use an **internal testing
 track**, not open testing or production. A Play Console developer account and its
-app setup are required. Add the Wear OS form factor, build a signed release app
-bundle (`:wear:bundleRelease`), and distribute only to an internal tester list
-containing the intended Google account. Join through the opt-in link using the
-account on the watch. Configure the Wear OS track and device eligibility in Play
-Console rather than treating a phone artifact as a watch build.
+app setup are required. Add the Wear OS form factor and distribute only to an
+internal tester list containing the intended Google account. Join through the
+opt-in link using the account on the watch. Configure the Wear OS track and device
+eligibility in Play Console rather than treating a phone artifact as a watch build.
+
+For Agentic Wear, prepare the private bundle on the signing Mac with the helper
+below. It requires an explicit new version code/name, unlocks the existing local
+release key from macOS Keychain when available, disables the public in-app updater,
+verifies that the resulting AAB is signed, and writes only to ignored `dist/`:
+
+```sh
+AGENTIC_WEAR_VERSION_CODE=52 \
+AGENTIC_WEAR_VERSION_NAME=0.6.26-private1 \
+bash scripts/prepare-internal-test.sh
+```
+
+Upload `dist/agentic-wear-internal-52.aab` to the Play Console **Internal testing**
+track only after confirming the app-signing certificate configuration described
+below. The helper itself never uploads or publishes the bundle.
 
 The internal track supports up to 100 testers and does not make an otherwise
-unpublished app discoverable by public Play search. This restricts who receives
-the build; it does not prevent an authorized tester from copying it. Keep the
-in-app public updater disabled for this channel so Play controls updates.
+unpublished app discoverable by public Play search. Internal testers can be added
+from any location. Keep the in-app public updater disabled for this channel so
+Google Play controls updates.
 
 Before moving an existing sideloaded installation to Play, check **app signing**,
-not just the upload key. A different app-signing certificate breaks the existing
-update chain. Plan that migration explicitly instead of uninstalling and losing
-pairing. Each update also needs a higher version code. Publishing/review and
-account verification steps may apply; this document does not promise immediate
-availability.
+not just the upload key. The APK delivered by Play must be signed by an identity
+Android accepts as an update to the currently installed package. For a new Play
+listing, do not simply accept a different generated app-signing key if preserving
+the sideloaded installation matters: configure Play App Signing to use the existing
+Agentic Wear app-signing key/certificate according to the current Play Console
+flow before rolling out the internal release. Keep a secure backup of the original
+keystore. Each update also needs a higher version code.
+
+Publishing/review, developer-account verification, Play package-name registration,
+and key-transfer steps can vary by account state. Treat any prompt that would
+replace or rotate the app-signing identity as consequential and verify it before
+continuing; do not uninstall the watch app as a workaround for a signature error.
 
 ## Custom private update servers
 
@@ -107,6 +128,7 @@ it is not implemented by the URL-isolation change.
 - Android Developers, [Debug Wear OS over Wi-Fi](https://developer.android.com/training/wearables/get-started/debug-wifi).
 - Android Developers, [Android Debug Bridge](https://developer.android.com/tools/adb).
 - Google Play Console Help, [Set up an open, closed, or internal test](https://support.google.com/googleplay/android-developer/answer/9845334?hl=en).
+- Google Play Console Help, [Use Play App Signing](https://support.google.com/googleplay/android-developer/answer/9842756?hl=en).
 - Android Developers, [Sign your app](https://developer.android.com/studio/publish/app-signing).
 
 Instructions checked during the September 2026 review. No app was published or
