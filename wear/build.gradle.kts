@@ -76,13 +76,27 @@ val appVersionName = configured("AGENTIC_WEAR_VERSION_NAME").ifBlank { "0.1.0" }
 val defaultRelayUrl = configured("AGENTIC_WEAR_RELAY_URL").ifBlank {
     "https://agentic-wear-relay.cleanuxlabs.workers.dev"
 }
-val configuredUpdateManifestUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_URL")
-val releaseUpdateManifestUrl = configuredUpdateManifestUrl.ifBlank {
-    "https://raw.githubusercontent.com/Bughunter-Geek/agentic-wear/ota-alpha/update.json"
+// A private/custom feed must never silently fall back to a public channel.
+val updatesEnabled = when (configured("AGENTIC_WEAR_UPDATES_ENABLED")) {
+    "", "true" -> true
+    "false" -> false
+    else -> error("AGENTIC_WEAR_UPDATES_ENABLED must be true or false.")
 }
+val configuredUpdateManifestUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_URL")
+    .takeIf { updatesEnabled }.orEmpty()
 val configuredUpdateManifestFallbackUrl = configured("AGENTIC_WEAR_UPDATE_MANIFEST_FALLBACK_URL")
-val releaseUpdateManifestFallbackUrl = configuredUpdateManifestFallbackUrl.ifBlank {
-    "https://api.github.com/repos/Bughunter-Geek/agentic-wear/contents/update.json?ref=ota-alpha"
+    .takeIf { updatesEnabled }.orEmpty()
+val hasCustomUpdateFeed = configuredUpdateManifestUrl.isNotBlank() ||
+    configuredUpdateManifestFallbackUrl.isNotBlank()
+val releaseUpdateManifestUrl = when {
+    !updatesEnabled -> ""
+    hasCustomUpdateFeed -> configuredUpdateManifestUrl
+    else -> "https://raw.githubusercontent.com/Bughunter-Geek/agentic-wear/ota-alpha/update.json"
+}
+val releaseUpdateManifestFallbackUrl = when {
+    !updatesEnabled -> ""
+    hasCustomUpdateFeed -> configuredUpdateManifestFallbackUrl
+    else -> "https://api.github.com/repos/Bughunter-Geek/agentic-wear/contents/update.json?ref=ota-alpha"
 }
 val configuredReleaseChannel = configured("AGENTIC_WEAR_RELEASE_CHANNEL")
 val releaseChannel = configuredReleaseChannel.ifBlank { "Alpha" }
