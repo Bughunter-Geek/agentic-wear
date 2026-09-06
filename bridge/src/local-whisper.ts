@@ -77,9 +77,10 @@ export class LocalWhisperTranscriber implements Transcriber {
 
   private async ensureWorker(): Promise<ChildProcessWithoutNullStreams> {
     if (!this.worker || !this.ready) this.startWorker();
+    const worker = this.worker;
     await this.ready;
-    if (!this.worker) throw new Error("Local Whisper is unavailable");
-    return this.worker;
+    if (!worker || this.worker !== worker) throw new Error("Local Whisper is unavailable");
+    return worker;
   }
 
   private startWorker(): void {
@@ -94,13 +95,28 @@ export class LocalWhisperTranscriber implements Transcriber {
       const failStart = (message: string) => {
         if (settled) return;
         settled = true;
+        clearTimeout(startupTimeout);
         rejectReady(new Error(message));
       };
+      const failWorker = (message: string) => {
+        failStart(message);
+        // A replaced worker must never clear the new worker or its requests.
+        if (this.worker !== worker) return;
+        this.worker = null;
+        this.ready = null;
+        this.failPending(new Error(message));
+      };
+      const startupTimeout = setTimeout(() => {
+        failWorker("Local Whisper took too long to start; run `agentic-wear transcription setup`");
+        worker.kill("SIGTERM");
+      }, requestTimeoutMs);
+      startupTimeout.unref();
       createInterface({ input: worker.stdout }).on("line", (line) => {
         const message = parseWorkerMessage(line);
         if (message?.type === "ready") {
           if (!settled) {
             settled = true;
+            clearTimeout(startupTimeout);
             resolveReady();
           }
           return;
@@ -117,12 +133,15 @@ export class LocalWhisperTranscriber implements Transcriber {
         const detail = chunk.toString("utf8").trim();
         if (detail) console.error(JSON.stringify({ level: "info", message: "Local Whisper", detail: detail.slice(0, 500) }));
       });
-      worker.once("error", () => failStart("Local Whisper could not start; run `agentic-wear transcription setup`"));
+      // Failed spawn emits error, but need not emit exit. Clear the rejected
+      // startup promise immediately so a repaired installation can be retried.
+      worker.once("error", () => failWorker("Local Whisper could not start; run `agentic-wear transcription setup`"));
+      worker.stdin.on("error", () => {
+        failWorker("Could not send audio to Local Whisper");
+        worker.kill("SIGTERM");
+      });
       worker.once("exit", (code, signal) => {
-        this.worker = null;
-        this.ready = null;
-        failStart("Local Whisper stopped before it was ready; run `agentic-wear transcription setup`");
-        this.failPending(new Error(`Local Whisper stopped (${signal ?? code ?? "unknown"})`));
+        failWorker(`Local Whisper stopped (${signal ?? code ?? "unknown"}); run \`agentic-wear transcription setup\``);
       });
     });
   }

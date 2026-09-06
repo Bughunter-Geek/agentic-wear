@@ -1,4 +1,6 @@
 import WebSocket from "ws";
+import { setTimeout as delay } from "node:timers/promises";
+import { INVALID_RELAY_MESSAGE_REASON, waitForRelayReconnect } from "./relay-socket-policy.js";
 import { MAX_RELAY_MESSAGE_BYTES } from "./limits.js";
 import { z } from "zod";
 import { relaySocketMessageSchema, wireEnvelopeSchema, type WireEnvelope } from "./schemas.js";
@@ -97,7 +99,7 @@ export class RelayClient {
         if (signal.aborted) return;
         console.error(JSON.stringify({ level: "error", message: "relay socket disconnected", error: safeError(error) }));
       }
-      await delay(reconnectDelay, signal);
+      if (!(await waitForRelayReconnect(reconnectDelay, signal))) return;
       reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
     }
   }
@@ -112,6 +114,7 @@ export class RelayClient {
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(endpoint, {
         handshakeTimeout: 10_000,
+        maxPayload: MAX_RELAY_MESSAGE_BYTES,
         headers: { Authorization: `Bearer ${this.credential}`, "User-Agent": userAgent },
       });
       let chain = Promise.resolve();
@@ -133,7 +136,9 @@ export class RelayClient {
             await onWatchPublicKey(parsed.watchPublicKey);
           }
         });
-        void chain.catch((error: unknown) => socket.close(1008, safeError(error)));
+        // Close reasons are limited to 123 UTF-8 bytes, not JS characters.
+        // Keep internal callback/validation details out of the relay protocol.
+        void chain.catch(() => socket.close(1008, INVALID_RELAY_MESSAGE_REASON));
       });
       socket.once("error", reject);
       socket.once("close", (code) => {
@@ -201,16 +206,6 @@ async function boundedText(response: Response, limit: number): Promise<string> {
     offset += chunk.byteLength;
   }
   return new TextDecoder("utf8", { fatal: true }).decode(bytes);
-}
-
-function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    }, { once: true });
-  });
 }
 
 function rawLength(value: WebSocket.RawData): number {
