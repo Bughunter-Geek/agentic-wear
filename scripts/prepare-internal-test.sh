@@ -13,10 +13,46 @@ if ! [[ "$AGENTIC_WEAR_VERSION_CODE" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
+local_properties="$repo_root/local.properties"
+local_value() {
+    local key=$1
+    [[ -f "$local_properties" ]] || return 0
+    sed -n "s/^${key}=//p" "$local_properties" | tail -1
+}
+
+# build.gradle.kts intentionally gives local.properties higher precedence than
+# environment variables. Refuse conflicting local values instead of silently
+# preparing the wrong version/channel or re-enabling the public updater.
+local_version_code=$(local_value AGENTIC_WEAR_VERSION_CODE)
+local_version_name=$(local_value AGENTIC_WEAR_VERSION_NAME)
+local_updates_enabled=$(local_value AGENTIC_WEAR_UPDATES_ENABLED)
+local_release_channel=$(local_value AGENTIC_WEAR_RELEASE_CHANNEL)
+
+if [[ -n "$local_version_code" && "$local_version_code" != "$AGENTIC_WEAR_VERSION_CODE" ]]; then
+    echo "local.properties sets AGENTIC_WEAR_VERSION_CODE=$local_version_code, which overrides requested $AGENTIC_WEAR_VERSION_CODE." >&2
+    echo "Update/remove that local.properties entry before building." >&2
+    exit 1
+fi
+if [[ -n "$local_version_name" && "$local_version_name" != "$AGENTIC_WEAR_VERSION_NAME" ]]; then
+    echo "local.properties sets AGENTIC_WEAR_VERSION_NAME=$local_version_name, which overrides requested $AGENTIC_WEAR_VERSION_NAME." >&2
+    echo "Update/remove that local.properties entry before building." >&2
+    exit 1
+fi
+if [[ -n "$local_updates_enabled" && "$local_updates_enabled" != "false" ]]; then
+    echo "local.properties sets AGENTIC_WEAR_UPDATES_ENABLED=$local_updates_enabled and would override the private-build safety setting." >&2
+    echo "Set it to false or remove the entry before building." >&2
+    exit 1
+fi
+if [[ -n "$local_release_channel" && "$local_release_channel" != "Private internal" ]]; then
+    echo "local.properties sets AGENTIC_WEAR_RELEASE_CHANNEL=$local_release_channel and would override the private channel label." >&2
+    echo "Set it to 'Private internal' or remove the entry before building." >&2
+    exit 1
+fi
+
 # Internal testing should be controlled by Google Play only. Do not let a private
 # Play build also poll the public GitHub Alpha feed.
 export AGENTIC_WEAR_UPDATES_ENABLED=false
-export AGENTIC_WEAR_RELEASE_CHANNEL="${AGENTIC_WEAR_RELEASE_CHANNEL:-Private internal}"
+export AGENTIC_WEAR_RELEASE_CHANNEL="Private internal"
 
 signing_file="${AGENTIC_WEAR_SIGNING_KEYSTORE:-$HOME/Library/Application Support/Agentic Wear/release.jks}"
 keychain_service="io.github.sirbughunter.agenticwear.release-signing"
