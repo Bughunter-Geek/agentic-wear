@@ -114,9 +114,32 @@ class AppPreferences(context: Context) {
             putString(KEY_CHAT_FEEDBACK, data.toString())
         }
 
+    // Already encrypted for the paired bridge; no prompt plaintext is stored.
+    var pendingTurnEnvelope: String?
+        get() = prefs.getString("pending_turn_envelope", null)
+        set(value) = prefs.edit(commit = true) { putString("pending_turn_envelope", value) }
+
+    var pendingTurnFingerprint: String?
+        get() = prefs.getString("pending_turn_fingerprint", null)
+        private set(value) = prefs.edit { putString("pending_turn_fingerprint", value) }
+
+    internal fun savePendingTurnDelivery(delivery: PendingTurnDelivery) {
+        check(prefs.edit()
+            .putString(KEY_PENDING_TURN_REQUEST, delivery.requestId)
+            .putString("pending_turn_envelope", delivery.envelope)
+            .putString("pending_turn_fingerprint", delivery.fingerprint)
+            .commit()) { "Could not save the prompt safely. Nothing was sent." }
+    }
+
     var pendingTurnRequestId: String?
         get() = prefs.getString(KEY_PENDING_TURN_REQUEST, null)
-        set(value) = prefs.edit { putString(KEY_PENDING_TURN_REQUEST, value) }
+        set(value) = prefs.edit(commit = true) {
+            putString(KEY_PENDING_TURN_REQUEST, value)
+            if (value == null) {
+                remove("pending_turn_envelope")
+                remove("pending_turn_fingerprint")
+            }
+        }
 
     var pendingTranscriptionRequestId: String?
         get() = prefs.getString(KEY_PENDING_TRANSCRIPTION_REQUEST, null)

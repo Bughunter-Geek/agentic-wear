@@ -1,7 +1,111 @@
 import { describe, expect, it, vi } from "vitest";
+import { ForeignThreadSelectionError } from "../src/app-server-client.js";
 import { BridgeService, publicError, publicRequestError } from "../src/bridge-service.js";
 
 describe("BridgeService App Server transport", () => {
+  it("does not block a prompt behind an unfinished chat refresh", async () => {
+    let finishRefresh!: () => void;
+    const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
+    const handled: string[] = [];
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      crypto: { decrypt: vi.fn()
+        .mockResolvedValueOnce({ version: 1, kind: "chat.watch", requestId: "read-1", threadId: "thread-1" })
+        .mockResolvedValueOnce({ version: 1, kind: "turn.submit", requestId: "send-1", threadId: "thread-1", text: "Continue", model: null, effort: "high" }) },
+      replayGuard: { claim: vi.fn().mockResolvedValue(true) },
+      handleWatchPayload: vi.fn(async (payload: { kind: string }) => {
+        handled.push(payload.kind);
+        if (payload.kind === "chat.watch") await refresh;
+      }),
+    });
+    service.handleAuthenticatedCommand = service.handleWatchPayload;
+    const envelope = { messageId: "envelope-1", sentAt: Date.now() };
+    const receive = service.onEnvelope as (envelope: unknown) => Promise<void>;
+    try {
+      await receive.call(service, envelope);
+      await receive.call(service, { ...envelope, messageId: "envelope-2" });
+      expect(handled).toEqual(["chat.watch", "turn.submit"]);
+    } finally {
+      finishRefresh();
+    }
+  });
+
+  it("does not dispatch a previously claimed envelope without a receipt", async () => {
+    const payload = { version: 1, kind: "turn.submit", requestId: "legacy-1", threadId: null, text: "Once", model: null, effort: "high" };
+    const send = vi.fn().mockResolvedValue(undefined);
+    const handleWatchPayload = vi.fn();
+    const begin = vi.fn();
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      crypto: { decrypt: vi.fn().mockResolvedValue(payload) },
+      replayGuard: { claim: vi.fn().mockResolvedValue(false) },
+      turnReceipts: { get: vi.fn().mockResolvedValue(null), begin },
+      send,
+      handleWatchPayload,
+    });
+    await (service.onEnvelope as (value: unknown) => Promise<void>).call(service, { messageId: "claimed", sentAt: Date.now() });
+    expect(begin).not.toHaveBeenCalled();
+    expect(handleWatchPayload).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error", deliveryUncertain: true }));
+  });
+
+  it("replays an accepted receipt on a duplicate instead of starting another chat", async () => {
+    const accepted = { version: 1, kind: "turn.accepted", requestId: "new-chat-1", threadId: "created-once" };
+    const send = vi.fn().mockResolvedValue(undefined);
+    const handleWatchPayload = vi.fn();
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      crypto: { decrypt: vi.fn().mockResolvedValue({ version: 1, kind: "turn.submit", requestId: "new-chat-1", threadId: null, text: "Once", model: null, effort: "high" }) },
+      replayGuard: { claim: vi.fn().mockResolvedValue(false) },
+      turnReceipts: { get: vi.fn().mockResolvedValue({ response: accepted }) },
+      send,
+      handleWatchPayload,
+    });
+    await (service.onEnvelope as (value: unknown) => Promise<void>).call(service, { messageId: "claimed", sentAt: Date.now() });
+    expect(handleWatchPayload).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(accepted);
+  });
+
+  it("fails a legacy pending selection mismatch durably without crashing startup", async () => {
+    const payload = { requestId: "pending-selection", threadId: "thread-1", text: "Keep my draft", model: "gpt-6-astra", effort: "medium", createdAt: Date.now() };
+    const pendingTurns = new Map([[payload.requestId, { payload }]]);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      pendingTurns,
+      config: { defaultCwd: "/tmp" },
+      appServer: { submitTurn: vi.fn().mockRejectedValue(new ForeignThreadSelectionError("Apply Astra in Codex, then retry")) },
+      savePendingTurn: vi.fn(async (blocked) => { pendingTurns.set(blocked.requestId, { payload: blocked }); }),
+      removePendingTurn: vi.fn(async (id: string) => pendingTurns.delete(id)),
+      send,
+    });
+    await expect((service.processPendingTurnsNow as () => Promise<void>).call(service)).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error", deferred: true, draftText: "Keep my draft" }));
+    expect(pendingTurns.size).toBe(0);
+  });
+
+  it("redelivers a blocked pending notice after restart without reviving the prompt", async () => {
+    const payload = { requestId: "blocked-selection", threadId: "thread-1", text: "Keep my draft", blockedReason: "Apply Astra in Codex, then retry" };
+    const pendingTurns = new Map([[payload.requestId, { payload }]]);
+    const submitTurn = vi.fn();
+    const send = vi.fn().mockRejectedValueOnce(new Error("Network unavailable")).mockResolvedValue(undefined);
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      pendingTurns,
+      appServer: { submitTurn },
+      removePendingTurn: vi.fn(async (id: string) => pendingTurns.delete(id)),
+      send,
+    });
+    try {
+      await (service.processPendingTurnsNow as () => Promise<void>).call(service);
+      expect(pendingTurns.size).toBe(1);
+      await (service.processPendingTurnsNow as () => Promise<void>).call(service);
+      expect(pendingTurns.size).toBe(0);
+      expect(submitTurn).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); }
+  });
+
   it("connects to the shared Desktop daemon rather than a private stdio server", async () => {
     const stopAfterConnect = new Error("stop after transport assertion");
     const connect = vi.fn(async () => { throw stopAfterConnect; });

@@ -6,6 +6,7 @@ import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
@@ -130,7 +131,25 @@ class AgenticWearRepository(private val context: Context) {
         followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
     ): String {
         require(text.isNotBlank()) { "Transcript is empty" }
-        val requestId = UUID.randomUUID().toString()
+        // An unacknowledged POST may already be executing. Checking again must
+        // retain its identity and must not dispatch a duplicate prompt.
+        val pairing = pairingStore.read() ?: error("Pair Agentic Wear first")
+        fun payload(id: String) = BridgePayload.SubmitTurn(id, threadId, text.trim(), model, effort, followUpAction)
+        val fingerprint = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(PayloadCodec.encode(payload("")).toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val delivery = prepareTurnDelivery(
+            preferences.pendingTurnRequestId,
+            preferences.pendingTurnEnvelope,
+            preferences.pendingTurnFingerprint,
+            fingerprint,
+            createEnvelope = { id ->
+                crypto.encrypt(pairing.pairId, pairing.bridgePublicKey, PayloadCodec.encode(payload(id))).toString()
+            },
+            persist = preferences::savePendingTurnDelivery,
+        )
+        val requestId = delivery.requestId
+        val envelope = JSONObject(delivery.envelope)
         preferences.pending = true
         preferences.pendingTurnRequestId = requestId
         preferences.lastAcceptedThreadId = null
@@ -138,25 +157,18 @@ class AgenticWearRepository(private val context: Context) {
         preferences.lastSendNotice = null
         preferences.lastError = null
         try {
-            send(
-                BridgePayload.SubmitTurn(
-                    requestId = requestId,
-                    threadId = threadId,
-                    text = text.trim(),
-                    model = model,
-                    effort = effort,
-                    followUpAction = followUpAction,
-                ),
-            )
+            // Retransmit the same authenticated ciphertext. The bridge replays
+            // its durable receipt and cannot dispatch this envelope twice.
+            relay.sendToBridge(pairing, envelope)
             for (waitMillis in TURN_REPLY_DELAYS_MS) {
                 delay(waitMillis)
                 refreshInboxBatch(notify = true)
                 if (preferences.pendingTurnRequestId != requestId) break
             }
+            preferences.lastError?.let(::error)
             if (preferences.pendingTurnRequestId == requestId) {
-                preferences.pendingTurnRequestId = null
                 preferences.pending = false
-                val message = "The relay delivered your prompt, but Codex did not acknowledge it within 15 seconds. Keep the private bridge and Codex running, then retry."
+                val message = "Still waiting for Codex to confirm this prompt. It may already be running. Retry checks for its confirmation without sending another copy."
                 preferences.lastError = message
                 error(message)
             }
@@ -164,11 +176,9 @@ class AgenticWearRepository(private val context: Context) {
             return preferences.lastAcceptedThreadId
                 ?: error("Codex accepted the request without returning a session. Refresh Sessions and retry.")
         } catch (cancelled: CancellationException) {
-            if (preferences.pendingTurnRequestId == requestId) preferences.pendingTurnRequestId = null
             preferences.pending = false
             throw cancelled
         } catch (error: Throwable) {
-            if (preferences.pendingTurnRequestId == requestId) preferences.pendingTurnRequestId = null
             preferences.pending = false
             if (preferences.lastError == null) preferences.lastError = error.message
             throw error
@@ -458,14 +468,24 @@ class AgenticWearRepository(private val context: Context) {
                     if (cancelled || !expected) return
                     preferences.pendingTranscriptionRequestId = null
                 }
+                val deferredFailure = errorKind == "turn.error" && payload.optBoolean("deferred")
+                val expectedTurnRequestId = preferences.pendingTurnRequestId
+                    ?: preferences.lastAcceptedTurnRequestId.takeIf { deferredFailure }
                 val staleTurnError = errorKind == "turn.error" &&
-                    !shouldAcceptTurnError(preferences.pendingTurnRequestId, requestId)
+                    !shouldAcceptTurnError(expectedTurnRequestId, requestId)
+                if (deferredFailure && !staleTurnError) {
+                    payload.optString("draftText").takeIf { it.isNotBlank() && it.length <= 12_000 }?.let { draft ->
+                        preferences.transcript = Transcript(requestId, draft, payload.optString("threadId").takeIf(String::isNotBlank))
+                    }
+                    preferences.lastAcceptedTurnRequestId = null
+                }
                 if (!staleTurnError) preferences.pending = false
                 if (errorKind == "transcription.error") {
                     preferences.revisionBase?.let { preferences.transcript = it }
                     preferences.revisionBase = null
                 }
-                if (errorKind == "turn.error" && requestId == preferences.pendingTurnRequestId) {
+                if (errorKind == "turn.error" && requestId == preferences.pendingTurnRequestId &&
+                    !payload.optBoolean("deliveryUncertain")) {
                     preferences.pendingTurnRequestId = null
                 }
                 if (errorKind == "approval.error" && requestId == preferences.pendingApprovalRequestId) {
@@ -619,3 +639,23 @@ internal fun shouldAcceptTurnError(
     pendingRequestId: String?,
     incomingRequestId: String,
 ): Boolean = pendingRequestId != null && incomingRequestId == pendingRequestId
+
+internal data class PendingTurnDelivery(val requestId: String, val envelope: String, val fingerprint: String)
+
+internal fun prepareTurnDelivery(
+    existingId: String?,
+    existingEnvelope: String?,
+    existingFingerprint: String?,
+    fingerprint: String,
+    createEnvelope: (String) -> String,
+    persist: (PendingTurnDelivery) -> Unit,
+): PendingTurnDelivery {
+    if (existingId != null) {
+        check(existingEnvelope != null && existingFingerprint == fingerprint) {
+            "An earlier prompt is still awaiting confirmation. This edited prompt has not been sent. Refresh the earlier chat before sending a different prompt."
+        }
+        return PendingTurnDelivery(existingId, existingEnvelope, fingerprint)
+    }
+    val id = UUID.randomUUID().toString()
+    return PendingTurnDelivery(id, createEnvelope(id), fingerprint).also(persist)
+}

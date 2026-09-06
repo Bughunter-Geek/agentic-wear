@@ -2,6 +2,24 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.25-alpha — 2026-09-06
+
+- Keeps chat/history refreshes out of the bridge's ordered send path so a slow refresh cannot hold up prompt delivery.
+- Restores a deferred draft with an actionable notice if another client prevents applying its selection, including pending prompts from earlier bridge versions.
+- Preserves an encrypted prompt outbox and its request ID until acknowledgment. Retries replay the same request and the bridge returns its durable receipt without dispatching a second prompt. An unresolved bridge crash is reported as uncertain instead of automatically sending another copy.
+- Refreshes the model catalog periodically. When another client owns a chat, queues safely if its persisted model and effort match the watch selection; otherwise explains that the owner must change those settings before sending, instead of looping on a rejected settings update.
+- Default Send queues behind an active foreign-owned turn when that connection cannot steer it. Explicit Steer reports an immediate Queue instruction instead of silently changing the requested action.
+- Keeps the Send button rendering layer stable when a typed draft enables it, preventing the button from disappearing after keyboard dismissal and scrolling.
+- Keeps the reply header separate from scrolling content and gives both review actions a bounded, round-safe width and at least 48 dp height.
+
+### Test status
+
+- 21 new regression tests for delivery recovery passed (18 bridge, 3 watch). Existing bridge/relay coverage, Wear unit checks, debug lint, and signed minified release assembly also pass.
+- Final enabled and disabled Send states were visually verified after keyboard entry and scrolling on the 454 × 454 Wear OS 7 emulator. Gemini 3.7 Flash independently passed the eight final synthetic captures at the closest available Antigravity effort (Medium; High unavailable).
+- Isolated live relay QA verified recovery of the original pending UUID exactly once, then a fresh native watch send with a durable acknowledgment in 0.247 seconds and the completed response visible on the emulator. The independent owner harness consumed the canonical queue through `thread/queue/start`; physical-watch acceptance remains pending.
+
+- The native updater detected, downloaded, verified, and installed a newer debug QA build (51 → 52) on the emulator with the original install time and encrypted pairing preserved. The signed public APK remains versionCode 51 / 0.6.25.
+
 ## 0.6.24-alpha — 2026-09-05
 
 - Hides Live session/Back, Reply, and Jump to latest while reading with touch or crown scrolling, then restores them after scrolling settles.

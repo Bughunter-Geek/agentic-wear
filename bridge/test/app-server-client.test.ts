@@ -805,7 +805,7 @@ describe("AppServerClient session delivery", () => {
     expect(sendMessageToThread).not.toHaveBeenCalled();
   });
 
-  it("waits without queueing when an idle owner blocks the requested settings", async () => {
+  it("applies the watch selection before queueing behind an idle foreign writer", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     const methods: string[] = [];
@@ -839,9 +839,12 @@ describe("AppServerClient session delivery", () => {
       "thread/read",
       "thread/turns/list",
       "thread/resume",
+      "thread/settings/update",
       "thread/queue/add",
     ]);
     expect(methods).not.toContain("thread/queue/delete");
+    expect(vi.mocked(internals.request).mock.calls.find(([method]) => method === "thread/settings/update")?.[1])
+      .toEqual({ threadId: "thread-1", model: "gpt-5.6-terra", effort: "high" });
     expect(internals.controlledThreads.has("thread-1")).toBe(false);
     expect(internals.watchReadyThreads.has("thread-1")).toBe(true);
     expect(vi.mocked(internals.request).mock.calls.find(([method]) => method === "thread/resume")?.[1])
@@ -860,6 +863,85 @@ describe("AppServerClient session delivery", () => {
     });
     await expect(target.listSessions()).resolves.toEqual([
       expect.objectContaining({ id: "thread-1", watchReady: false }),
+    ]);
+  });
+
+  it("does not queue with the old model when foreign-writer settings cannot be updated", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/resume") return Promise.reject(new Error("thread thread-1 already has an active writer"));
+      if (method === "thread/settings/update") return Promise.reject(new Error("Model selection rejected"));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    await expect(target.submitTurn("thread-1", "Use Astra", "/tmp", "gpt-6-astra", "low"))
+      .rejects.toThrow("Model selection rejected");
+    expect(vi.mocked(internals.request).mock.calls.map(([method]) => method)).not.toContain("thread/queue/add");
+  });
+
+  it("queues once when a private server cannot update an external owner's already matching selection", async () => {
+    const target = new AppServerClient(new Set(), async () => {}, async () => {}, () => {}, async () => {},
+      () => ({ model: "gpt-6-astra", effort: "medium" }));
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string, params: unknown) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/resume") return Promise.reject(new Error("thread thread-1 already has an active writer"));
+      if (method === "thread/settings/update") return Promise.reject(new Error("thread not found: thread-1"));
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    await expect(target.submitTurn("thread-1", "Once", "/tmp", "gpt-6-astra", "medium", "watch-matching-private"))
+      .resolves.toMatchObject({ state: "queued", selectionApplied: true });
+    const calls = vi.mocked(internals.request).mock.calls;
+    expect(calls.map(([method]) => method)).toEqual([
+      "thread/read", "thread/turns/list", "thread/resume", "thread/settings/update", "thread/queue/add",
+    ]);
+    expect(calls.at(-1)?.[1]).toMatchObject({ clientUserMessageId: "watch-matching-private" });
+  });
+
+  it.each([
+    { model: "gpt-5.6-terra", effort: "medium" },
+    { model: "gpt-6-astra", effort: "high" },
+    null,
+  ])("rejects an unverified foreign selection without an endless synchronization retry: %j", async (settings) => {
+    const target = new AppServerClient(new Set(), async () => {}, async () => {}, () => {}, async () => {}, () => settings);
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve(terminalTurnsResponse());
+      if (method === "thread/resume") return Promise.reject(new Error("thread thread-1 already has an active writer"));
+      if (method === "thread/settings/update") return Promise.reject(new Error("thread not found: thread-1"));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    await expect(target.submitTurn("thread-1", "Once", "/tmp", "gpt-6-astra", "medium"))
+      .rejects.toThrow("owner must apply the Watch selection");
+    expect(vi.mocked(internals.request).mock.calls.map(([method]) => method))
+      .toEqual(["thread/read", "thread/turns/list", "thread/resume", "thread/settings/update"]);
+  });
+
+  it.each(["default", "steer"] as const)("handles foreign actor absence for active %s without synchronization retries", async (action) => {
+    const target = new AppServerClient(new Set(), async () => {}, async () => {}, () => {}, async () => {},
+      () => ({ model: "gpt-6-astra", effort: "medium" }), null, () => "steer");
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string, params: unknown) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("notLoaded") });
+      if (method === "thread/turns/list") return Promise.resolve({ data: [{ id: "active-turn", status: "inProgress" }], nextCursor: null, backwardsCursor: null });
+      if (method === "thread/settings/update" || method === "turn/steer") return Promise.reject(new Error("thread not found: thread-1"));
+      if (method === "thread/queue/add") return Promise.resolve(queuedResponse(params));
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const submitted = target.submitTurn("thread-1", "Once", "/tmp", "gpt-6-astra", "medium", "same-active-id", undefined, action);
+    if (action === "default") {
+      await expect(submitted).resolves.toMatchObject({ state: "queued", followUpMode: "queue", selectionApplied: true });
+    } else {
+      await expect(submitted).rejects.toThrow("Use Queue");
+    }
+    expect(vi.mocked(internals.request).mock.calls.map(([method]) => method)).toEqual([
+      "thread/read", "thread/turns/list", "thread/settings/update", "turn/steer",
+      ...(action === "default" ? ["thread/queue/add"] : []),
     ]);
   });
 
@@ -1129,6 +1211,34 @@ describe("AppServerClient session delivery", () => {
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: ["low", "xhigh"],
     }]);
+  });
+
+  it("refreshes the catalog so newly available models appear without a bridge restart", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    let availableModel = "gpt-5.6-luna";
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    internals.request = vi.fn(() => Promise.resolve({
+      data: [{
+        id: availableModel,
+        model: availableModel,
+        displayName: availableModel,
+        defaultReasoningEffort: "low",
+        supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }],
+        hidden: false,
+      }],
+      nextCursor: null,
+    }));
+    try {
+      expect((await target.listModels())[0]?.model).toBe("gpt-5.6-luna");
+      availableModel = "gpt-6-astra";
+      expect((await target.listModels())[0]?.model).toBe("gpt-5.6-luna");
+      now.mockReturnValue(61_001);
+      expect((await target.listModels())[0]?.model).toBe("gpt-6-astra");
+      expect(internals.request).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("reports realtime voice as unavailable when GPT-Live-1 is absent from the Codex catalog", async () => {

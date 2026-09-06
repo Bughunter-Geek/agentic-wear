@@ -7,9 +7,13 @@ export async function processAuthenticatedEnvelope(
   crypto: Pick<CryptoBox, "decrypt">,
   replayGuard: ReplayGuard,
   handle: (payload: WatchPayload) => Promise<void>,
+  handleDuplicate?: (payload: WatchPayload) => Promise<void>,
 ): Promise<boolean> {
   const payload = watchPayloadSchema.parse(await crypto.decrypt(envelope));
-  if (!(await replayGuard.claim(envelope.messageId, envelope.sentAt))) return false;
+  if (!(await replayGuard.claim(envelope.messageId, envelope.sentAt))) {
+    await handleDuplicate?.(payload);
+    return false;
+  }
   await handle(payload);
   return true;
 }

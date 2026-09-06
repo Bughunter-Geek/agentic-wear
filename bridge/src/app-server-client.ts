@@ -52,6 +52,9 @@ export type TurnSubmissionResult = {
   followUpMode?: ActiveFollowUpMode;
 };
 
+export class ForeignThreadSelectionError extends Error {}
+export class ForeignThreadSteerError extends Error {}
+
 export type ActiveFollowUpMode = "queue" | "steer";
 
 export type ExternalTurnBaseline = {
@@ -260,6 +263,7 @@ export class AppServerClient {
   private readonly watchReadyThreads = new Set<string>();
   private readonly pendingPermissionMessages = new Map<string, { threadId: string; message: CachedChatMessage }>();
   private modelCache: ModelView[] | null = null;
+  private modelCacheExpiresAt = 0;
   private privateRestartTask: Promise<void> | null = null;
   private readonly staleRestartedThreadIds = new Set<string>();
   private activeThreadSynchronizations = 0;
@@ -422,7 +426,7 @@ export class AppServerClient {
   }
 
   async listModels(): Promise<ModelView[]> {
-    if (this.modelCache) return this.modelCache;
+    if (this.modelCache && Date.now() < this.modelCacheExpiresAt) return this.modelCache;
     const models: ModelView[] = [];
     let cursor: string | null = null;
     for (let page = 0; page < 8; page += 1) {
@@ -446,6 +450,7 @@ export class AppServerClient {
       cursor = response.nextCursor;
     }
     this.modelCache = models.filter((model, index, all) => all.findIndex((candidate) => candidate.model === model.model) === index);
+    this.modelCacheExpiresAt = Date.now() + 60_000;
     return this.modelCache;
   }
 
@@ -565,16 +570,17 @@ export class AppServerClient {
               // Settings are sticky for the next turn and do not mutate the
               // already-running inference. Apply them before queueing so the
               // Watch selection is captured without a second client relay.
-              await this.updateThreadSettings(current.id, model, effort);
+              await this.updateForeignThreadSettings(current.id, model, effort);
             } else {
-              await this.steerControlledTurn(
-                current.id,
-                latest.id,
-                text,
-                model,
-                effort,
-                messageId,
-              );
+              try {
+                await this.steerControlledTurn(current.id, latest.id, text, model, effort, messageId, true);
+              } catch (error) {
+                if (!(error instanceof ForeignThreadSteerError) || followUpAction !== "default") throw error;
+                // Default Send may enqueue when the owning process cannot be
+                // steered through this connection. Explicit Steer stays explicit.
+                activeFollowUpMode = "queue";
+                return current;
+              }
               this.controlledThreads.add(current.id);
               this.controlledTurnIds.set(current.id, latest.id);
               acceptedState = "running";
@@ -588,6 +594,7 @@ export class AppServerClient {
             // Another client can retain an idle writer. The durable queue is
             // still canonical and uses the Watch UUID as its idempotency key;
             // that owning client will start it with the sticky selection.
+            await this.updateForeignThreadSettings(current.id, model, effort);
             this.watchReadyThreads.add(current.id);
             return current;
           }
@@ -670,6 +677,21 @@ export class AppServerClient {
     return action === "default" ? this.readFollowUpMode() : action;
   }
 
+  private async updateForeignThreadSettings(threadId: string, model: string | null, effort: string): Promise<void> {
+    try {
+      await this.updateThreadSettings(threadId, model, effort);
+    } catch (error) {
+      // A private App Server can read and queue a foreign-owned thread, but
+      // settings/update requires its local actor and reports "thread not found".
+      // Retrying synchronization cannot create that actor while the owner holds
+      // its writer. Only queue if the canonical persisted selection already fits.
+      if (!(error instanceof Error) || !/^thread not found(?::|$)/iu.test(error.message)) throw error;
+      const existing = this.readThreadSettings(threadId);
+      if (existing && existing.effort === effort && (model === null || existing.model === model)) return;
+      throw new ForeignThreadSelectionError(`This chat's owner must apply the Watch selection before sending. In Codex, select ${model ?? "the current model"} with ${effort} reasoning for this chat, then retry. Your prompt has not been sent.`);
+    }
+  }
+
   private async updateThreadSettings(
     threadId: string,
     model: string | null,
@@ -687,17 +709,26 @@ export class AppServerClient {
     model: string | null,
     effort: string,
     messageId: string,
+    foreign = false,
   ): Promise<void> {
     const stickySettings: Record<string, unknown> = { threadId, effort };
     if (model !== null) stickySettings.model = model;
-    await this.request("thread/settings/update", stickySettings);
+    if (foreign) await this.updateForeignThreadSettings(threadId, model, effort);
+    else await this.request("thread/settings/update", stickySettings);
     const steered = await this.retryTransientThreadOperation(threadId, async () => {
-      return turnSteerResponseSchema.parse(await this.request("turn/steer", {
-        threadId,
-        expectedTurnId: turnId,
-        input: [textInput(text)],
-        clientUserMessageId: messageId,
-      }));
+      try {
+        return turnSteerResponseSchema.parse(await this.request("turn/steer", {
+          threadId,
+          expectedTurnId: turnId,
+          input: [textInput(text)],
+          clientUserMessageId: messageId,
+        }));
+      } catch (error) {
+        if (foreign && error instanceof Error && /^thread not found(?::|$)/iu.test(error.message)) {
+          throw new ForeignThreadSteerError("This chat is running in a different Codex process. Use Queue to add this prompt after its current turn. Your prompt has not been sent.");
+        }
+        throw error;
+      }
     });
     if (steered.turnId !== turnId) throw new Error("Codex steered an unexpected turn");
     this.watchReadyThreads.add(threadId);

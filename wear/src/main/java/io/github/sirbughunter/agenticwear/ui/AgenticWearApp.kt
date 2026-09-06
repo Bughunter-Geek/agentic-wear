@@ -48,6 +48,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
@@ -98,6 +99,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
@@ -1342,6 +1344,8 @@ private fun TranscriptScreen(
         Column(
             Modifier
                 .fillMaxSize()
+                .padding(top = if (state.replyingFromChat) 57.dp else 0.dp)
+                .clipToBounds()
                 .semantics {
                     if (selectorOpen) hideFromAccessibility()
                 }
@@ -1358,9 +1362,7 @@ private fun TranscriptScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             if (state.replyingFromChat) {
-                // Keep the app-owned header fixed while Wear OS scrolls the
-                // focused editor above its full-screen keyboard.
-                Spacer(Modifier.height(57.dp))
+                Spacer(Modifier.height(4.dp))
             } else {
                 ScreenHeader("Review", onBack, horizontalPadding = 28.dp)
             }
@@ -1481,7 +1483,7 @@ private fun TranscriptScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(
                     when {
                         state.replyingFromChat -> "Cancel"
@@ -1491,13 +1493,14 @@ private fun TranscriptScreen(
                     false,
                     if (state.replyingFromChat) onBack else onRevise,
                     enabled = !state.pending,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 )
                 ActionButton(
                     label = if (state.pending) "Sending…" else "Send",
                     primary = true,
                     onClick = { onSend(FollowUpAction.DEFAULT) },
                     enabled = !state.pending && !transcript?.text.isNullOrBlank(),
-                    modifier = Modifier.onGloballyPositioned { coordinates ->
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).onGloballyPositioned { coordinates ->
                         sendModeSelectorOrigin = selectorTransformOrigin(
                             triggerPosition = coordinates.positionInRoot(),
                             triggerSize = coordinates.size,
@@ -3940,10 +3943,17 @@ private fun ActionButton(
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.97f else 1f, tween(140, easing = AgenticEaseOut), label = "button press")
+    // Keep one layer across enabled changes: adding/removing an inner alpha
+    // layer made Send disappear after keyboard dismissal and scrolling.
     Box(
         modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(CircleShape)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                alpha = if (enabled) 1f else 0.48f
+                shape = CircleShape
+                clip = true
+            }
             .background(if (primary) accent else PanelRaised)
             .border(1.dp, if (primary) accent else Color(0xFF3B3F57), CircleShape)
             .then(
@@ -3967,7 +3977,6 @@ private fun ActionButton(
                     )
                 },
             )
-            .alpha(if (enabled) 1f else 0.48f)
             .padding(horizontal = 20.dp, vertical = 11.dp),
         contentAlignment = Alignment.Center,
     ) {

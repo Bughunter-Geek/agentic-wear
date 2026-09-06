@@ -1,8 +1,11 @@
 import type { BridgeConfig } from "./config.js";
-import { writeConfig } from "./config.js";
+import { TurnReceipts } from "./turn-receipts.js";
+import { configPath, writeConfig } from "./config.js";
 import { CryptoBox, type SealedLocalPayload } from "./crypto-box.js";
 import {
   AppServerClient,
+  ForeignThreadSelectionError,
+  ForeignThreadSteerError,
   type ModelView,
   type ApprovalEvent,
   type SessionView,
@@ -28,6 +31,7 @@ const pendingTurnSchema = z.object({
   effort: z.string().min(1).max(32),
   followUpAction: followUpActionSchema.default("default"),
   createdAt: z.number().int().positive(),
+  blockedReason: z.string().min(1).max(1200).optional(),
   externalAttempt: z.object({
     attemptedAt: z.number().int().positive(),
     userMessageIds: z.array(z.string().min(1).max(128)).max(200),
@@ -40,6 +44,7 @@ export class BridgeService {
   private readonly ownedThreads: Set<string>;
   private readonly crypto: CryptoBox;
   private readonly appServer: AppServerClient;
+  private readonly turnReceipts: TurnReceipts;
   private readonly controller = new AbortController();
   private persistTask: Promise<void> = Promise.resolve();
   private fatalError: Error | null = null;
@@ -59,6 +64,7 @@ export class BridgeService {
   ) {
     this.ownedThreads = new Set(config.watchOwnedThreadIds);
     this.crypto = new CryptoBox(config.pairId, privateKey, config.bridgePublicKey, config.watchPublicKey);
+    this.turnReceipts = new TurnReceipts(`${configPath()}.turn-receipts-v1`, this.crypto);
     this.appServer = new AppServerClient(
       this.ownedThreads,
       (event) => this.onTerminal(event),
@@ -137,8 +143,51 @@ export class BridgeService {
       envelope,
       this.crypto,
       this.replayGuard,
-      (payload) => this.handleWatchPayload(payload),
+      (payload) => {
+        // History/catalog reads may take the full App Server request deadline.
+        // Keep rendering work out of the relay's ordered command stream.
+        if (payload.kind === "session.sync" || payload.kind === "chat.watch") {
+          this.runBackgroundRefresh(() => this.handleWatchPayload(payload));
+          return Promise.resolve();
+        }
+        return this.handleAuthenticatedCommand(payload);
+      },
+      (payload) => payload.kind === "turn.submit"
+        ? this.replayTurnReceipt(payload)
+        : Promise.resolve(),
     );
+  }
+
+  private async handleAuthenticatedCommand(payload: WatchPayload): Promise<void> {
+    if (payload.kind !== "turn.submit") return this.handleWatchPayload(payload);
+    const receipt = await this.turnReceipts.begin(payload.requestId, payload);
+    if (receipt) return this.replayTurnReceipt(payload);
+    await this.handleWatchPayload(payload);
+  }
+
+  private async replayTurnReceipt(payload: Extract<WatchPayload, { kind: "turn.submit" }>): Promise<void> {
+    // A replay claim may predate receipt support or survive a crash before
+    // receipt creation. Absence is never permission to dispatch it again.
+    const receipt = await this.turnReceipts.get(payload.requestId, payload);
+    await this.send(receipt?.response ? receipt.response as SendablePayload : {
+      version: 1,
+      kind: "turn.error",
+      requestId: payload.requestId,
+      threadId: payload.threadId,
+      deliveryUncertain: true,
+      message: "The bridge restarted before recording Codex's confirmation. This prompt may already have been sent. Check this chat in Codex before sending it again; Agentic Wear will not send a second copy.",
+      occurredAt: Date.now(),
+    });
+  }
+
+  private runBackgroundRefresh(refresh: () => Promise<void>): void {
+    void refresh().catch((error: unknown) => {
+      console.error(JSON.stringify({
+        level: "warn",
+        message: "Could not refresh Watch view",
+        error: publicError(error),
+      }));
+    });
   }
 
   private async handleWatchPayload(payload: WatchPayload): Promise<void> {
@@ -198,8 +247,10 @@ export class BridgeService {
             selectionApplied: result.selectionApplied,
             message: turnAcceptedMessage(result),
           });
-          await this.sendChatSnapshot(result.threadId).catch(() => undefined);
-          await this.sendSessions();
+          this.runBackgroundRefresh(async () => {
+            await this.sendChatSnapshot(result.threadId);
+            await this.sendSessions();
+          });
           return;
         }
         case "chat.watch":
@@ -287,6 +338,9 @@ export class BridgeService {
         requestId: payload.requestId,
         threadId: "threadId" in payload ? payload.threadId : undefined,
         message: publicRequestError(error, payload.kind),
+        ...(payload.kind === "turn.submit" && /timed out|socket closed|not connected|app server closed/iu.test(publicError(error))
+          ? { deliveryUncertain: true }
+          : {}),
         occurredAt: Date.now(),
       });
       if (payload.kind === "turn.submit" || payload.kind === "chat.watch") {
@@ -405,6 +459,12 @@ export class BridgeService {
   }
 
   private async send(payload: SendablePayload): Promise<void> {
+    if ((payload.kind === "turn.accepted" || payload.kind === "turn.error") &&
+        typeof payload.requestId === "string") {
+      payload = await this.turnReceipts.finish(
+        payload.requestId, payload, payload.deliveryUncertain !== true, payload.deferred === true,
+      ) as SendablePayload;
+    }
     await this.relay.sendToWatch(await this.crypto.encrypt(payload));
   }
 
@@ -477,6 +537,10 @@ export class BridgeService {
 
   private async processPendingTurnsNow(): Promise<void> {
     for (const [requestId, pending] of this.pendingTurns) {
+      if (pending.payload.blockedReason) {
+        await this.reportBlockedPendingTurn(pending.payload);
+        continue;
+      }
       if (pending.payload.externalAttempt) {
         let deliveryStatus;
         try {
@@ -512,11 +576,38 @@ export class BridgeService {
           pending.payload.followUpAction ?? "default",
         );
       } catch (error) {
+        if (error instanceof ForeignThreadSelectionError || error instanceof ForeignThreadSteerError) {
+          // Persist the terminal decision before notifying the watch. A crash
+          // or lost notification must never revive this rejected submission.
+          const blocked = { ...pending.payload, blockedReason: error.message };
+          await this.savePendingTurn(blocked);
+          await this.reportBlockedPendingTurn(blocked);
+          continue;
+        }
         if (isRetryablePendingTurnError(error)) continue;
         throw error;
       }
       if (result.state === "waiting") continue;
       await this.finishPendingTurn(requestId, result.threadId, result.steered);
+    }
+  }
+
+  private async reportBlockedPendingTurn(pending: PendingTurn): Promise<void> {
+    try {
+      await this.send({
+        version: 1,
+        kind: "turn.error",
+        requestId: pending.requestId,
+        threadId: pending.threadId,
+        deferred: true,
+        draftText: pending.text,
+        message: pending.blockedReason,
+        occurredAt: Date.now(),
+      });
+      await this.removePendingTurn(pending.requestId);
+    } catch (error) {
+      // Keep the blocked record for receipt redelivery; never resubmit it.
+      console.error(JSON.stringify({ level: "warn", message: "Could not deliver a blocked Watch prompt notice", error: publicError(error) }));
     }
   }
 
