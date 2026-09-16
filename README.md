@@ -1,136 +1,81 @@
 # Agentic Wear
 
-Agentic Wear is an unofficial, open-source Wear OS companion for Codex. Hold to speak to an agent, switch sessions, and receive a strong watch alert only when a complete turn finishes, fails, is interrupted, or needs permission.
+**Speak to Codex, follow a session, and receive completion or permission alerts from your Wear OS watch.**
 
-It is not affiliated with or endorsed by OpenAI. “Codex” is used only to describe compatibility with the Codex App Server.
+Agentic Wear is an unofficial, Apache-2.0-licensed companion that connects a watch to your own macOS Codex bridge. It is not affiliated with or endorsed by OpenAI; “Codex” describes compatibility with the Codex App Server.
 
-## What works in v0.1
+[Download Alpha 0.6.25](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.25-alpha) · [Matching source](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.25-alpha) · [Alpha testing guide](docs/alpha-testing.md)
 
-- Push-to-talk prompts with a review-before-send transcript.
-- GPT Transcribe by default; Wear OS device speech is an optional fallback.
-- Recent Codex session picker with exact session titles and state.
-- One continuous one-second vibration when a full response completes.
-- Distinct permission and error vibration patterns with amber/red alert states.
-- Exact completion time and session name in every alert.
-- Alert-only approvals for existing sessions; accept/decline controls only for sessions created by the watch.
-- End-to-end encrypted watch↔bridge payloads through a small Cloudflare Durable Object relay.
-- Endpoint-authenticated pairing: the relay never receives the human-readable pairing code and cannot silently replace either endpoint key.
-- A background macOS bridge that reconnects automatically with `launchd`.
+<!-- Add a real-watch demo here when available. Identify the watch, app release,
+bridge revision, and Codex version. Do not imply hardware validation from an emulator. -->
 
-Agentic Wear never treats reasoning paragraphs, item completion, streamed text, or tool progress as a finished response. Live notifications use `turn/completed`; a 20-second reconciliation loop checks only persisted terminal turn states as a delivery fallback.
+## Current status
 
-## Architecture
+**Early alpha — not a production-stability claim.** The latest published alpha checked on September 16, 2026 is **0.6.25**, released September 6, 2026, with `versionCode 51`.
+
+The default branch currently predates the published alpha implementation. **Use the `v0.6.25-alpha` tag for the features and setup described below**, not an unpinned checkout of `main`. Release-specific documentation links are pinned to that tag so readers can inspect the matching implementation.
+
+The [0.6.25 release notes](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.25-alpha) report fixes for the disappearing Send button, interrupted-delivery retries, and replies to sessions controlled by another client. They report **21 added regression tests passing** and a live-relay prompt/acknowledgment/reply check on an emulator. **Physical-watch acceptance for this release remains pending in those notes.** These are reported release results, not a new test run performed by this documentation update.
+
+## What the published alpha includes
+
+- **Voice and text prompts:** tap to record, review and edit the transcript before sending, or reply through the Wear keyboard. Local multilingual Whisper on your private Apple-silicon Mac is the default transcription route; hosted transcription and device speech are optional alternatives.
+- **Live Codex sessions:** choose a recent session, read role-aware streamed output and Markdown, and send follow-up prompts. Queueing and explicit steering respect the session's state and supported controls.
+- **Useful terminal alerts:** completion, failure, interruption, and permission states include the session and time. Intermediate reasoning, tool progress, and streamed text are not treated as a finished turn.
+- **Bounded approval controls:** existing desktop/iPhone-controlled sessions are alert-only for approvals. Accept/decline controls are limited to sessions created by the paired watch bridge.
+- **Private bridge and relay transport:** endpoint-authenticated pairing, encrypted watch–bridge payloads, content-free Firebase wake messages, and a reconnecting macOS background service.
+- **Signed alpha updates:** a GitHub-based updater checks the APK's checksum, package, version, and signing identity before handing installation to Wear OS. Updates require the owner's confirmation.
+
+See the [release README](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/README.md) for the fuller feature and setup reference.
+
+## Getting started
+
+**This is not a standalone watch chatbot or a turnkey hosted service.** You need an authenticated bridge on your own Mac, a compatible Codex installation, and a configured relay. Self-hosting requires your own Cloudflare and Firebase configuration. Installing the APK alone does not provide those services or access to a maintainer's Mac.
+
+### Already paired and configured
+
+Open **Settings → App updates**, or download `agentic-wear.apk` from the [0.6.25 release](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.25-alpha). Follow the [alpha testing guide](docs/alpha-testing.md) for first installation, checksum verification, and signing precautions.
+
+**The 0.6.25 delivery fixes also require the matching Mac bridge update.** Updating only the watch APK does not update the bridge. Follow the tagged setup instructions to rebuild the bridge and reinstall/restart its service.
+
+### New self-hosted setup
+
+Use a fresh directory rather than changing an existing working checkout:
+
+```bash
+git clone --branch v0.6.25-alpha --depth 1 \
+  https://github.com/Bughunter-Geek/agentic-wear.git agentic-wear-alpha-0.6.25
+cd agentic-wear-alpha-0.6.25
+```
+
+Then follow the **Prerequisites** and numbered setup sections in the [tagged README](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/README.md): configure Firebase, deploy your relay, build and pair the bridge, and build/install the watch client for that deployment.
+
+The documented build toolchain is Node.js 22+, JDK 17, Android SDK 37, and Android Studio. Automatic local Whisper setup requires an Apple-silicon Mac. The integration uses experimental Codex App Server surfaces documented against CLI 0.147.0; compatibility with later CLI versions must be checked rather than assumed.
+
+Local Whisper does not incur a transcription API charge, but Codex usage and any chosen hosted transcription or infrastructure remain separate. Smart voice revision uses the bridge owner's Codex allowance.
+
+## Architecture and privacy
 
 ```text
-Pixel Watch  ⇄  encrypted relay + FCM wake  ⇄  macOS bridge  ⇄  Codex App Server
-                                                     └──────→ OpenAI transcription
+Wear OS watch ⇄ encrypted relay + FCM wake ⇄ private macOS bridge ⇄ Codex App Server
+                                                   └──────────→ local Whisper
 ```
 
-The relay stores only encrypted bridge-to-watch envelopes for up to 24 hours. Watch audio is forwarded only while the bridge is online and is never queued by the relay. FCM receives a content-free wake signal; session titles, transcripts, prompts, and alert details remain encrypted in transit through the relay.
+Local transcription runs on the paired bridge owner's Mac. Hosted transcription is opt-in. Encryption protects application payloads through the relay, not compromised endpoints or all metadata: the relay can observe information such as timing and ciphertext sizes. Bridge-to-watch envelopes expire after 24 hours; offline watch audio is not queued by the relay.
 
-The bridge connects to the managed Codex App Server over its local Unix WebSocket. This lets it observe sessions run through that same managed daemon, including Codex remote-control sessions from an iPhone. It is not a direct iPhone-to-watch connection, and it cannot observe unrelated ChatGPT conversations or a different Codex host.
+The bridge observes sessions on its connected Codex daemon. It is not a direct iPhone-to-watch link and cannot observe unrelated ChatGPT conversations or a different Codex host.
 
-See [Architecture](docs/architecture.md), [Protocol](docs/protocol.md), [Privacy](PRIVACY.md), and [Security](SECURITY.md) before running a public deployment.
+Review the release's [Architecture](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/docs/architecture.md), [Protocol](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/docs/protocol.md), [Privacy](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/PRIVACY.md), and [Security](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/SECURITY.md) documentation before deployment. Do not publish pairing codes, credentials, private prompts, or unredacted logs.
 
-## Prerequisites
+## Known limits and useful testing
 
-- macOS host running Codex CLI 0.147.0 or newer.
-- Node.js 22+, JDK 17, Android SDK 37, and Android Studio.
-- A Wear OS 4+ watch (minimum API 31).
-- Your own Cloudflare and Firebase projects.
-- A dedicated OpenAI API key for transcription.
+Real-watch reliability, battery impact, background delivery, and compatibility across watch/OS/Codex versions need device-specific evidence. An emulator result is not a substitute for those checks. The documented emulator baseline is a 454 × 454 round Wear OS 7 / Android 17 device.
 
-## 1. Configure Firebase
-
-Create a Firebase Android app with package name `io.github.sirbughunter.agenticwear`. Create a service-account key for the relay, then configure the Android build through uncommitted `local.properties` or environment variables:
-
-```properties
-AGENTIC_WEAR_FIREBASE_APPLICATION_ID=1:123456789:android:example
-AGENTIC_WEAR_FIREBASE_PROJECT_ID=your-project-id
-AGENTIC_WEAR_FIREBASE_API_KEY=your-android-api-key
-AGENTIC_WEAR_FIREBASE_SENDER_ID=123456789
-AGENTIC_WEAR_RELAY_URL=https://agentic-wear-relay.example.workers.dev
-```
-
-The app initializes Firebase programmatically, so no `google-services.json` is required or expected in this repository. Pairing still works when these values are absent, but background push alerts do not; the watch can only sync while the app is active until Firebase is configured.
-
-Official builds default to `https://agentic-wear-relay.cleanuxlabs.workers.dev`, so watch users do not have to type a relay URL. Set `AGENTIC_WEAR_RELAY_URL` only when building against a different private deployment.
-
-## 2. Deploy your relay
-
-```bash
-npm --prefix relay ci
-cd relay
-npx wrangler secret put PAIRING_BOOTSTRAP_SECRET
-npx wrangler secret put PAIRING_CREDENTIAL_SECRET
-npx wrangler secret put FIREBASE_PROJECT_ID
-npx wrangler secret put FIREBASE_CLIENT_EMAIL
-npx wrangler secret put FIREBASE_PRIVATE_KEY
-npx wrangler deploy
-```
-
-Use separate random values of at least 32 characters for the two pairing secrets. Never put the Firebase private key or either secret in `wrangler.jsonc`.
-
-## 3. Build and pair the bridge
-
-Copy `.env.example` to `.env.local` at the repository root and fill in your own values. Then:
-
-```bash
-npm --prefix bridge ci
-npm --prefix bridge run build
-node bridge/dist/cli.js pair --relay https://your-relay.example.workers.dev --cwd /path/to/default/project
-```
-
-The bridge creates and displays an eight-character code locally. Enter it with the relay URL on the watch. The command waits until the watch and bridge have mutually authenticated both public keys; the relay only forwards their proofs and never receives the code. Finish with:
-
-```bash
-node bridge/dist/cli.js doctor
-node bridge/dist/cli.js service install
-```
-
-The background service reads `.env.local`, stores its relay credential and ECDH private key in macOS Keychain, and reconnects after login or a crash. The pairing bootstrap credential may also be kept in Keychain under `relay-bootstrap-v1`; an explicit `AGENTIC_WEAR_BOOTSTRAP_SECRET` still takes precedence. The service does not place secrets in the launchd property list.
-
-## 4. Build the watch app
-
-```bash
-./gradlew :wear:assembleDebug
-adb install -r wear/build/outputs/apk/debug/wear-debug.apk
-```
-
-Wireless ADB is useful for the first install, but it is intentionally treated as temporary developer transport rather than permanent distribution infrastructure. Release builds include an opt-in updater in **Settings → App updates**. After one final ADB install, the watch can download a signed APK from GitHub Releases, verify its checksum, package name, version, and signing certificate, then open Wear OS's system installer. No Play Console account or future ADB pairing is required.
-
-Android still requires the watch owner to enable **Install unknown apps** for Agentic Wear once and confirm each update. Agentic Wear explains that handoff before opening the exact system settings page; it cannot and does not silently install software. The flow is verified on a 454 px round Wear OS 7 / Android 17 emulator. See [No-Play distribution](docs/distribution.md) for the exact workflow and security boundaries.
-
-For the local maintainer build, create a permanent release identity once. The keystore remains outside the repository and its generated password is stored in macOS Keychain:
-
-```bash
-./scripts/setup-release-signing.sh
-```
-
-`prepare-release.sh` unlocks that identity automatically. Back up both the keystore and its Keychain password before publishing; losing the key permanently ends the existing update chain.
-
-Other maintainers and CI environments can instead provide all four values through ignored `local.properties`, Gradle properties, or environment variables:
-
-```properties
-ANDROID_RELEASE_STORE_FILE=/absolute/path/to/agentic-wear.jks
-ANDROID_RELEASE_STORE_PASSWORD=replace-me
-ANDROID_RELEASE_KEY_ALIAS=agentic-wear
-ANDROID_RELEASE_KEY_PASSWORD=replace-me
-```
-
-Then run `./gradlew :wear:assembleRelease`. If all four are absent, Gradle deliberately creates an unsigned local release; a partial signing configuration fails fast.
-
-Prepare a signed GitHub Release payload with monotonically increasing version values:
-
-```bash
-AGENTIC_WEAR_VERSION_CODE=2 \
-AGENTIC_WEAR_VERSION_NAME=0.1.1 \
-./scripts/prepare-release.sh
-```
-
-This creates ignored `dist/agentic-wear.apk` and `dist/update.json` files. Publishing remains an explicit separate action.
+External testers and contributors are welcome. Start with the [alpha testing guide](docs/alpha-testing.md), use synthetic prompts in a disposable project, and report the exact versions, reproduction steps, and observed result. The highest-value reports cover first-time setup, Send-button reachability, duplicate or stalled delivery, background alerts, and same-key updates. A useful result can be a failure report; no positive review is expected.
 
 ## Development
+
+Run these commands from the checkout you intend to test after installing its dependencies:
 
 ```bash
 npm --prefix bridge run check
@@ -140,8 +85,10 @@ npm --prefix relay test
 ./gradlew :wear:lintDebug :wear:assembleDebug
 ```
 
-Read [Contributing](CONTRIBUTING.md) and [Testing](docs/testing.md) before opening a pull request.
+Read [Contributing](CONTRIBUTING.md) and the [release testing guide](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/docs/testing.md). Preserve terminal-event notification rules, approval ownership boundaries, and signing identity. Build success, emulator QA, and physical-watch acceptance must be reported separately.
 
-## License
+## License and acknowledgements
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+Agentic Wear is independently implemented, with credit to projects that helped establish this category, including SmartCodex. See the release's [Acknowledgements](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.25-alpha/ACKNOWLEDGEMENTS.md).
