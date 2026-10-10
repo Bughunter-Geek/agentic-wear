@@ -104,12 +104,19 @@ object AgentNotifier {
                 NotificationCompat.CATEGORY_ERROR,
             )
         }
-        val notification = NotificationCompat.Builder(context, channel)
+        val texts = notificationTexts(alert.kind, summary, alert.detail)
+        val openActionIntent = PendingIntent.getActivity(
+            context,
+            openActionRequestCode(alert.eventId),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = NotificationCompat.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_stat_agent)
             .setContentTitle(alert.title)
-            .setContentText(summary)
-            .setSubText(alert.detail)
-            .setStyle(NotificationCompat.BigTextStyle().bigText("$summary\n${alert.detail}"))
+            .setContentText(texts.contentText)
+            .setSubText(texts.subText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(texts.bigText))
             .setWhen(alert.occurredAtMillis)
             .setShowWhen(true)
             .setColor(color)
@@ -119,7 +126,10 @@ object AgentNotifier {
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .setOnlyAlertOnce(true)
-            .build()
+        if (notificationHasOpenAction(alert.kind)) {
+            builder.addAction(R.drawable.ic_stat_agent, "Open", openActionIntent)
+        }
+        val notification = builder.build()
         NotificationManagerCompat.from(context).notify(alert.eventId.hashCode(), notification)
     }
 
