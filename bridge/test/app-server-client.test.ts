@@ -1814,6 +1814,7 @@ describe("AppServerClient session delivery", () => {
 
     expect(methods).toEqual([
       "thread/read",
+      "thread/items/list",
       "thread/unsubscribe",
       "thread/unsubscribe",
       "thread/unsubscribe",

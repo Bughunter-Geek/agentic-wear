@@ -180,6 +180,13 @@ type CachedChat = {
   messages: CachedChatMessage[];
 };
 
+const itemsPreviewResponseSchema = z.object({
+  data: z.array(z.object({
+    type: z.string(),
+    text: z.string().optional(),
+    phase: z.string().nullable().optional(),
+  }).passthrough()),
+}).passthrough();
 const responseWithThreadSchema = z.object({ thread: threadSchema }).passthrough();
 const threadStartedSchema = z.object({ thread: threadSchema }).passthrough();
 const initializeResponseSchema = z.object({ userAgent: z.string().min(1).max(200) }).passthrough();
@@ -1598,7 +1605,8 @@ export class AppServerClient {
         const detail = internalCancellation
           ? "Codex cancelled an internal response task. Open the session and retry only if no reply appears."
           : event.turn.status === "completed"
-          ? "The agent finished its full response."
+          ? previewText(await this.finalAnswerPreview(event.threadId, event.turn.id) ?? "") ??
+            "The agent finished its full response."
           : event.turn.status === "failed"
             ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
             : "The agent was interrupted before finishing.";
@@ -1977,6 +1985,29 @@ export class AppServerClient {
     revision.reject(error);
   }
 
+  /** Text of the turn's final answer for the notification preview, or null. Never throws; never logs text. */
+  private async finalAnswerPreview(threadId: string, turnId: string): Promise<string | null> {
+    try {
+      const cached = this.chatCaches.get(threadId)?.messages.filter((message) =>
+        message.turnId === turnId && message.role === "assistant" && message.kind === "message" && message.text.trim()
+      );
+      const fromCache = cached?.findLast((message) => message.phase === "final_answer") ?? cached?.at(-1);
+      if (fromCache) return fromCache.text;
+      const raw = await this.request("thread/items/list", {
+        threadId,
+        turnId,
+        sortDirection: "desc",
+        limit: 20,
+      }, 1_500);
+      const parsed = itemsPreviewResponseSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      const messages = parsed.data.data.filter((item) => item.type === "agentMessage" && item.text?.trim());
+      return (messages.find((item) => item.phase === "final_answer") ?? messages[0])?.text ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private async emitRecentTerminals(session: SessionView, newerThanMs: number): Promise<void> {
     const raw = await this.request("thread/turns/list", {
       threadId: session.id,
@@ -2000,7 +2031,8 @@ export class AppServerClient {
       const detail = internalCancellation
         ? "Codex cancelled an internal response task. Open the session and retry only if no reply appears."
         : turn.status === "completed"
-        ? "The agent finished its full response."
+        ? previewText(await this.finalAnswerPreview(session.id, turn.id) ?? "") ??
+          "The agent finished its full response."
         : turn.status === "failed"
           ? sanitizePublicText(turn.error?.message ?? "The agent stopped with an error.")
           : "The agent was interrupted before finishing.";
@@ -2202,6 +2234,20 @@ export function displayAgentText(text: string): string {
     if (fallback) return fallback;
   }
   return text;
+}
+
+/** One-line notification preview of an agent reply: directives stripped, whitespace collapsed, first 30 words. */
+export function previewText(text: string, maxWords = 30, maxChars = 400): string | null {
+  const flat = displayAgentText(text).replace(/\s+/gu, " ").trim();
+  if (!flat) return null;
+  const words = flat.split(" ");
+  let result = words.slice(0, maxWords).join(" ");
+  let truncated = words.length > maxWords;
+  if (result.length > maxChars) {
+    result = result.slice(0, maxChars).trimEnd();
+    truncated = true;
+  }
+  return truncated ? `${result}…` : result;
 }
 
 function displayMessage(message: CachedChatMessage): CachedChatMessage {
