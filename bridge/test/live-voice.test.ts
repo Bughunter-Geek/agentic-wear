@@ -122,4 +122,56 @@ describe("Watch notification trace", () => {
     expect(watchPayloadSchema.safeParse({ ...withoutPush, alerts: [] }).success).toBe(false);
     expect(watchPayloadSchema.safeParse({ ...base }).success).toBe(false);
   });
+
+  it("accepts the push fetch attempt when present and when an older Watch omits it", () => {
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [alert] }).success).toBe(true);
+    for (const fetchAttempt of [1, 2, 4, 10]) {
+      expect(watchPayloadSchema.safeParse({ ...base, fetchAttempt, alerts: [alert] }).success).toBe(true);
+    }
+    for (const fetchAttempt of [0, -1, 11, 1.5, "2", null]) {
+      expect(watchPayloadSchema.safeParse({ ...base, fetchAttempt, alerts: [alert] }).success).toBe(false);
+    }
+  });
+});
+
+describe("Watch relay failure log", () => {
+  const base = { version: 1, kind: "relay.failures", requestId: "r1" };
+  const failure = { op: "fetchInbox", status: 503, errorClass: "RelayException", at: 1_787_900_001_000 };
+
+  it("accepts metadata-only failures for every operation, including transport errors without a status", () => {
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [] }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [failure] }).success).toBe(true);
+    for (const op of ["pairing", "sendToBridge", "fetchInbox", "acknowledge", "fcmRegistration"]) {
+      expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, op }] }).success).toBe(true);
+    }
+    for (const status of [0, 401, 599]) {
+      expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, status }] }).success).toBe(true);
+    }
+    for (const errorClass of ["SocketTimeoutException", "UnknownHostException", "java.net.SocketException", "Outer$Inner", "a".repeat(80)]) {
+      expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, errorClass }] }).success).toBe(true);
+    }
+    expect(watchPayloadSchema.safeParse({ ...base, failures: Array.from({ length: 20 }, () => failure) }).success).toBe(true);
+  });
+
+  it("rejects free text, extra fields, bad numbers and oversize batches", () => {
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, op: "https://relay.example/v1/pairs/secret/inbox" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, op: "somethingElse" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, errorClass: "Relay request failed" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, errorClass: "" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, errorClass: "a".repeat(81) }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, message: "Relay request failed" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, url: "https://relay.example" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, status: -1 }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, status: 600 }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, status: 50.5 }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, status: "503" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, at: -1 }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ ...failure, at: 1.5 }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [{ op: failure.op, status: failure.status, errorClass: failure.errorClass }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: Array.from({ length: 21 }, () => failure) }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, failures: [], message: "reply text" }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, version: 2, failures: [] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, requestId: "bad id with spaces", failures: [] }).success).toBe(false);
+  });
 });

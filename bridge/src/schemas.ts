@@ -49,11 +49,23 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     pushReceivedAt: z.number().int().nonnegative(),
     fetchStartedAt: z.number().int().nonnegative(),
     fetchCompletedAt: z.number().int().nonnegative(),
+    // 1-based attempt of the push-triggered inbox fetch that succeeded. Absent on older Watch builds.
+    fetchAttempt: z.number().int().min(1).max(10).optional(),
     alerts: z.array(z.object({
       eventId: z.string().max(300),
       decision: z.enum(["posted", "duplicate", "suppressed_notify_off", "suppressed_before_foreground"]),
       decidedAt: z.number().int().nonnegative(),
     }).strict()).max(10),
+  }).strict(),
+  // Metadata-only relay failure log from the Watch: operation name, HTTP status (0 = no response),
+  // exception class and epoch milliseconds. Never messages, URLs, ids, tokens or error text.
+  z.object({ version: z.literal(1), kind: z.literal("relay.failures"), requestId: safeId,
+    failures: z.array(z.object({
+      op: z.enum(["pairing", "sendToBridge", "fetchInbox", "acknowledge", "fcmRegistration"]),
+      status: z.number().int().min(0).max(599),
+      errorClass: z.string().regex(/^[A-Za-z0-9_.$]{1,80}$/u),
+      at: z.number().int().nonnegative(),
+    }).strict()).max(20),
   }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("session.sync"), requestId: safeId }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("draft.prepare"), requestId: safeId }).strict(),

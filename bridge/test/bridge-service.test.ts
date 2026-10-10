@@ -683,6 +683,57 @@ describe("Watch terminal and notification diagnostics", () => {
     expect(send).not.toHaveBeenCalled();
     log.mockRestore();
   });
+
+  it("includes the push fetch attempt in the notification trace log when the Watch sends it", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, { send });
+    const payload = {
+      version: 1 as const,
+      kind: "notify.trace" as const,
+      requestId: "trace-2",
+      pushReceivedAt: 1_787_900_001_000,
+      fetchStartedAt: 1_787_900_003_050,
+      fetchCompletedAt: 1_787_900_003_400,
+      fetchAttempt: 3,
+      alerts: [],
+    };
+
+    await (service as unknown as { handleWatchPayload: (payload: unknown) => Promise<void> }).handleWatchPayload(payload);
+
+    const entry = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(entry).toMatchObject({ message: "watch.notify.trace", fetchAttempt: 3 });
+    expect(send).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
+
+  it("logs Watch relay failures as metadata and sends nothing back", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, { send });
+    const payload = {
+      version: 1 as const,
+      kind: "relay.failures" as const,
+      requestId: "failures-1",
+      failures: [
+        { op: "fetchInbox" as const, status: 503, errorClass: "RelayException", at: 1_787_900_001_000 },
+        { op: "sendToBridge" as const, status: 0, errorClass: "SocketTimeoutException", at: 1_787_900_001_500 },
+      ],
+    };
+
+    const before = Date.now();
+    await (service as unknown as { handleWatchPayload: (payload: unknown) => Promise<void> }).handleWatchPayload(payload);
+
+    expect(log).toHaveBeenCalledTimes(1);
+    const entry = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(entry).toMatchObject({ level: "info", message: "watch.relay.failures", failures: payload.failures });
+    expect(entry.receivedAt).toBeGreaterThanOrEqual(before);
+    expect(Object.keys(entry).sort()).toEqual(["failures", "level", "message", "receivedAt"]);
+    expect(send).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
 });
 
 describe("new local draft protocol versus legacy watch", () => {
