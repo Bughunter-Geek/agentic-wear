@@ -8,7 +8,9 @@ type CachedAccessToken = { token: string; projectId: string; clientEmail: string
 
 let cachedAccessToken: CachedAccessToken | null = null;
 
-export async function wakeWatch(env: Env, installationId: string, pairId: string): Promise<void> {
+export const MAX_PUSH_ENVELOPE_CHARS = 3_000;
+
+export async function wakeWatch(env: Env, installationId: string, pairId: string, envelope?: unknown): Promise<void> {
   const accessToken = await createAccessToken(env);
   const response = await fetch(
     `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(env.FIREBASE_PROJECT_ID)}/messages:send`,
@@ -19,7 +21,7 @@ export async function wakeWatch(env: Env, installationId: string, pairId: string
         "Content-Type": "application/json",
         "User-Agent": downloaderUserAgent,
       },
-      body: JSON.stringify(buildWakeMessage(installationId, pairId)),
+      body: JSON.stringify(buildWakeMessage(installationId, pairId, envelope)),
     },
   );
   if (!response.ok) throw new Error(`FCM wake failed with status ${response.status}`);
@@ -30,11 +32,16 @@ export function wakeTargetForNewEnvelope(installationId: string | null, inserted
   return inserted && installationId ? installationId : null;
 }
 
-export function buildWakeMessage(installationId: string, pairId: string) {
+export function buildWakeMessage(installationId: string, pairId: string, envelope?: unknown) {
+  const data: Record<string, string> = { kind: "inbox.ready", pairId };
+  if (envelope !== undefined) {
+    const serialized = JSON.stringify(envelope);
+    if (typeof serialized === "string" && serialized.length <= MAX_PUSH_ENVELOPE_CHARS) data.envelope = serialized;
+  }
   return {
     message: {
       fid: installationId,
-      data: { kind: "inbox.ready", pairId },
+      data,
       android: { priority: "high", ttl: "60s" },
     },
   } as const;

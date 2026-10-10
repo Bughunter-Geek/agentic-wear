@@ -163,7 +163,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     const result = await stub.enqueueToWatch(credential, envelope);
     const wakeTarget = wakeTargetForNewEnvelope(result.fcmInstallationId, result.inserted);
     return acknowledgeStoredEnvelope(result.inserted, ctx,
-      wakeTarget ? () => wakeWatch(env, wakeTarget, pairId) : undefined);
+      wakeTarget ? () => wakeWatch(env, wakeTarget, pairId, envelope) : undefined);
   }
   if (request.method === "POST" && action === "to-bridge") {
     const envelope = wireEnvelopeSchema.parse(await readJson(request, MAX_ENVELOPE_BODY_BYTES));
