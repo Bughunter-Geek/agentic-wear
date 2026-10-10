@@ -10,7 +10,36 @@ let cachedAccessToken: CachedAccessToken | null = null;
 
 export const MAX_PUSH_ENVELOPE_CHARS = 3_000;
 
-export async function wakeWatch(env: Env, installationId: string, pairId: string, envelope?: unknown): Promise<void> {
+export type WakeDiagnostics = { envelopeAttached: boolean; envelopeChars: number };
+
+/** Carries metadata-only diagnostics when the FCM send fails. */
+export class WakeFailure extends Error {
+  constructor(message: string, readonly diagnostics: WakeDiagnostics | null) { super(message); }
+}
+
+/** Pure decision: attach the envelope only when it serializes within the push size limit. */
+export function decideWakeEnvelope(envelope?: unknown): WakeDiagnostics & { serialized: string | null } {
+  if (envelope === undefined) return { envelopeAttached: false, envelopeChars: 0, serialized: null };
+  const serialized = JSON.stringify(envelope);
+  if (typeof serialized === "string" && serialized.length <= MAX_PUSH_ENVELOPE_CHARS) {
+    return { envelopeAttached: true, envelopeChars: serialized.length, serialized };
+  }
+  return { envelopeAttached: false, envelopeChars: 0, serialized: null };
+}
+
+export async function wakeWatch(env: Env, installationId: string, pairId: string, envelope?: unknown): Promise<WakeDiagnostics> {
+  const { envelopeAttached, envelopeChars } = decideWakeEnvelope(envelope);
+  const diagnostics = { envelopeAttached, envelopeChars };
+  try {
+    await sendWake(env, installationId, pairId, envelope);
+  } catch {
+    // Never carry the original error text: it could include remote response content.
+    throw new WakeFailure("FCM wake failed", diagnostics);
+  }
+  return diagnostics;
+}
+
+async function sendWake(env: Env, installationId: string, pairId: string, envelope?: unknown): Promise<void> {
   const accessToken = await createAccessToken(env);
   const response = await fetch(
     `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(env.FIREBASE_PROJECT_ID)}/messages:send`,
@@ -34,10 +63,8 @@ export function wakeTargetForNewEnvelope(installationId: string | null, inserted
 
 export function buildWakeMessage(installationId: string, pairId: string, envelope?: unknown) {
   const data: Record<string, string> = { kind: "inbox.ready", pairId };
-  if (envelope !== undefined) {
-    const serialized = JSON.stringify(envelope);
-    if (typeof serialized === "string" && serialized.length <= MAX_PUSH_ENVELOPE_CHARS) data.envelope = serialized;
-  }
+  const decision = decideWakeEnvelope(envelope);
+  if (decision.serialized !== null) data.envelope = decision.serialized;
   return {
     message: {
       fid: installationId,

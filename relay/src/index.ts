@@ -1,7 +1,7 @@
 import { readPrivateApk } from "./private-update";
 import { ZodError } from "zod";
 import { deriveCredential, secureEqual, sha256Hex } from "./crypto";
-import { wakeTargetForNewEnvelope, wakeWatch } from "./fcm";
+import { WakeFailure, wakeTargetForNewEnvelope, wakeWatch, type WakeDiagnostics } from "./fcm";
 import { PairAdmissionError } from "./pair-admission";
 import { PairRelayError } from "./pair-relay";
 import { MAX_ENVELOPE_BODY_BYTES } from "./limits";
@@ -189,18 +189,23 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 
 /** Durable enqueue has already completed. Wake latency/failure must not hold its ACK or retry it. */
 export function acknowledgeStoredEnvelope(
-  inserted: boolean, ctx: Pick<ExecutionContext, "waitUntil">, wake?: () => Promise<void>,
+  inserted: boolean, ctx: Pick<ExecutionContext, "waitUntil">, wake?: () => Promise<WakeDiagnostics | void>,
 ): Response {
   if (wake) {
     const started = performance.now();
-    ctx.waitUntil(Promise.resolve().then(wake).then(() => {
-      log("info", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 1 });
-    }).catch(() => {
+    ctx.waitUntil(Promise.resolve().then(wake).then((diagnostics) => {
+      log("info", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 1, ...wakeFields(diagnostics) });
+    }).catch((error: unknown) => {
       // Never include credentials, identifiers, audio or transcript content in wake diagnostics.
-      log("error", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 0 });
+      const known = error instanceof WakeFailure ? error.diagnostics : null;
+      log("error", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 0, ...wakeFields(known) });
     }));
   }
   return Response.json({ accepted: true, inserted }, { status: 202 });
+}
+
+export function wakeFields(diagnostics: WakeDiagnostics | void | null): Record<string, number> {
+  return diagnostics ? { envelopeAttached: diagnostics.envelopeAttached ? 1 : 0, envelopeChars: diagnostics.envelopeChars } : {};
 }
 
 function roleForAction(action: string): "bridge" | "watch" | null {

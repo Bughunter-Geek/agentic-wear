@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import { acknowledgeStoredEnvelope } from "../src/index";
-import { wakeTargetForNewEnvelope } from "../src/fcm";
+import { acknowledgeStoredEnvelope, wakeFields } from "../src/index";
+import { WakeFailure, wakeTargetForNewEnvelope } from "../src/fcm";
 import { deriveCredential, sha256Base64Url, sha256Hex } from "../src/crypto";
 
 function heldWake() {
@@ -44,6 +44,26 @@ describe("stored result ACK without Firebase queue delay", () => {
       await expect(Promise.all(h.pending)).resolves.toEqual([undefined]);
       expect(JSON.stringify([...log.mock.calls, ...errorLog.mock.calls])).not.toContain("synthetic-secret-must-not-be-logged");
     } finally { log.mockRestore(); errorLog.mockRestore(); }
+  });
+
+  it("logs metadata-only envelope fields on success and failure", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const h = heldWake();
+      acknowledgeStoredEnvelope(true, h.ctx, async () => ({ envelopeAttached: true, envelopeChars: 812 }));
+      acknowledgeStoredEnvelope(true, h.ctx, async () => { throw new WakeFailure("secret-text", { envelopeAttached: false, envelopeChars: 0 }); });
+      acknowledgeStoredEnvelope(true, h.ctx, async () => { throw new Error("other"); });
+      await Promise.all(h.pending);
+      const ok = JSON.parse(String(log.mock.calls[0]?.[0]));
+      expect(ok).toMatchObject({ message: "inbox.wake.timing", success: 1, envelopeAttached: 1, envelopeChars: 812 });
+      const failed = errorLog.mock.calls.map((c) => JSON.parse(String(c[0])));
+      expect(failed[0]).toMatchObject({ success: 0, envelopeAttached: 0, envelopeChars: 0 });
+      expect(failed[1]).toMatchObject({ success: 0 });
+      expect(failed[1]).not.toHaveProperty("envelopeAttached");
+      expect(JSON.stringify(failed)).not.toContain("secret-text");
+    } finally { log.mockRestore(); errorLog.mockRestore(); }
+    expect(wakeFields(undefined)).toEqual({});
   });
 
   it("allows the next serial bridge operation to advance before the previous wake finishes", async () => {
