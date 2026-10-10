@@ -127,4 +127,15 @@ class NotifyTraceTest {
             assertEquals(listOf(TerminalAlertTrace("turn:a:b:completed", AlertDecision.POSTED, 5_450L)), trace.alerts)
         }
     }
+
+    @Test
+    fun `delivered via defaults to fetch and can be push`() {
+        assertEquals("fetch", NotifyTrace(1L, 2L, 3L, emptyList()).deliveredVia)
+        val fetch = NotifyTraceRecorder(pushReceivedAtMillis = 1L)
+        fetch.alertDecided("turn:a:b:completed", AlertDecision.POSTED, 2L)
+        assertEquals("fetch", fetch.result()!!.deliveredVia)
+        val push = NotifyTraceRecorder(pushReceivedAtMillis = 1L, deliveredVia = DELIVERED_VIA_PUSH)
+        push.alertDecided("turn:a:b:completed", AlertDecision.POSTED, 2L)
+        assertEquals("push", push.result()!!.deliveredVia)
+    }
 }

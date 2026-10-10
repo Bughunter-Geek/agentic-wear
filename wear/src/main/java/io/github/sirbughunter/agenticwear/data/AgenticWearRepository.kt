@@ -16,6 +16,9 @@ import io.github.sirbughunter.agenticwear.model.submissionPhaseFromWire
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.NotifyTrace
 import io.github.sirbughunter.agenticwear.notification.NotifyTraceRecorder
+import io.github.sirbughunter.agenticwear.notification.DELIVERED_VIA_FETCH
+import io.github.sirbughunter.agenticwear.notification.DELIVERED_VIA_PUSH
+import io.github.sirbughunter.agenticwear.notification.PendingNotifyTraces
 import io.github.sirbughunter.agenticwear.notification.alertDecision
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
@@ -435,12 +438,15 @@ class AgenticWearRepository(private val context: Context) {
         pushReceivedAt: Long? = null,
         fetchAttempt: Int = 1,
     ): InboxRefreshResult {
-        val trace = pushReceivedAt?.let { NotifyTraceRecorder(it, fetchAttempt) }
+        val trace = pushReceivedAt?.let { NotifyTraceRecorder(it, fetchAttempt, DELIVERED_VIA_FETCH) }
         val result = refreshInboxExclusively(notify, notifyAfterMillis, trace)
         // After the lock is released, so a slow relay can never hold up other inbox refreshes.
         trace?.result()?.let { sendNotifyTraceBestEffort(it) }
         // The relay just answered, so this is the moment a report of earlier failures can get through.
-        if (result.fetchSucceeded) sendRelayFailuresBestEffort()
+        if (result.fetchSucceeded) {
+            sendPendingPushTracesBestEffort()
+            sendRelayFailuresBestEffort()
+        }
         return result
     }
 
@@ -484,6 +490,64 @@ class AgenticWearRepository(private val context: Context) {
             acknowledge = { relay.acknowledge(pairing, acknowledged); VoiceLatency.duration("inbox_ack", acknowledgedAt) },
         )
         InboxRefreshResult(handled, receivedSessionSnapshot, fetchSucceeded = true)
+    }
+
+    /**
+     * Handles the end-to-end encrypted envelope that the relay carried inside the FCM push, so an alert
+     * can be shown while the Watch has no network. Never throws for bad input and never touches the
+     * network: it does not acknowledge (the later inbox fetch sees the id as handled and acknowledges it).
+     */
+    suspend fun processPushedEnvelope(envelopeJson: String, pushReceivedAt: Long) {
+        val envelope = try { JSONObject(envelopeJson) } catch (_: Exception) { return }
+        val messageId = envelope.optString("messageId")
+        val sentAt = envelope.optLong("sentAt")
+        if (!pushedEnvelopeAcceptable(
+                envelopeJson.length,
+                envelope.optString("sender").ifEmpty { null },
+                envelope.optString("recipient").ifEmpty { null },
+                messageId,
+                sentAt,
+                System.currentTimeMillis(),
+            )
+        ) return
+        var processed = false
+        val trace = NotifyTraceRecorder(pushReceivedAt, fetchAttempt = 1, deliveredVia = DELIVERED_VIA_PUSH)
+        inboxRefreshMutex.withLock {
+            val pairing = pairingStore.read() ?: return@withLock
+            if (recentInboxMessages.handled(messageId)) return@withLock
+            val payload = try {
+                crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@withLock
+            }
+            trace.fetchStarted(pushReceivedAt)
+            trace.fetchCompleted(pushReceivedAt)
+            processPayload(payload, true, null, messageId, sentAt, trace)
+            recentInboxMessages.remember(messageId)
+            processed = true
+        }
+        if (!processed) return
+        trace.result()?.let { pendingNotifyTraces.add(it) }
+        broadcastStateChanged()
+    }
+
+    /** Diagnostics only: reports traces recorded while offline; each one sent successfully is forgotten. */
+    private suspend fun sendPendingPushTracesBestEffort() {
+        for (trace in pendingNotifyTraces.snapshot()) {
+            try {
+                val sent = withTimeoutOrNull(NOTIFY_TRACE_SEND_TIMEOUT_MS) {
+                    sendEncoded(PayloadCodec.encodeNotifyTrace(UUID.randomUUID().toString(), trace))
+                    true
+                }
+                if (sent == true) pendingNotifyTraces.remove(listOf(trace))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return
+            }
+        }
     }
 
     suspend fun updateFcmRegistration(installationId: String) {
@@ -823,6 +887,7 @@ class AgenticWearRepository(private val context: Context) {
         private val inboxRefreshMutex = Mutex()
         private val inboxAcknowledgements = InboxAcknowledgements(CoroutineScope(SupervisorJob() + Dispatchers.IO))
         private val recentInboxMessages = RecentInboxMessages()
+        private val pendingNotifyTraces = PendingNotifyTraces()
     }
 }
 
@@ -832,6 +897,22 @@ private data class InboxRefreshResult(
     /** True once `relay.fetchInbox` returned; false when there was no pairing to fetch for. */
     val fetchSucceeded: Boolean,
 )
+
+internal const val MAX_PUSHED_ENVELOPE_CHARS = 3_000
+internal const val PUSHED_ENVELOPE_MAX_SKEW_MS = 10 * 60 * 1_000L
+
+/** Cheap structural checks on an envelope carried in a push, before any decryption is attempted. */
+internal fun pushedEnvelopeAcceptable(
+    length: Int,
+    sender: String?,
+    recipient: String?,
+    messageId: String?,
+    sentAt: Long,
+    now: Long,
+): Boolean = length <= MAX_PUSHED_ENVELOPE_CHARS &&
+    sender == "bridge" && recipient == "watch" &&
+    !messageId.isNullOrBlank() &&
+    kotlin.math.abs(now - sentAt) <= PUSHED_ENVELOPE_MAX_SKEW_MS
 
 internal fun transcriptionReplyDelaysMs(): LongArray =
     // Foreground voice only: avoid adding up to two seconds of scheduled

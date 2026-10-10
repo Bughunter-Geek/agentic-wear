@@ -43,7 +43,12 @@ internal data class NotifyTrace(
     val alerts: List<TerminalAlertTrace>,
     /** 1-based attempt of the push-triggered inbox fetch that produced this trace. */
     val fetchAttempt: Int = 1,
+    /** "push" when the envelope was carried in the push and handled without a fetch, else "fetch". */
+    val deliveredVia: String = DELIVERED_VIA_FETCH,
 )
+
+internal const val DELIVERED_VIA_FETCH = "fetch"
+internal const val DELIVERED_VIA_PUSH = "push"
 
 /**
  * Collects the timing of one push-triggered inbox refresh. Used from a single coroutine while the
@@ -52,6 +57,7 @@ internal data class NotifyTrace(
 internal class NotifyTraceRecorder(
     private val pushReceivedAtMillis: Long,
     private val fetchAttempt: Int = 1,
+    private val deliveredVia: String = DELIVERED_VIA_FETCH,
 ) {
     private var fetchStartedAtMillis = 0L
     private var fetchCompletedAtMillis = 0L
@@ -71,6 +77,6 @@ internal class NotifyTraceRecorder(
 
     /** Null unless at least one terminal alert was processed; there is nothing worth reporting otherwise. */
     fun result(): NotifyTrace? = alerts.takeIf { it.isNotEmpty() }?.let {
-        NotifyTrace(pushReceivedAtMillis, fetchStartedAtMillis, fetchCompletedAtMillis, it.toList(), fetchAttempt)
+        NotifyTrace(pushReceivedAtMillis, fetchStartedAtMillis, fetchCompletedAtMillis, it.toList(), fetchAttempt, deliveredVia)
     }
 }

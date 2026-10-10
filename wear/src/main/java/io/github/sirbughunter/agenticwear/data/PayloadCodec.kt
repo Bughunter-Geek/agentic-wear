@@ -94,6 +94,7 @@ object PayloadCodec {
         .put("fetchStartedAt", trace.fetchStartedAtMillis)
         .put("fetchCompletedAt", trace.fetchCompletedAtMillis)
         .put("fetchAttempt", trace.fetchAttempt.coerceIn(1, MAX_NOTIFY_TRACE_FETCH_ATTEMPT))
+        .put("deliveredVia", trace.deliveredVia)
         .put(
             "alerts",
             JSONArray().apply {
