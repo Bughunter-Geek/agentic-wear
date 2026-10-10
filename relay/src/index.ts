@@ -161,7 +161,10 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     const envelope = wireEnvelopeSchema.parse(await readJson(request, MAX_ENVELOPE_BODY_BYTES));
     if (envelope.sender !== "bridge" || envelope.recipient !== "watch") throw new HttpError(400, "Envelope direction is invalid");
     const result = await stub.enqueueToWatch(credential, envelope);
-    const wakeTarget = wakeTargetForNewEnvelope(result.fcmInstallationId, result.inserted);
+    // `wake: false` is a bridge routing hint for bulk updates: the envelope is still stored for the next inbox fetch.
+    const quiet = envelope.wake === false;
+    if (quiet && result.inserted) log("info", "inbox.wake.skipped", {});
+    const wakeTarget = quiet ? null : wakeTargetForNewEnvelope(result.fcmInstallationId, result.inserted);
     return acknowledgeStoredEnvelope(result.inserted, ctx,
       wakeTarget ? () => wakeWatch(env, wakeTarget, pairId, envelope) : undefined);
   }

@@ -119,3 +119,50 @@ describe("stored result ACK without Firebase queue delay", () => {
     expect(await (await exports.default.fetch(`${url}/inbox`, { headers: { Authorization: `Bearer ${watch}` } })).json()).toEqual({ messages: [envelope] });
   });
 });
+
+describe("bridge wake hint", () => {
+  async function setup() {
+    const id = await sha256Base64Url(crypto.randomUUID());
+    const secret = "test-credential-secret-that-is-long-enough";
+    const bridge = await deriveCredential(secret, "bridge", id);
+    const watch = await deriveCredential(secret, "watch", id);
+    const relay = env.PAIR_RELAY.getByName(id);
+    await relay.initializePair({ pairId: id, bridgePublicKey: "A".repeat(44), bridgeAuthHash: await sha256Hex(bridge), watchAuthHash: await sha256Hex(watch), expiresAt: Date.now() + 60000 });
+    await relay.beginPairing({ pairId: id, watchPublicKey: "B".repeat(44), fcmInstallationId: "synthetic-installation-id", now: Date.now() });
+    await relay.confirmWatch(watch, "C".repeat(43), Date.now());
+    await relay.confirmBridge(bridge, { watchPublicKey: "B".repeat(44), watchProof: "C".repeat(43), bridgeProof: "D".repeat(43), now: Date.now() });
+    const url = `https://relay.test/v1/pairs/${id}`;
+    const send = (extra: Record<string, unknown>, messageId: string) => exports.default.fetch(`${url}/to-watch`, { method: "POST",
+      headers: { Authorization: `Bearer ${bridge}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ version: 1, messageId, sender: "bridge", recipient: "watch", sentAt: Date.now(), nonce: "MTIzNDU2Nzg5MDEy", ciphertext: "b3BhcXVlLWNpcGhlcnRleHQ=", ...extra }) });
+    const inbox = async () => ((await (await exports.default.fetch(`${url}/inbox`, { headers: { Authorization: `Bearer ${watch}` } })).json()) as { messages: { messageId: string }[] }).messages.map((m) => m.messageId);
+    return { send, inbox };
+  }
+
+  async function wakeLines(run: () => Promise<void>): Promise<string[]> {
+    const calls: string[] = [];
+    const record = (c: unknown[]) => { calls.push(String(c[0])); };
+    const log = vi.spyOn(console, "log").mockImplementation((...c) => record(c));
+    const err = vi.spyOn(console, "error").mockImplementation((...c) => record(c));
+    try { await run(); await new Promise((r) => setTimeout(r, 300)); } finally { log.mockRestore(); err.mockRestore(); }
+    return calls.filter((c) => c.includes("inbox.wake"));
+  }
+
+  it("stores wake=false without waking; absent or true still wakes", async () => {
+    const { send, inbox } = await setup();
+    const quiet = await wakeLines(async () => { expect((await send({ wake: false }, "quiet-1")).status).toBe(202); });
+    expect(quiet.some((l) => l.includes("inbox.wake.timing"))).toBe(false);
+    expect(quiet.some((l) => l.includes("inbox.wake.skipped"))).toBe(true);
+    for (const [name, extra] of [["absent-1", {}], ["true-1", { wake: true }]] as const) {
+      const lines = await wakeLines(async () => { expect((await send(extra, name)).status).toBe(202); });
+      expect(lines.some((l) => l.includes("inbox.wake.timing"))).toBe(true);
+      expect(lines.some((l) => l.includes("inbox.wake.skipped"))).toBe(false);
+    }
+    expect(await inbox()).toEqual(expect.arrayContaining(["quiet-1", "absent-1", "true-1"]));
+  }, 15000);
+
+  it("rejects a non-boolean wake hint", async () => {
+    const { send } = await setup();
+    expect((await send({ wake: "no" }, "bad-wake")).status).toBe(400);
+  });
+});

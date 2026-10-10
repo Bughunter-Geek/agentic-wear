@@ -18,6 +18,8 @@ export const wireEnvelopeSchema = z.object({
   sentAt: z.number().int().positive(),
   nonce: base64.max(32),
   ciphertext: ciphertextBase64,
+  // Unauthenticated routing hint from the bridge: false = store without a high-priority wake push. Absent = wake.
+  wake: z.boolean().optional(),
 }).strict().refine((value) => value.sender !== value.recipient, "Sender and recipient must differ");
 
 export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;

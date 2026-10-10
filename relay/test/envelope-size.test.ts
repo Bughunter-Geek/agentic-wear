@@ -25,4 +25,12 @@ describe("wire envelope size policy", () => {
       ciphertext: "A".repeat(MAX_CIPHERTEXT_BASE64_CHARS + 4),
     }).success).toBe(false);
   });
+
+  it("accepts an optional boolean wake hint and still rejects unknown fields", () => {
+    const base = { ...envelope, ciphertext: "A".repeat(32) };
+    expect(wireEnvelopeSchema.safeParse({ ...base, wake: false }).success).toBe(true);
+    expect(wireEnvelopeSchema.safeParse({ ...base, wake: true }).success).toBe(true);
+    expect(wireEnvelopeSchema.safeParse({ ...base, wake: "false" }).success).toBe(false);
+    expect(wireEnvelopeSchema.safeParse({ ...base, other: 1 }).success).toBe(false);
+  });
 });
