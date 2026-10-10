@@ -2163,6 +2163,53 @@ function clean(value: string, limit: number): string {
   return value.trim().replace(/\s+/gu, " ").slice(0, limit);
 }
 
+const LEAF_DIRECTIVE = /^::[a-z][a-z0-9-]*\{.*\}$/u;
+
+function directiveAttribute(line: string, key: string): string | undefined {
+  const match = new RegExp(`(?:^|[\\s{])${key}="((?:[^"\\\\]|\\\\.)*)"`, "u").exec(line);
+  return match?.[1]?.replace(/\\(.)/gu, "$1").trim() || undefined;
+}
+
+/**
+ * Codex automation replies end with leaf directives such as `::inbox-item{title="..." summary="..."}` that the
+ * desktop app renders as cards. The Watch cannot, so hide them (never inside fenced code). A reply that was only
+ * an inbox-item shows its summary instead of nothing.
+ */
+export function displayAgentText(text: string): string {
+  const kept: string[] = [];
+  const removed: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    const marker = /^(`{3,}|~{3,})/u.exec(trimmed)?.[1];
+    if (marker) {
+      if (fence === null) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+    } else if (fence === null && LEAF_DIRECTIVE.test(trimmed)) {
+      removed.push(trimmed);
+      continue;
+    }
+    kept.push(line);
+  }
+  if (removed.length === 0) return text;
+  const result = kept.join("\n").replace(/\n{3,}/gu, "\n\n").trim();
+  if (result) return result;
+  for (const directive of removed) {
+    if (!directive.startsWith("::inbox-item{")) continue;
+    const title = directiveAttribute(directive, "title");
+    const summary = directiveAttribute(directive, "summary");
+    const fallback = title && summary && title !== summary ? `${title}: ${summary}` : summary ?? title;
+    if (fallback) return fallback;
+  }
+  return text;
+}
+
+function displayMessage(message: CachedChatMessage): CachedChatMessage {
+  return message.role === "assistant" && message.kind === "message"
+    ? { ...message, text: displayAgentText(message.text) }
+    : { ...message };
+}
+
 function splitParagraphs(message: CachedChatMessage): ChatParagraph[] {
   if (message.role !== "assistant" || message.kind !== "message") return [];
   const parts = message.text.trim().split(/\n\s*\n+/u).map((part) => clean(part, 1_200)).filter(Boolean);
@@ -2184,13 +2231,13 @@ function freshChatStatus(
   return threadStatus;
 }
 
-function materializeChat(cache: CachedChat): ChatSnapshot {
+export function materializeChat(cache: CachedChat): ChatSnapshot {
   return {
     threadId: cache.threadId,
     title: cache.title,
     status: cache.status,
-    messages: cache.messages.slice(-MAX_CHAT_MESSAGES).map((message) => ({ ...message })),
-    paragraphs: cache.messages.flatMap(splitParagraphs).slice(-MAX_CHAT_PARAGRAPHS),
+    messages: cache.messages.slice(-MAX_CHAT_MESSAGES).map(displayMessage),
+    paragraphs: cache.messages.map(displayMessage).flatMap(splitParagraphs).slice(-MAX_CHAT_PARAGRAPHS),
   };
 }
 

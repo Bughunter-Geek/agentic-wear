@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AppServerClient, parsePersistedFollowUpMode, supportsThreadQueue } from "../src/app-server-client.js";
+import { AppServerClient, displayAgentText, materializeChat, parsePersistedFollowUpMode, supportsThreadQueue } from "../src/app-server-client.js";
 
 type ClientInternals = {
   request: (method: string, params: unknown) => Promise<unknown>;
@@ -3006,5 +3006,51 @@ describe("AppServerClient hot-thread terminal fast lane", () => {
     await f.advance(1_000); // recovers on the next tick
     expect(f.delivered).toEqual(["turn:hot:turn-new:completed"]);
     await f.stop();
+  });
+});
+
+describe("displayAgentText", () => {
+  const directive = '::inbox-item{title="One word response delivered" summary="Acknowledged your test message with one word."}';
+
+  it("removes the automation directive line", () => {
+    expect(displayAgentText(`Acknowledged\n${directive}`)).toBe("Acknowledged");
+    expect(displayAgentText(`A\n\n${directive}\n\n\nB`)).toBe("A\n\nB");
+  });
+
+  it("shows the summary of a directive-only reply", () => {
+    expect(displayAgentText(directive)).toBe("One word response delivered: Acknowledged your test message with one word.");
+    expect(displayAgentText('::inbox-item{summary="Only summary"}')).toBe("Only summary");
+    expect(displayAgentText('::inbox-item{title="Only title"}')).toBe("Only title");
+    expect(displayAgentText('::inbox-item{title="Same" summary="Same"}')).toBe("Same");
+  });
+
+  it("keeps directives inside code fences", () => {
+    const text = `Example:\n\`\`\`\n${directive}\n\`\`\`\n${directive}`;
+    expect(displayAgentText(text)).toBe(`Example:\n\`\`\`\n${directive}\n\`\`\``);
+  });
+
+  it("removes unknown directives and handles escaped quotes", () => {
+    expect(displayAgentText('Hi\n::other-thing{a="1"}')).toBe("Hi");
+    expect(displayAgentText('::inbox-item{title="Say \\"hi\\"" summary="Done"}')).toBe('Say "hi": Done');
+    expect(displayAgentText('::unknown{a="1"}')).toBe('::unknown{a="1"}');
+  });
+
+  it("leaves text without directives unchanged", () => {
+    expect(displayAgentText("  plain\n\n\ntext ::x{y}  ")).toBe("  plain\n\n\ntext ::x{y}  ");
+    expect(displayAgentText("")).toBe("");
+  });
+
+  it("materializes messages and paragraphs without directives, leaving user text alone", () => {
+    const snapshot = materializeChat({
+      threadId: "t1", title: "T", status: "idle",
+      messages: [
+        { id: "u", turnId: "x", role: "user", kind: "message", text: directive, phase: "unknown" },
+        { id: "a", turnId: "x", role: "assistant", kind: "message", text: `Acknowledged\n\n${directive}`, phase: "final_answer" },
+      ],
+    } as unknown as Parameters<typeof materializeChat>[0]);
+    expect(snapshot.messages[1]?.text).toBe("Acknowledged");
+    expect(snapshot.messages[0]?.text).toBe(directive);
+    expect(snapshot.paragraphs.map((p) => p.text)).toEqual(["Acknowledged"]);
+    expect(JSON.stringify(snapshot.paragraphs)).not.toContain("::inbox-item");
   });
 });
