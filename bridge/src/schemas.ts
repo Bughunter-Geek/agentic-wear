@@ -25,6 +25,7 @@ export const wireEnvelopeSchema = z.object({
   sentAt: z.number().int().positive(),
   nonce: base64.max(32),
   ciphertext: ciphertextBase64,
+  wake: z.boolean().optional(),
 }).strict();
 
 export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;

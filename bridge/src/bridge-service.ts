@@ -20,6 +20,7 @@ import {
   type TurnSubmissionResult,
 } from "./app-server-client.js";
 import { RelayClient } from "./relay-client.js";
+import { shouldWakeWatch } from "./wake-policy.js";
 import { ReplayGuard } from "./replay-guard.js";
 import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
 import { followUpActionSchema, type FollowUpAction, type WatchPayload, type WireEnvelope } from "./schemas.js";
@@ -745,7 +746,8 @@ export class BridgeService {
         payload.requestId, payload, payload.deliveryUncertain !== true, payload.deferred === true,
       ) as SendablePayload;
     }
-    await this.relay.sendToWatch(await this.crypto.encrypt(payload));
+    const envelope = await this.crypto.encrypt(payload);
+    await this.relay.sendToWatch(shouldWakeWatch(payload.kind) ? envelope : { ...envelope, wake: false });
   }
 
   private async persistOwnedThreads(): Promise<void> {
