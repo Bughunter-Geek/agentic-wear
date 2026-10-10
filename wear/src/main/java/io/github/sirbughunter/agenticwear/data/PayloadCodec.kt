@@ -18,6 +18,8 @@ import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.Transcript
+import io.github.sirbughunter.agenticwear.notification.MAX_NOTIFY_TRACE_ALERTS
+import io.github.sirbughunter.agenticwear.notification.NotifyTrace
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -79,6 +81,32 @@ object PayloadCodec {
             .put("threadId", payload.threadId)
             .toString()
     }
+
+    /**
+     * Metadata-only notification timing for the bridge (`notify.trace`): epoch milliseconds on the
+     * Watch clock plus per-alert decisions. Never carries titles, details or message text.
+     */
+    internal fun encodeNotifyTrace(requestId: String, trace: NotifyTrace): String = JSONObject()
+        .put("version", 1)
+        .put("kind", "notify.trace")
+        .put("requestId", requestId)
+        .put("pushReceivedAt", trace.pushReceivedAtMillis)
+        .put("fetchStartedAt", trace.fetchStartedAtMillis)
+        .put("fetchCompletedAt", trace.fetchCompletedAtMillis)
+        .put(
+            "alerts",
+            JSONArray().apply {
+                trace.alerts.take(MAX_NOTIFY_TRACE_ALERTS).forEach { alert ->
+                    put(
+                        JSONObject()
+                            .put("eventId", alert.eventId)
+                            .put("decision", alert.decision.wire)
+                            .put("decidedAt", alert.decidedAtMillis),
+                    )
+                }
+            },
+        )
+        .toString()
 
     fun decodeSessions(json: JSONObject): List<AgentSession> {
         if (json.optInt("version") != 1 || json.optString("kind") != "sessions.snapshot") return emptyList()

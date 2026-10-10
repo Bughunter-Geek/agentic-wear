@@ -14,6 +14,9 @@ import io.github.sirbughunter.agenticwear.model.SubmittedTurn
 import io.github.sirbughunter.agenticwear.model.SubmissionPhase
 import io.github.sirbughunter.agenticwear.model.submissionPhaseFromWire
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
+import io.github.sirbughunter.agenticwear.notification.NotifyTrace
+import io.github.sirbughunter.agenticwear.notification.NotifyTraceRecorder
+import io.github.sirbughunter.agenticwear.notification.alertDecision
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
 import java.io.File
@@ -26,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import android.os.SystemClock
 import io.github.sirbughunter.agenticwear.voice.VoiceLatency
 import org.json.JSONObject
@@ -406,8 +410,12 @@ class AgenticWearRepository(private val context: Context) {
         }
     }
 
-    suspend fun refreshInbox(notify: Boolean = true): Int {
-        return refreshInboxBatch(notify).handled
+    /**
+     * [pushReceivedAt] (Watch wall clock) is set only for refreshes started by an FCM push. It enables
+     * a metadata-only `notify.trace` to the bridge; it never changes what is fetched or notified.
+     */
+    suspend fun refreshInbox(notify: Boolean = true, pushReceivedAt: Long? = null): Int {
+        return refreshInboxBatch(notify, pushReceivedAt = pushReceivedAt).handled
     }
 
     suspend fun refreshInboxAndSessions(notify: Boolean = true, notifyAfterMillis: Long? = null) {
@@ -422,10 +430,25 @@ class AgenticWearRepository(private val context: Context) {
     private suspend fun refreshInboxBatch(
         notify: Boolean,
         notifyAfterMillis: Long? = null,
+        pushReceivedAt: Long? = null,
+    ): InboxRefreshResult {
+        val trace = pushReceivedAt?.let(::NotifyTraceRecorder)
+        val result = refreshInboxExclusively(notify, notifyAfterMillis, trace)
+        // After the lock is released, so a slow relay can never hold up other inbox refreshes.
+        trace?.result()?.let { sendNotifyTraceBestEffort(it) }
+        return result
+    }
+
+    private suspend fun refreshInboxExclusively(
+        notify: Boolean,
+        notifyAfterMillis: Long?,
+        trace: NotifyTraceRecorder?,
     ): InboxRefreshResult = inboxRefreshMutex.withLock {
         val pairing = pairingStore.read() ?: return@withLock InboxRefreshResult(0, false)
         val fetchedAt = SystemClock.elapsedRealtime()
+        trace?.fetchStarted(System.currentTimeMillis())
         val envelopes = relay.fetchInbox(pairing)
+        trace?.fetchCompleted(System.currentTimeMillis())
         VoiceLatency.duration("inbox_fetch", fetchedAt)
         val acknowledged = mutableListOf<String>()
         var handled = 0
@@ -440,7 +463,7 @@ class AgenticWearRepository(private val context: Context) {
             val sentAt = envelope.optLong("sentAt")
             runCatching { crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope) }
                 .onSuccess { payload ->
-                    processPayload(payload, notify, notifyAfterMillis, messageId, sentAt)
+                    processPayload(payload, notify, notifyAfterMillis, messageId, sentAt, trace)
                     if (payload.optString("kind") == "sessions.snapshot") receivedSessionSnapshot = true
                     if (messageId.isNotBlank()) {
                         acknowledged += messageId
@@ -489,10 +512,24 @@ class AgenticWearRepository(private val context: Context) {
         broadcastStateChanged()
     }
 
-    private suspend fun send(payload: BridgePayload) {
+    private suspend fun send(payload: BridgePayload) = sendEncoded(PayloadCodec.encode(payload))
+
+    private suspend fun sendEncoded(plaintext: String) {
         val pairing = pairingStore.read() ?: error("Pair Agentic Wear first")
-        val plaintext = PayloadCodec.encode(payload)
         relay.sendToBridge(pairing, crypto.encrypt(pairing.pairId, pairing.bridgePublicKey, plaintext))
+    }
+
+    /** Diagnostics only: any failure or delay here is dropped and never reaches inbox handling or notifications. */
+    private suspend fun sendNotifyTraceBestEffort(trace: NotifyTrace) {
+        try {
+            withTimeoutOrNull(NOTIFY_TRACE_SEND_TIMEOUT_MS) {
+                sendEncoded(PayloadCodec.encodeNotifyTrace(UUID.randomUUID().toString(), trace))
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Best effort by design.
+        }
     }
 
     private fun processPayload(
@@ -501,6 +538,7 @@ class AgenticWearRepository(private val context: Context) {
         notifyAfterMillis: Long?,
         envelopeMessageId: String,
         envelopeSentAt: Long,
+        trace: NotifyTraceRecorder? = null,
     ) {
         if (payload.optString("kind").startsWith("live.")) {
             io.github.sirbughunter.agenticwear.live.LiveSignaling.receive(payload, context)
@@ -571,6 +609,13 @@ class AgenticWearRepository(private val context: Context) {
                 val firstDelivery = preferences.markEventHandled(alert.eventId)
                 if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
                     AgentNotifier.post(context, alert)
+                }
+                if (trace != null && payload.optString("kind").startsWith("terminal.")) {
+                    trace.alertDecided(
+                        alert.eventId,
+                        alertDecision(firstDelivery, notify, alert.occurredAtMillis, notifyAfterMillis),
+                        System.currentTimeMillis(),
+                    )
                 }
             }
             "chat.error" -> {
@@ -731,6 +776,7 @@ class AgenticWearRepository(private val context: Context) {
     companion object {
         private val activeTurnConfirmations = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private const val CHAT_REFRESH_REQUEST_TIMEOUT_MS = 5_000L
+        private const val NOTIFY_TRACE_SEND_TIMEOUT_MS = 4_000L
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private const val MAX_RECORDING_BYTES = 1_300_000
         private val recordingRetry = RecordingRetryCache()

@@ -28,7 +28,10 @@ class InboxSyncWorker(
             repository.updateFcmRegistration(installationId)
             return Result.success()
         }
-        repository.refreshInbox(notify = true)
+        repository.refreshInbox(
+            notify = true,
+            pushReceivedAt = inputData.getLong(KEY_PUSH_RECEIVED_AT, NO_PUSH_RECEIVED_AT).takeIf { it > 0L },
+        )
         Result.success()
     } catch (error: RelayException) {
         if (error.status in 400..499) Result.failure() else Result.retry()
@@ -41,10 +44,14 @@ class InboxSyncWorker(
         private const val UNIQUE_REGISTRATION_WORK = "agentic-wear-registration-sync"
         private const val KEY_FCM_INSTALLATION_ID = "fcm_installation_id"
         private const val KEY_REFRESH_FCM_REGISTRATION = "refresh_fcm_registration"
+        private const val KEY_PUSH_RECEIVED_AT = "push_received_at"
+        private const val NO_PUSH_RECEIVED_AT = 0L
 
-        fun enqueue(context: Context) {
+        /** [pushReceivedAt] is the Watch wall-clock time the push arrived; it only feeds the notify.trace diagnostics. */
+        fun enqueue(context: Context, pushReceivedAt: Long? = null) {
             val request = OneTimeWorkRequestBuilder<InboxSyncWorker>()
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .apply { pushReceivedAt?.let { setInputData(workDataOf(KEY_PUSH_RECEIVED_AT to it)) } }
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
                 UNIQUE_INBOX_WORK,
