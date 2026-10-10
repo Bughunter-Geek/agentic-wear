@@ -446,6 +446,7 @@ class AgenticWearRepository(private val context: Context) {
         if (result.fetchSucceeded) {
             sendPendingPushTracesBestEffort()
             sendRelayFailuresBestEffort()
+            sendPushDiagnosticsBestEffort()
         }
         return result
     }
@@ -497,40 +498,63 @@ class AgenticWearRepository(private val context: Context) {
      * can be shown while the Watch has no network. Never throws for bad input and never touches the
      * network: it does not acknowledge (the later inbox fetch sees the id as handled and acknowledges it).
      */
-    suspend fun processPushedEnvelope(envelopeJson: String, pushReceivedAt: Long) {
-        val envelope = try { JSONObject(envelopeJson) } catch (_: Exception) { return }
+    suspend fun processPushedEnvelope(envelopeJson: String, pushReceivedAt: Long): String {
+        val envelope = try { JSONObject(envelopeJson) } catch (_: Exception) { return PUSH_OUTCOME_BAD_JSON }
         val messageId = envelope.optString("messageId")
         val sentAt = envelope.optLong("sentAt")
-        if (!pushedEnvelopeAcceptable(
-                envelopeJson.length,
-                envelope.optString("sender").ifEmpty { null },
-                envelope.optString("recipient").ifEmpty { null },
-                messageId,
-                sentAt,
-                System.currentTimeMillis(),
-            )
-        ) return
-        var processed = false
+        pushedEnvelopeRejection(
+            envelopeJson.length,
+            envelope.optString("sender").ifEmpty { null },
+            envelope.optString("recipient").ifEmpty { null },
+            messageId,
+            sentAt,
+            System.currentTimeMillis(),
+        )?.let { return it }
+        var outcome = PUSH_OUTCOME_PROCESSED
+        var processedHere = false
         val trace = NotifyTraceRecorder(pushReceivedAt, fetchAttempt = 1, deliveredVia = DELIVERED_VIA_PUSH)
         inboxRefreshMutex.withLock {
-            val pairing = pairingStore.read() ?: return@withLock
-            if (recentInboxMessages.handled(messageId)) return@withLock
+            val pairing = pairingStore.read()
+            if (pairing == null) { outcome = PUSH_OUTCOME_NO_PAIRING; return@withLock }
+            if (recentInboxMessages.handled(messageId)) { outcome = PUSH_OUTCOME_ALREADY_HANDLED; return@withLock }
             val payload = try {
                 crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
+                outcome = PUSH_OUTCOME_DECRYPT_FAILED
                 return@withLock
             }
             trace.fetchStarted(pushReceivedAt)
             trace.fetchCompleted(pushReceivedAt)
             processPayload(payload, true, null, messageId, sentAt, trace)
             recentInboxMessages.remember(messageId)
-            processed = true
+            processedHere = true
         }
-        if (!processed) return
+        if (!processedHere) return outcome
         trace.result()?.let { pendingNotifyTraces.add(it) }
         broadcastStateChanged()
+        return outcome
+    }
+
+    /** Diagnostics only, like [sendRelayFailuresBestEffort]: reports recorded pushes in one `push.diagnostics` payload. */
+    private suspend fun sendPushDiagnosticsBestEffort() {
+        val pushes = PushDiagnostics.snapshot()
+        if (pushes.isEmpty()) return
+        if (!pushDiagnosticsReportInFlight.compareAndSet(false, true)) return
+        try {
+            val sent = withTimeoutOrNull(RELAY_FAILURES_SEND_TIMEOUT_MS) {
+                sendEncoded(PayloadCodec.encodePushDiagnostics(UUID.randomUUID().toString(), pushes))
+                true
+            }
+            if (sent == true) PushDiagnostics.clear(pushes)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Best effort by design.
+        } finally {
+            pushDiagnosticsReportInFlight.set(false)
+        }
     }
 
     /** Diagnostics only: reports traces recorded while offline; each one sent successfully is forgotten. */
@@ -874,6 +898,7 @@ class AgenticWearRepository(private val context: Context) {
         private const val NOTIFY_TRACE_SEND_TIMEOUT_MS = 4_000L
         private const val RELAY_FAILURES_SEND_TIMEOUT_MS = 4_000L
         private val relayFailureReportInFlight = AtomicBoolean(false)
+        private val pushDiagnosticsReportInFlight = AtomicBoolean(false)
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private const val MAX_RECORDING_BYTES = 1_300_000
         private val recordingRetry = RecordingRetryCache()
@@ -901,6 +926,33 @@ private data class InboxRefreshResult(
 internal const val MAX_PUSHED_ENVELOPE_CHARS = 3_000
 internal const val PUSHED_ENVELOPE_MAX_SKEW_MS = 10 * 60 * 1_000L
 
+internal const val PUSH_OUTCOME_PROCESSED = "processed"
+internal const val PUSH_OUTCOME_TOO_LONG = "too_long"
+internal const val PUSH_OUTCOME_BAD_JSON = "bad_json"
+internal const val PUSH_OUTCOME_BAD_STRUCTURE = "bad_structure"
+internal const val PUSH_OUTCOME_TOO_OLD_OR_FUTURE = "too_old_or_future"
+internal const val PUSH_OUTCOME_NO_PAIRING = "no_pairing"
+internal const val PUSH_OUTCOME_ALREADY_HANDLED = "already_handled"
+internal const val PUSH_OUTCOME_DECRYPT_FAILED = "decrypt_failed"
+internal const val PUSH_OUTCOME_TIMEOUT = "timeout"
+internal const val PUSH_OUTCOME_ERROR = "error"
+internal const val PUSH_OUTCOME_NO_ENVELOPE = "no_envelope"
+
+/** The specific reason a pushed envelope fails the cheap checks (null when acceptable). Checked in this order. */
+internal fun pushedEnvelopeRejection(
+    length: Int,
+    sender: String?,
+    recipient: String?,
+    messageId: String?,
+    sentAt: Long,
+    now: Long,
+): String? = when {
+    length > MAX_PUSHED_ENVELOPE_CHARS -> PUSH_OUTCOME_TOO_LONG
+    sender != "bridge" || recipient != "watch" || messageId.isNullOrBlank() -> PUSH_OUTCOME_BAD_STRUCTURE
+    kotlin.math.abs(now - sentAt) > PUSHED_ENVELOPE_MAX_SKEW_MS -> PUSH_OUTCOME_TOO_OLD_OR_FUTURE
+    else -> null
+}
+
 /** Cheap structural checks on an envelope carried in a push, before any decryption is attempted. */
 internal fun pushedEnvelopeAcceptable(
     length: Int,
@@ -909,10 +961,7 @@ internal fun pushedEnvelopeAcceptable(
     messageId: String?,
     sentAt: Long,
     now: Long,
-): Boolean = length <= MAX_PUSHED_ENVELOPE_CHARS &&
-    sender == "bridge" && recipient == "watch" &&
-    !messageId.isNullOrBlank() &&
-    kotlin.math.abs(now - sentAt) <= PUSHED_ENVELOPE_MAX_SKEW_MS
+): Boolean = pushedEnvelopeRejection(length, sender, recipient, messageId, sentAt, now) == null
 
 internal fun transcriptionReplyDelaysMs(): LongArray =
     // Foreground voice only: avoid adding up to two seconds of scheduled

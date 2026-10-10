@@ -136,6 +136,30 @@ object PayloadCodec {
         )
         .toString()
 
+    internal fun encodePushDiagnostics(requestId: String, pushes: List<PushRecord>): String = JSONObject()
+        .put("version", 1)
+        .put("kind", "push.diagnostics")
+        .put("requestId", requestId)
+        .put(
+            "pushes",
+            JSONArray().apply {
+                pushes.takeLast(PushDiagnostics.MAX_ENTRIES).forEach { push ->
+                    put(
+                        JSONObject()
+                            .put("receivedAt", push.receivedAt.coerceAtLeast(0L))
+                            .put("sentTime", push.sentTime.coerceAtLeast(0L))
+                            .put("priority", push.priority.coerceIn(0, 2))
+                            .put("originalPriority", push.originalPriority.coerceIn(0, 2))
+                            .put("envelopePresent", push.envelopePresent)
+                            .put("envelopeChars", push.envelopeChars.coerceIn(0, 10_000))
+                            .put("outcome", push.outcome)
+                            .put("outcomeAt", push.outcomeAt.coerceAtLeast(0L)),
+                    )
+                }
+            },
+        )
+        .toString()
+
     private fun safeErrorClass(value: String): String {
         val safe = value.filter { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '.' || it == '$' }
             .take(MAX_ERROR_CLASS_CHARS)
