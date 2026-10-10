@@ -59,6 +59,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        io.github.sirbughunter.agenticwear.notification.AppForeground.isForeground = true
         viewModel.onForegrounded()
     }
 
@@ -77,6 +78,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         if (!isChangingConfigurations && !requestingMicrophonePermission) viewModel.onActivityStopped()
         super.onStop()
+        io.github.sirbughunter.agenticwear.notification.AppForeground.isForeground = false
     }
 
     override fun onDestroy() {

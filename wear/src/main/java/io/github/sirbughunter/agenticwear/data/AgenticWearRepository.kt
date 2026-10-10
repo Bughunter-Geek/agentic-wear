@@ -3,6 +3,7 @@ package io.github.sirbughunter.agenticwear.data
 import android.content.Context
 import android.content.Intent
 import android.util.Base64
+import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
@@ -19,7 +20,11 @@ import io.github.sirbughunter.agenticwear.notification.NotifyTraceRecorder
 import io.github.sirbughunter.agenticwear.notification.DELIVERED_VIA_FETCH
 import io.github.sirbughunter.agenticwear.notification.DELIVERED_VIA_PUSH
 import io.github.sirbughunter.agenticwear.notification.PendingNotifyTraces
+import io.github.sirbughunter.agenticwear.notification.AlertPresentation
+import io.github.sirbughunter.agenticwear.notification.AppForeground
+import io.github.sirbughunter.agenticwear.notification.MessagePop
 import io.github.sirbughunter.agenticwear.notification.alertDecision
+import io.github.sirbughunter.agenticwear.notification.alertPresentation
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
 import java.io.File
@@ -726,9 +731,7 @@ class AgenticWearRepository(private val context: Context) {
                     }
                 }
                 val firstDelivery = preferences.markEventHandled(alert.eventId)
-                if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
-                    AgentNotifier.post(context, alert)
-                }
+                presentAlert(context, alert, firstDelivery, shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis))
                 if (trace != null && payload.optString("kind").startsWith("terminal.")) {
                     trace.alertDecided(
                         alert.eventId,
@@ -806,9 +809,7 @@ class AgenticWearRepository(private val context: Context) {
                 if (alert != null && !staleTurnError) {
                     preferences.latestAlert = alert
                     val firstDelivery = preferences.markEventHandled(alert.eventId)
-                    if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
-                        AgentNotifier.post(context, alert)
-                    }
+                    presentAlert(context, alert, firstDelivery, shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis))
                 }
             }
             "turn.accepted" -> {
@@ -1029,3 +1030,11 @@ internal fun shouldFinishTranscriptionWait(requestId: String, pendingRequestId: 
 /** A newer uncorrelated stream snapshot may replace the matching reply in the same inbox batch. */
 internal fun isAcknowledgedChatRead(requestId: String, snapshotRequestId: String?, acknowledgedRequestId: String?): Boolean =
     snapshotRequestId == requestId || acknowledgedRequestId == requestId
+
+private fun presentAlert(context: Context, alert: AgentAlert, firstDelivery: Boolean, shouldNotify: Boolean) {
+    when (alertPresentation(firstDelivery, shouldNotify, AppForeground.isForeground)) {
+        AlertPresentation.NOTIFY -> AgentNotifier.post(context, alert)
+        AlertPresentation.POP -> MessagePop.play(context)
+        AlertPresentation.NONE -> Unit
+    }
+}
