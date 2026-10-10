@@ -1,3 +1,4 @@
+import { readPrivateApk } from "./private-update";
 import { ZodError } from "zod";
 import { deriveCredential, secureEqual, sha256Hex } from "./crypto";
 import { wakeTargetForNewEnvelope, wakeWatch } from "./fcm";
@@ -18,11 +19,11 @@ export { PairAdmission } from "./pair-admission";
 export { PairRelay } from "./pair-relay";
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const requestId = crypto.randomUUID();
     const startedAt = Date.now();
     try {
-      const response = await route(request, env);
+      const response = await route(request, env, ctx);
       log("info", "request completed", {
         requestId,
         method: request.method,
@@ -48,7 +49,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function route(request: Request, env: Env): Promise<Response> {
+async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
     return Response.json({ ok: true, service: "agentic-wear-relay", version: 1 });
@@ -113,6 +114,33 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   const stub = env.PAIR_RELAY.getByName(pairId);
 
+  if (request.method === "PUT" && action === "private-update") {
+    let bytes: ArrayBuffer;
+    try { bytes = await readPrivateApk(request); } catch { throw new HttpError(413, "Private APK is empty or too large"); }
+    await stub.publishPrivateUpdate(credential, {
+      versionCode: Number(request.headers.get("X-Update-Version-Code")),
+      versionName: request.headers.get("X-Update-Version-Name") ?? "",
+      sha256: request.headers.get("X-Update-Sha256") ?? "",
+      apkSize: bytes.byteLength,
+      expiresAt: Number(request.headers.get("X-Update-Expires-At")),
+    }, bytes);
+    return Response.json({ published: true, private: true }, { status: 201 });
+  }
+  if (request.method === "DELETE" && action === "private-update") {
+    await stub.revokePrivateUpdate(credential);
+    return new Response(null, { status: 204 });
+  }
+  if (request.method === "GET" && action === "private-update/manifest") {
+    const manifest = await stub.privateUpdateManifest(credential);
+    if (!manifest) throw new HttpError(404, "No private update");
+    return Response.json({ ...manifest, apkUrl: `${url.origin}/v1/pairs/${pairId}/private-update/apk/${manifest.sha256}` });
+  }
+  if (request.method === "GET" && /^private-update\/apk\/[a-f0-9]{64}$/u.test(action)) {
+    const bytes = await stub.privateUpdateApk(credential, action.split("/")[2]!);
+    if (!bytes) throw new HttpError(404, "No private update");
+    return new Response(bytes, { headers: { "Content-Type": "application/vnd.android.package-archive", "Cache-Control": "private, no-store", "Content-Length": String(bytes.byteLength) } });
+  }
+
   if (request.method === "GET" && action === "bridge") return stub.fetch(request);
   if (request.method === "GET" && action === "status") return Response.json(await stub.pairingStatus(credential));
   if (request.method === "GET" && action === "watch-status") {
@@ -134,8 +162,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (envelope.sender !== "bridge" || envelope.recipient !== "watch") throw new HttpError(400, "Envelope direction is invalid");
     const result = await stub.enqueueToWatch(credential, envelope);
     const wakeTarget = wakeTargetForNewEnvelope(result.fcmInstallationId, result.inserted);
-    if (wakeTarget) await wakeWatch(env, wakeTarget, pairId);
-    return Response.json({ accepted: true, inserted: result.inserted }, { status: 202 });
+    return acknowledgeStoredEnvelope(result.inserted, ctx,
+      wakeTarget ? () => wakeWatch(env, wakeTarget, pairId) : undefined);
   }
   if (request.method === "POST" && action === "to-bridge") {
     const envelope = wireEnvelopeSchema.parse(await readJson(request, MAX_ENVELOPE_BODY_BYTES));
@@ -159,7 +187,25 @@ async function route(request: Request, env: Env): Promise<Response> {
   throw new HttpError(404, "Not found");
 }
 
+/** Durable enqueue has already completed. Wake latency/failure must not hold its ACK or retry it. */
+export function acknowledgeStoredEnvelope(
+  inserted: boolean, ctx: Pick<ExecutionContext, "waitUntil">, wake?: () => Promise<void>,
+): Response {
+  if (wake) {
+    const started = performance.now();
+    ctx.waitUntil(Promise.resolve().then(wake).then(() => {
+      log("info", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 1 });
+    }).catch(() => {
+      // Never include credentials, identifiers, audio or transcript content in wake diagnostics.
+      log("error", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 0 });
+    }));
+  }
+  return Response.json({ accepted: true, inserted }, { status: 202 });
+}
+
 function roleForAction(action: string): "bridge" | "watch" | null {
+  if (action === "private-update") return "bridge";
+  if (action === "private-update/manifest" || /^private-update\/apk\/[a-f0-9]{64}$/u.test(action)) return "watch";
   if (["bridge", "status", "confirm-bridge", "to-watch"].includes(action)) return "bridge";
   if (["watch-status", "confirm-watch", "to-bridge", "inbox", "ack", "registration"].includes(action)) {
     return "watch";

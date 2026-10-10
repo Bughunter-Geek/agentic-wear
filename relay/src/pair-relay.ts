@@ -1,3 +1,4 @@
+import { privateUpdateSchema, privateApkDigest, PRIVATE_CHUNK_BYTES, type PrivateUpdate } from "./private-update";
 import { DurableObject } from "cloudflare:workers";
 import { bridgeControlSchema, wireEnvelopeSchema, type WireEnvelope } from "./schemas";
 import { secureEqual, sha256Hex } from "./crypto";
@@ -50,6 +51,52 @@ export class PairRelay extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => this.migrate());
+  }
+
+  async publishPrivateUpdate(credential: string, input: PrivateUpdate, bytes: ArrayBuffer): Promise<void> {
+    await this.authorize("bridge", credential, true);
+    const manifest = privateUpdateSchema.parse(input);
+    const now = Date.now();
+    if (manifest.expiresAt <= now || manifest.expiresAt > now + 72 * 60 * 60 * 1000)
+      throw new PairRelayError("Private update expiry must be within 72 hours", 400);
+    if (bytes.byteLength !== manifest.apkSize || await privateApkDigest(bytes) !== manifest.sha256)
+      throw new PairRelayError("Private APK integrity mismatch", 400);
+    await this.ctx.storage.transaction(async tx => {
+      const previous = await tx.get<PrivateUpdate>("private-update:manifest");
+      const lastCode = await tx.get<number>("private-update:last-code") ?? 0;
+      if (manifest.versionCode <= lastCode) throw new PairRelayError("Private version must increase", 409);
+      if (previous) await tx.delete(Array.from({ length: Math.ceil(previous.apkSize / PRIVATE_CHUNK_BYTES) }, (_, i) => `private-update:chunk:${i}`));
+      const entries: Record<string, ArrayBuffer> = {};
+      for (let offset = 0, i = 0; offset < bytes.byteLength; offset += PRIVATE_CHUNK_BYTES, i++)
+        entries[`private-update:chunk:${i}`] = bytes.slice(offset, offset + PRIVATE_CHUNK_BYTES);
+      await tx.put(entries);
+      await tx.put("private-update:manifest", manifest);
+      await tx.put("private-update:last-code", manifest.versionCode);
+    });
+  }
+  async privateUpdateManifest(credential: string): Promise<PrivateUpdate | null> {
+    await this.authorize("watch", credential, true);
+    const manifest = await this.ctx.storage.get<PrivateUpdate>("private-update:manifest");
+    return manifest && manifest.expiresAt > Date.now() ? manifest : null;
+  }
+  async privateUpdateApk(credential: string, digest: string): Promise<ArrayBuffer | null> {
+    const manifest = await this.privateUpdateManifest(credential);
+    if (!manifest || digest !== manifest.sha256) return null;
+    const result = new Uint8Array(manifest.apkSize);
+    for (let i = 0, offset = 0; offset < result.byteLength; i++, offset += PRIVATE_CHUNK_BYTES) {
+      const chunk = await this.ctx.storage.get<ArrayBuffer>(`private-update:chunk:${i}`);
+      if (!chunk) return null;
+      result.set(new Uint8Array(chunk), offset);
+    }
+    return result.buffer;
+  }
+  async revokePrivateUpdate(credential: string): Promise<void> {
+    await this.authorize("bridge", credential, true);
+    await this.ctx.storage.transaction(async tx => {
+      const previous = await tx.get<PrivateUpdate>("private-update:manifest");
+      if (previous) await tx.delete(Array.from({ length: Math.ceil(previous.apkSize / PRIVATE_CHUNK_BYTES) }, (_, i) => `private-update:chunk:${i}`));
+      await tx.delete("private-update:manifest");
+    });
   }
 
   async initializePair(input: InitializePairInput): Promise<boolean> {
