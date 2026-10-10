@@ -1,0 +1,12 @@
+import { test } from 'vitest';
+import assert from 'node:assert/strict';
+import { verifiedReply } from '../dist/cloud-text-proof-control.js';
+const thread = { id: '01a1188b-a850-755b-91ec-717f6182900a', hostId: 'durable', kind: 'codex' };
+const ack = 'AW-WATCH-20261009-01 acknowledged';
+const now = Date.now();
+const native = (text, id = thread.id) => ({ thread: { ...thread, id }, turns: [{ id: 'new-turn', status: 'completed', completedAt: now + 1000, items: [{ type: 'agentMessage', id: 'actual-item', phase: 'final_answer', text }] }] });
+test('accepts exact acknowledgement and keeps native IDs', () => assert.deepEqual(verifiedReply(native(ack), [], now), { nativeTurnId: 'new-turn', nativeItemId: 'actual-item', reply: ack }));
+test('accepts one terminal period without changing native evidence', () => { const actual = native(ack + '.'); const original = JSON.stringify(actual); assert.deepEqual(verifiedReply(actual, [], now), { nativeTurnId: 'new-turn', nativeItemId: 'actual-item', reply: ack }); assert.equal(JSON.stringify(actual), original); });
+test('rejects arbitrary suffix and multiple periods', () => { for (const suffix of [' unrelated', '..', '. unrelated']) assert.throws(() => verifiedReply(native(ack + suffix), [], now)); });
+test('rejects wrong target ID', () => assert.throws(() => verifiedReply(native(ack + '.', 'wrong-task'), [], now)));
+test('still rejects baseline, unfinished, and wrong host', () => { assert.throws(() => verifiedReply(native(ack + '.'), ['new-turn'], now)); const unfinished = native(ack + '.'); unfinished.turns[0].status = 'inProgress'; assert.throws(() => verifiedReply(unfinished, [], now)); const wrong = native(ack + '.'); wrong.thread.hostId = 'local'; assert.throws(() => verifiedReply(wrong, [], now)); });

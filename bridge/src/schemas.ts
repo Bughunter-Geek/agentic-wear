@@ -30,15 +30,32 @@ export const wireEnvelopeSchema = z.object({
 export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;
 
 export const watchPayloadSchema = z.discriminatedUnion("kind", [
+  z.object({ version: z.literal(1), kind: z.literal("live.newTask"), requestId: safeId }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("live.capability"), requestId: safeId,
+    threadId: safeId.optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("live.start"), requestId: safeId,
+    callId: safeId, threadId: safeId, sdp: z.string().min(10).max(65_536), voice: safeId, fastMode: z.boolean().optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("live.heartbeat"), requestId: safeId, callId: safeId }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("live.stop"), requestId: safeId, callId: safeId }).strict(),
+  // Metadata-only call diagnostics from the Watch: stage names, timings, states and counts.
+  z.object({ version: z.literal(1), kind: z.literal("live.trace"), requestId: safeId, callId: safeId,
+    events: z.array(z.object({ stage: z.string().regex(/^[A-Z_]{1,32}$/u), elapsedMs: z.number().int().min(0).max(90_000),
+      callHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(), threadHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(),
+      state: z.string().regex(/^[A-Z_]{1,32}$/u).optional(), count: z.number().int().min(0).max(65_536).optional() }).strict()).max(80),
+  }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("session.sync"), requestId: safeId }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("draft.prepare"), requestId: safeId }).strict(),
   z.object({
     version: z.literal(1),
     kind: z.literal("transcription.create"),
     requestId: safeId,
     audioBase64,
     mimeType: z.enum(["audio/mp4", "audio/aac"]),
+    backend: z.enum(["phonon", "whisper"]).optional(),
     threadId: safeId.nullable(),
     previousText: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS).nullable().optional(),
+    finalIntent: z.boolean().optional(),
+    localEdit: z.boolean().optional(),
   }).strict(),
   z.object({
     version: z.literal(1),
@@ -49,6 +66,7 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     model: safeModel.nullable().optional(),
     effort: reasoningEffort.default("medium"),
     followUpAction: followUpActionSchema.default("default"),
+    fastMode: z.boolean().optional(),
   }).strict(),
   z.object({
     version: z.literal(1),
@@ -126,6 +144,8 @@ const modelListEntrySchema = z.object({
     description: z.string().trim().max(240),
   }).passthrough()).max(16),
   hidden: z.boolean().optional(),
+  isDefault: z.boolean().optional(),
+  serviceTiers: z.array(z.object({ id: safeModel, name: z.string(), description: z.string() }).passthrough()).max(16).optional(),
 }).passthrough();
 
 export const modelListResponseSchema = z.object({

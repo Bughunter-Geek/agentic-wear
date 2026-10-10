@@ -4,6 +4,8 @@ import { z } from "zod";
 import { relaySocketMessageSchema, wireEnvelopeSchema, type WireEnvelope } from "./schemas.js";
 
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const HEARTBEAT_TIMEOUT_MS = 50_000;
 const pairStartResponseSchema = z.object({
   pairId: z.string().length(43),
   bridgeCredential: z.string().min(32),
@@ -84,19 +86,20 @@ export class RelayClient {
 
   async runSocket(
     signal: AbortSignal,
-    onEnvelope: (envelope: WireEnvelope) => Promise<void>,
+    onEnvelope: (envelope: WireEnvelope, localQueueMs?: number) => Promise<void>,
     onWatchPublicKey: (publicKey: string) => Promise<void>,
   ): Promise<void> {
     this.requirePair();
     let reconnectDelay = 500;
     while (!signal.aborted) {
       try {
-        await this.connectOnce(signal, onEnvelope, onWatchPublicKey);
+        await this.connectOnce(signal, onEnvelope, onWatchPublicKey, () => { reconnectDelay = 500; });
         reconnectDelay = 500;
       } catch (error) {
         if (signal.aborted) return;
         console.error(JSON.stringify({ level: "error", message: "relay socket disconnected", error: safeError(error) }));
       }
+      if (signal.aborted) return;
       await delay(reconnectDelay, signal);
       reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
     }
@@ -104,8 +107,9 @@ export class RelayClient {
 
   private async connectOnce(
     signal: AbortSignal,
-    onEnvelope: (envelope: WireEnvelope) => Promise<void>,
+    onEnvelope: (envelope: WireEnvelope, localQueueMs?: number) => Promise<void>,
     onWatchPublicKey: (publicKey: string) => Promise<void>,
+    onConnected: () => void,
   ): Promise<void> {
     const endpoint = new URL(`${this.relayUrl.replace(/\/$/u, "")}/v1/pairs/${this.pairId}/bridge`);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
@@ -115,33 +119,70 @@ export class RelayClient {
         headers: { Authorization: `Bearer ${this.credential}`, "User-Agent": userAgent },
       });
       let chain = Promise.resolve();
+      let settled = false;
+      let pendingPing: { at: number; sentAt: number } | null = null;
+      let lastPingAt = 0;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(heartbeat);
+        signal.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve();
+      };
       const heartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping", at: Date.now() }));
-      }, 25_000);
+        if (settled || socket.readyState !== WebSocket.OPEN) return;
+        if (pendingPing) {
+          if (performance.now() - pendingPing.sentAt >= HEARTBEAT_TIMEOUT_MS) {
+            finish(new Error("Relay heartbeat timed out"));
+            socket.terminate();
+          }
+          return;
+        }
+        lastPingAt = Math.max(Date.now(), lastPingAt + 1);
+        pendingPing = { at: lastPingAt, sentAt: performance.now() };
+        socket.send(JSON.stringify({ type: "ping", at: pendingPing.at }), (error) => {
+          if (error) { finish(new Error("Relay heartbeat send failed")); socket.terminate(); }
+        });
+      }, HEARTBEAT_INTERVAL_MS);
       heartbeat.unref();
-      const abort = () => socket.close(1000, "Bridge stopping");
+      const abort = () => { finish(); socket.terminate(); };
       signal.addEventListener("abort", abort, { once: true });
       socket.on("open", () => {
+        if (settled || signal.aborted) return;
+        onConnected();
         console.log(JSON.stringify({ level: "info", message: "relay socket connected" }));
       });
       socket.on("message", (raw, binary) => {
-        chain = chain.then(async () => {
+        if (settled || signal.aborted) return;
+        const receivedAt = performance.now();
+        let parsed: z.infer<typeof relaySocketMessageSchema>;
+        try {
           if (binary || rawLength(raw) > MAX_RELAY_MESSAGE_BYTES) throw new Error("Relay sent an invalid message");
-          const parsed = relaySocketMessageSchema.parse(JSON.parse(raw.toString("utf8")));
-          if (parsed.type === "envelope") await onEnvelope(parsed.envelope);
+          parsed = relaySocketMessageSchema.parse(JSON.parse(raw.toString("utf8")));
+        } catch { socket.close(1008, "Invalid relay message"); return; }
+        // Transport replies bypass queued local work so slow transcription
+        // cannot make a responsive relay appear disconnected.
+        if (parsed.type === "pong") {
+          if (pendingPing?.at === parsed.at) pendingPing = null;
+          return;
+        }
+        chain = chain.then(async () => {
+          if (settled || signal.aborted) return;
+          if (parsed.type === "envelope") await onEnvelope(parsed.envelope, performance.now() - receivedAt);
           else if ((parsed.type === "pair.challenge" || parsed.type === "pair.status") && parsed.watchPublicKey) {
             await onWatchPublicKey(parsed.watchPublicKey);
           }
         });
-        void chain.catch((error: unknown) => socket.close(1008, safeError(error)));
+        // RFC6455 close reasons are limited to123 UTF-8 bytes. Zod errors
+        // can exceed that bound and contain payload details; send neither.
+        void chain.catch(() => socket.close(1008, "Invalid relay message"));
       });
-      socket.once("error", reject);
+      socket.once("error", (error) => { finish(error); socket.terminate(); });
       socket.once("close", (code) => {
-        clearInterval(heartbeat);
-        signal.removeEventListener("abort", abort);
-        if (signal.aborted || code === 1000) resolve();
-        else reject(new Error(`Relay WebSocket closed (${code})`));
+        if (signal.aborted || code === 1000) finish();
+        else finish(new Error(`Relay WebSocket closed (${code})`));
       });
+      if (signal.aborted) abort();
     });
   }
 
@@ -204,12 +245,15 @@ async function boundedText(response: Response, limit: number): Promise<string> {
 }
 
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener("abort", () => {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const finish = () => {
       clearTimeout(timer);
-      reject(signal.reason);
-    }, { once: true });
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal?.addEventListener("abort", finish, { once: true });
   });
 }
 

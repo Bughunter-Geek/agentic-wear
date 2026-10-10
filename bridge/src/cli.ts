@@ -25,8 +25,10 @@ import {
   PairingAuthenticator,
 } from "./pairing-auth.js";
 import { RelayClient } from "./relay-client.js";
+import { assertLocalPhononRuntimeInstalled, createLocalPhononTranscriber, isLocalPhononConfigured, localPhononRuntime, localPhononRuntimeModel } from "./local-coreml-phonon.js";
 import { OpenAITranscriber } from "./transcriber.js";
 import type { Transcriber } from "./transcriber.js";
+import { SelectableTranscriber } from "./selectable-transcriber.js";
 import {
   assertLocalWhisperInstalled,
   LocalWhisperTranscriber,
@@ -177,10 +179,17 @@ async function start(): Promise<void> {
     await deleteKeychainSecret(pairingAuthenticatorAccount(config.pairId));
   }
   const provider = resolveTranscriptionProvider();
-  const transcriber: Transcriber = provider === "local"
+  const selectedTranscriber: Transcriber = provider === "local"
     ? new LocalWhisperTranscriber()
-    : openAiTranscriber();
+    : provider === "phonon" ? createLocalPhononTranscriber() : openAiTranscriber();
+  const transcriber = new SelectableTranscriber(selectedTranscriber, {
+    whisper: provider === "local" ? selectedTranscriber : new LocalWhisperTranscriber(),
+    ...(provider === "phonon" ? { phonon: selectedTranscriber }
+      : isLocalPhononConfigured()
+        ? { phonon: createLocalPhononTranscriber() } : {}),
+  }, provider === "phonon" ? "phonon" : provider === "local" ? "whisper" : undefined);
   if (provider === "local") await assertLocalWhisperInstalled();
+  if (provider === "phonon") await assertLocalPhononRuntimeInstalled();
   try {
     await (transcriber.prepare?.() ?? Promise.resolve());
   } catch (error) {
@@ -276,6 +285,9 @@ async function doctor(): Promise<void> {
     if (provider === "local") {
       await assertLocalWhisperInstalled();
       checks.push({ check: "transcription", ok: true, detail: `Local Whisper · ${localWhisperModel()} · no API billing` });
+    } else if (provider === "phonon") {
+      await assertLocalPhononRuntimeInstalled();
+      checks.push({ check: "transcription", ok: true, detail: `Experimental local Phonon-2 (${localPhononRuntime()}) · ${localPhononRuntimeModel()} · English only · no API billing` });
     } else {
       openAiTranscriber();
       checks.push({ check: "transcription", ok: true, detail: "OpenAI API · paid opt-in" });

@@ -5,8 +5,9 @@ const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 export type AudioMimeType = "audio/mp4" | "audio/aac";
 
 export interface Transcriber {
+  readonly defaultBackend?: "phonon" | "whisper";
   prepare?(): Promise<void>;
-  transcribe(audio: Uint8Array, mimeType: AudioMimeType): Promise<string>;
+  transcribe(audio: Uint8Array, mimeType: AudioMimeType, backend?: "phonon" | "whisper"): Promise<string>;
   close?(): void | Promise<void>;
 }
 

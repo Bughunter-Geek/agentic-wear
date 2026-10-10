@@ -1,3 +1,7 @@
+import { TurnTiming } from "./turn-timing.js";
+import { LiveVoice } from "./live-voice.js";
+import { CloudTextProof } from "./cloud-text-proof.js";
+import { CloudTextSession } from "./cloud-text-session.js";
 import type { BridgeConfig } from "./config.js";
 import { TurnReceipts } from "./turn-receipts.js";
 import { configPath, writeConfig } from "./config.js";
@@ -6,11 +10,13 @@ import {
   AppServerClient,
   ForeignThreadSelectionError,
   ForeignThreadSteerError,
+  FastModeUnavailableError,
   type ModelView,
   type ApprovalEvent,
   type SessionView,
   type TerminalEvent,
   type ExternalTurnBaseline,
+  type RealtimeVoiceCapability,
   type TurnSubmissionResult,
 } from "./app-server-client.js";
 import { RelayClient } from "./relay-client.js";
@@ -18,6 +24,9 @@ import { ReplayGuard } from "./replay-guard.js";
 import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
 import { followUpActionSchema, type FollowUpAction, type WatchPayload, type WireEnvelope } from "./schemas.js";
 import type { Transcriber } from "./transcriber.js";
+import { cleanPhononFillers, type CleanupDiagnostics } from "./filler-cleanup.js";
+import type { ExplicitCorrectionDiagnostics } from "./explicit-correction.js";
+import { LocalDraftEditor, type DraftEdit } from "./draft-editor.js";
 import { MAX_AUDIO_BYTES } from "./limits.js";
 import { sanitizePublicText } from "./public-text.js";
 import { z } from "zod";
@@ -30,6 +39,7 @@ const pendingTurnSchema = z.object({
   model: z.string().min(1).max(128).nullable(),
   effort: z.string().min(1).max(32),
   followUpAction: followUpActionSchema.default("default"),
+  fastMode: z.boolean().optional(),
   createdAt: z.number().int().positive(),
   blockedReason: z.string().min(1).max(1200).optional(),
   externalAttempt: z.object({
@@ -44,16 +54,24 @@ export class BridgeService {
   private readonly ownedThreads: Set<string>;
   private readonly crypto: CryptoBox;
   private readonly appServer: AppServerClient;
+  private readonly liveVoice: LiveVoice;
+  private turnTimingInstance: TurnTiming | undefined;
+  private get turnTiming(): TurnTiming { return this.turnTimingInstance ??= new TurnTiming(); }
+  private liveTimer: NodeJS.Timeout | null = null;
   private readonly turnReceipts: TurnReceipts;
   private readonly controller = new AbortController();
   private persistTask: Promise<void> = Promise.resolve();
   private fatalError: Error | null = null;
   private watchedThreadId: string | null = null;
   private watchExpiresAt = 0;
+  private watchAcceptedAt = 0;
   private chatSyncTimer: NodeJS.Timeout | null = null;
   private pendingTurnTimer: NodeJS.Timeout | null = null;
   private pendingTurnTask: Promise<void> | null = null;
+  private readonly draftEditor = new LocalDraftEditor();
   private readonly pendingTurns = new Map<string, StoredPendingTurn>();
+  private readonly cloudTextProof = new CloudTextProof();
+  private readonly cloudTextSession = new CloudTextSession();
 
   constructor(
     private readonly config: BridgeConfig,
@@ -75,16 +93,24 @@ export class BridgeService {
       },
       (threadId) => this.onAgentOutput(threadId),
     );
+    this.liveVoice = new LiveVoice(this.appServer, (payload) => this.send(payload));
+    this.appServer.setRealtimeHandler((method, params) => this.liveVoice.notification(method, params));
+    this.appServer.setTurnStageHandler((threadId, stage) => this.turnTiming.markThread(threadId, stage));
   }
 
   async run(): Promise<void> {
     const status = await this.relay.status();
     if (!status.paired || !status.watchPublicKey) throw new Error("The watch has not completed authenticated pairing");
     this.assertWatchPublicKey(status.watchPublicKey);
+    // Preload the resident voice editor before accepting Watch work. Phonon
+    // was already prepared by start(); avoid a first-use model load racing ASR.
+    if (this.transcriber.defaultBackend === "phonon") {
+      await this.draftEditor.prepare().catch(() => undefined);
+    }
 
     const socketTask = this.relay.runSocket(
       this.controller.signal,
-      (envelope) => this.onEnvelope(envelope),
+      (envelope, localQueueMs) => this.onEnvelope(envelope, localQueueMs),
       (publicKey) => Promise.resolve(this.assertWatchPublicKey(publicKey)),
     );
     try {
@@ -97,7 +123,20 @@ export class BridgeService {
       await this.appServer.connect("daemon");
       await this.loadPendingTurns();
       await this.processPendingTurns();
+      let nextCallbackAt = performance.now() + PENDING_TURN_RETRY_MS;
       this.pendingTurnTimer = setInterval(() => {
+        const callbackAt = performance.now();
+        const callbackLatenessMs = Math.max(0, callbackAt - nextCallbackAt);
+        nextCallbackAt = callbackAt + PENDING_TURN_RETRY_MS;
+        if (callbackLatenessMs > 500) console.log(JSON.stringify({ level: "info",
+          message: "cloud.history.callback_late", at: Date.now(), callbackLatenessMs }));
+        void this.cloudTextSession?.publish((payload) => this.send(payload),
+          this.cloudTextSession.owns(this.watchedThreadId) && Date.now() <= this.watchExpiresAt,
+          { trigger: "periodic", subscriptionAcceptedAt: this.watchAcceptedAt, subscriptionExpiresAt: this.watchExpiresAt, callbackLatenessMs })
+          .catch(() => undefined);
+        void this.cloudTextProof?.publish((payload) => this.send(payload),
+          this.cloudTextProof.owns(this.watchedThreadId) && Date.now() <= this.watchExpiresAt)
+          .catch(() => undefined);
         void this.processPendingTurns().catch((error: unknown) => {
           console.error(JSON.stringify({
             level: "error",
@@ -107,6 +146,11 @@ export class BridgeService {
         });
       }, PENDING_TURN_RETRY_MS);
       this.pendingTurnTimer.unref();
+      this.liveTimer = setInterval(() => {
+        void this.liveVoice.expire()
+          .then(() => this.appServer.releaseEndedRealtimeLeases()).catch(() => undefined);
+      }, 5_000);
+      this.liveTimer.unref();
       await this.reportRealtimeVoiceCapability();
       await this.sendSessions();
       const monitorTask = this.appServer.monitorTerminals(this.controller.signal).catch((error: unknown) => {
@@ -117,6 +161,8 @@ export class BridgeService {
       await monitorTask;
       if (this.fatalError) throw this.fatalError;
     } finally {
+      if (this.liveTimer) clearInterval(this.liveTimer);
+      await this.liveVoice.close().catch(() => undefined);
       await this.appServer.close();
       if (this.chatSyncTimer) clearTimeout(this.chatSyncTimer);
       this.chatSyncTimer = null;
@@ -138,12 +184,21 @@ export class BridgeService {
     }
   }
 
-  private async onEnvelope(envelope: WireEnvelope): Promise<void> {
+  private async onEnvelope(envelope: WireEnvelope, localQueueMs = 0): Promise<void> {
+    const receivedAt = performance.now();
     await processAuthenticatedEnvelope(
       envelope,
       this.crypto,
       this.replayGuard,
       (payload) => {
+        if (payload.kind === "turn.submit" && !(payload.threadId !== null &&
+            (this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)))) {
+          this.turnTiming.begin(payload.requestId, payload.threadId, envelope.sentAt);
+        }
+        if (payload.kind === "transcription.create") console.log(JSON.stringify({ level: "info", message: "transcription.ingress.timing", localQueueMs: Math.round(localQueueMs * 1000) / 1000, decryptAndReplayMs: Math.round((performance.now() - receivedAt) * 1000) / 1000 }));
+        if (payload.kind === "chat.watch" && this.cloudTextSession?.owns(payload.threadId)) console.log(JSON.stringify({ level: "info",
+          message: "cloud.history.ingress", at: Date.now(), threadId: payload.threadId, requestId: payload.requestId,
+          localQueueMs, decryptAndReplayMs: Math.max(0, performance.now() - receivedAt) }));
         // History/catalog reads may take the full App Server request deadline.
         // Keep rendering work out of the relay's ordered command stream.
         if (payload.kind === "session.sync" || payload.kind === "chat.watch") {
@@ -152,17 +207,29 @@ export class BridgeService {
         }
         return this.handleAuthenticatedCommand(payload);
       },
-      (payload) => payload.kind === "turn.submit"
-        ? this.replayTurnReceipt(payload)
-        : Promise.resolve(),
+      (payload) => payload.kind === "turn.submit" ? this.replayTurnReceipt(payload)
+        : payload.kind === "live.newTask" ? this.replayNewVoiceTask(payload) : Promise.resolve(),
     );
   }
 
   private async handleAuthenticatedCommand(payload: WatchPayload): Promise<void> {
+    if (payload.kind === "live.newTask") {
+      const receipt = await this.turnReceipts.begin(payload.requestId, payload);
+      if (receipt) return this.replayNewVoiceTask(payload);
+      return this.handleWatchPayload(payload);
+    }
     if (payload.kind !== "turn.submit") return this.handleWatchPayload(payload);
     const receipt = await this.turnReceipts.begin(payload.requestId, payload);
     if (receipt) return this.replayTurnReceipt(payload);
     await this.handleWatchPayload(payload);
+  }
+
+  private async replayNewVoiceTask(payload: Extract<WatchPayload, { kind: "live.newTask" }>): Promise<void> {
+    const receipt = await this.turnReceipts.get(payload.requestId, payload);
+    await this.send(receipt?.response ? receipt.response as SendablePayload : {
+      version: 1, kind: "live.error", requestId: payload.requestId, deliveryUncertain: true,
+      message: "Task creation is not confirmed. Check Sessions before creating another task; Retry checks this same request.",
+    });
   }
 
   private async replayTurnReceipt(payload: Extract<WatchPayload, { kind: "turn.submit" }>): Promise<void> {
@@ -180,6 +247,37 @@ export class BridgeService {
     });
   }
 
+  private liveCallThreadsInstance: Map<string, string> | undefined;
+  private get liveCallThreads(): Map<string, string> { return this.liveCallThreadsInstance ??= new Map(); }
+
+  // Single-entry cache of the Codex voice catalog, used only to validate live.start.
+  // (live.capability stays uncached: it returns per-thread task metadata.)
+  private liveCapabilityCache: { at: number; value: RealtimeVoiceCapability } | undefined;
+
+  /** Fresh cached catalog if it still supports the voice; otherwise one fresh fetch. */
+  private async liveStartCapability(voice: string): Promise<{ capability: RealtimeVoiceCapability; cached: boolean }> {
+    const now = Date.now();
+    const hit = this.liveCapabilityCache;
+    if (hit && now - hit.at < LIVE_CAPABILITY_CACHE_MS && supportsLiveVoice(hit.value, voice))
+      return { capability: hit.value, cached: true };
+    const value = await this.appServer.realtimeVoiceCapability();
+    // An unavailable API is usually transient; never remember it.
+    this.liveCapabilityCache = value.realtimeApiAvailable ? { at: now, value } : undefined;
+    return { capability: value, cached: false };
+  }
+
+  private rememberLiveCall(callId: string, threadId: string): void {
+    this.liveCallThreads.set(callId, threadId);
+    while (this.liveCallThreads.size > 8) this.liveCallThreads.delete(this.liveCallThreads.keys().next().value!);
+    this.keepChatWatched(threadId);
+  }
+
+  private keepChatWatched(threadId: string): void {
+    this.watchedThreadId = threadId;
+    this.watchAcceptedAt = Date.now();
+    this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
+  }
+
   private runBackgroundRefresh(refresh: () => Promise<void>): void {
     void refresh().catch((error: unknown) => {
       console.error(JSON.stringify({
@@ -192,14 +290,85 @@ export class BridgeService {
 
   private async handleWatchPayload(payload: WatchPayload): Promise<void> {
     try {
+      if ("threadId" in payload && (this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)) &&
+          (payload.kind === "live.start" || payload.kind === "live.capability" || payload.kind === "feedback.submit")) {
+        throw new Error("This cloud connection supports text and chat history. Native cloud voice and feedback are not connected.");
+      }
       switch (payload.kind) {
-        case "session.sync":
+        case "live.newTask": {
+          const task = await this.appServer.createVoiceTask(this.config.defaultCwd);
+          await this.send({ version: 1, kind: "live.taskCreated", requestId: payload.requestId, task });
           await this.sendSessions();
+          return;
+        }
+        case "live.capability": {
+          const capability = await this.appServer.realtimeVoiceCapability(payload.threadId);
+          await this.send({ version: 1, kind: "live.capability", requestId: payload.requestId, ...capability,
+            fastMode: await this.fastModeAdvertisement() });
+          return;
+        }
+        case "live.start": {
+          const capabilityStartedAt = Date.now();
+          const { capability, cached } = await this.liveStartCapability(payload.voice);
+          console.log(JSON.stringify({ level: "info", message: "live.voice.capability", callId: payload.callId,
+            cached, durationMs: Date.now() - capabilityStartedAt }));
+          if (!supportsLiveVoice(capability, payload.voice))
+            throw new Error("Codex voice or the selected voice is unavailable on this host.");
+          await this.liveVoice.start(payload.callId, payload.threadId, payload.sdp, payload.voice, payload.fastMode);
+          this.rememberLiveCall(payload.callId, payload.threadId);
+          return;
+        }
+        case "live.heartbeat": {
+          this.liveVoice.heartbeat(payload.callId);
+          // A call outlasts the chat subscription; keep its turn updates reaching the Watch.
+          const threadId = this.liveCallThreads.get(payload.callId);
+          if (threadId) this.keepChatWatched(threadId);
+          return;
+        }
+        case "live.stop": {
+          await this.liveVoice.stop(payload.callId);
+          const threadId = this.liveCallThreads.get(payload.callId);
+          this.liveCallThreads.delete(payload.callId);
+          // Spoken transcript segments and the thread's final idle state arrive only on a fresh
+          // load. Give Codex a moment to persist the last segment, then refresh once.
+          if (threadId) this.runBackgroundRefresh(async () => {
+            await new Promise((resolve) => setTimeout(resolve, POST_CALL_REFRESH_DELAY_MS));
+            await this.sendChatSnapshot(threadId, undefined, true);
+          });
+          return;
+        }
+        case "live.trace":
+          console.log(JSON.stringify({ level: "info", message: "live.voice.watchTrace", callId: payload.callId,
+            events: payload.events.map(({ stage, elapsedMs, state, count }) => ({ stage, elapsedMs, state, count })) }));
+          return;
+        case "session.sync":
+          // Foreground watch refresh is an earlier, explicit user-use signal than
+          // recording. Warm only the configured Phonon route; never block the
+          // session reply or change the selected transcriber/rewrite settings.
+          if (this.transcriber?.defaultBackend === "phonon") {
+            void this.draftEditor.prepare().catch(() => undefined);
+          }
+          await this.sendSessions(payload.requestId);
+          return;
+        case "draft.prepare":
+          void this.draftEditor.prepare().catch(() => undefined);
           return;
         case "transcription.create":
           await this.createTranscription(payload);
           return;
         case "turn.submit": {
+          const cloudRoute = await this.cloudTextRoute(payload.threadId);
+          if (cloudRoute) {
+            await cloudRoute.enqueue(payload.requestId, payload.text);
+            this.watchedThreadId = payload.threadId;
+            this.watchAcceptedAt = Date.now();
+            this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
+            await this.send({ version: 1, kind: "turn.accepted", requestId: payload.requestId,
+              threadId: payload.threadId, state: "waiting", selectionApplied: false,
+              message: "Watch message queued for this existing cloud task. Its current model settings are kept." });
+            await this.sendChatSnapshot(payload.threadId!);
+            return;
+          }
           const submittedAt = Date.now();
           const pendingPayload = (
             threadId: string,
@@ -210,6 +379,7 @@ export class BridgeService {
             text: payload.text,
             model: payload.model ?? null,
             effort: payload.effort,
+            ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
             followUpAction,
             createdAt: submittedAt,
           });
@@ -228,7 +398,10 @@ export class BridgeService {
               );
             },
             payload.followUpAction,
+            ...(payload.fastMode !== undefined ? [payload.fastMode] as const : []),
           );
+          this.turnTiming.bindThread(payload.requestId, result.threadId);
+          this.turnTiming.markRequest(payload.requestId, "appServerAccepted");
           if (result.created) await this.persistOwnedThreads();
           if (result.state === "waiting") {
             await this.storePendingTurn(pendingPayload(
@@ -237,7 +410,8 @@ export class BridgeService {
             ));
           } else await this.removePendingTurn(payload.requestId);
           this.watchedThreadId = result.threadId;
-          this.watchExpiresAt = Date.now() + CHAT_WATCH_TTL_MS;
+          this.watchAcceptedAt = Date.now();
+          this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
           await this.send({
             version: 1,
             kind: "turn.accepted",
@@ -245,8 +419,9 @@ export class BridgeService {
             threadId: result.threadId,
             state: result.state,
             selectionApplied: result.selectionApplied,
-            message: turnAcceptedMessage(result),
+            message: [turnAcceptedMessage(result), tierNotice(payload.fastMode)].filter(Boolean).join(" ") || undefined,
           });
+          this.turnTiming.markRequest(payload.requestId, "watchAckSent");
           this.runBackgroundRefresh(async () => {
             await this.sendChatSnapshot(result.threadId);
             await this.sendSessions();
@@ -255,14 +430,20 @@ export class BridgeService {
         }
         case "chat.watch":
           this.watchedThreadId = payload.threadId;
-          this.watchExpiresAt = Date.now() + CHAT_WATCH_TTL_MS;
+          this.watchAcceptedAt = Date.now();
+          this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
+          if (this.cloudTextSession?.owns(payload.threadId)) console.log(JSON.stringify({ level: "info",
+            message: "cloud.history.subscription", action: "watch", at: this.watchAcceptedAt, expiresAt: this.watchExpiresAt }));
           await this.sendChatSnapshot(payload.threadId, payload.requestId);
           await this.sendSessions();
           return;
         case "chat.unwatch":
           if (this.watchedThreadId === payload.threadId) {
+            if (this.cloudTextSession?.owns(payload.threadId)) console.log(JSON.stringify({ level: "info",
+              message: "cloud.history.subscription", action: "unwatch", at: Date.now(), previousExpiresAt: this.watchExpiresAt }));
             this.watchedThreadId = null;
             this.watchExpiresAt = 0;
+            this.watchAcceptedAt = 0;
           }
           return;
         case "approval.respond":
@@ -292,9 +473,17 @@ export class BridgeService {
           return;
       }
     } catch (error) {
+      if (payload.kind === "live.newTask" || payload.kind === "live.start" || payload.kind === "live.stop" || payload.kind === "live.heartbeat" || payload.kind === "live.capability") {
+        await this.send({ version: 1, kind: "live.error", requestId: payload.requestId,
+          ...("callId" in payload ? { callId: payload.callId } : {}),
+          ...(payload.kind === "live.newTask" ? { deliveryUncertain: true } : {}), message: publicRequestError(error, payload.kind) });
+        return;
+      }
       if (
         payload.kind === "turn.submit" &&
         payload.threadId !== null &&
+        !this.cloudTextProof?.owns(payload.threadId) &&
+        !this.cloudTextSession?.owns(payload.threadId) &&
         isRetryablePendingTurnError(error)
       ) {
         // A Watch prompt already carries a stable idempotency key. If Codex's
@@ -350,23 +539,56 @@ export class BridgeService {
   }
 
   private async createTranscription(payload: Extract<WatchPayload, { kind: "transcription.create" }>): Promise<void> {
+    const startedAt = performance.now();
     const audio = Buffer.from(payload.audioBase64, "base64");
+    const decodedAt = performance.now();
     try {
       if (audio.byteLength < 1_024 || audio.byteLength > MAX_AUDIO_BYTES) {
         throw new Error("Voice recordings must be between 1 KiB and the four-minute limit");
       }
-      const text = await this.transcriber.transcribe(audio, payload.mimeType);
-      const revisedText = payload.previousText
-        ? await this.appServer.reviseDraft(payload.previousText, text, this.config.defaultCwd)
-        : text;
+      const rawText = await this.transcriber.transcribe(audio, payload.mimeType, payload.backend);
+      const transcribedAt = performance.now();
+      const isPhonon = (payload.backend ?? this.transcriber.defaultBackend) === "phonon";
+      let cleanupDiagnostics: CleanupDiagnostics | undefined;
+      let explicitRepairDiagnostics: ExplicitCorrectionDiagnostics | undefined;
+      const cleanInitialPhonon = isPhonon && !payload.previousText && process.env.AGENTIC_WEAR_PHONON_CLEAN_FILLERS !== "0";
+      const text = cleanInitialPhonon
+        ? cleanPhononFillers(rawText, value => { cleanupDiagnostics = value; }) : rawText;
+      const cleanedAt = performance.now();
+      // New watch explicitly requests local editing. Legacy build 51 keeps its existing path.
+      const edit: DraftEdit = payload.localEdit && payload.previousText
+        ? await this.draftEditor.rewrite(rawText, payload.previousText)
+        : payload.finalIntent && !payload.previousText
+          ? await this.draftEditor.rewrite(text, undefined, { clauseRestarts: cleanInitialPhonon, explicitCorrections: cleanInitialPhonon,
+              onExplicitRepairs: value => { explicitRepairDiagnostics = value; } })
+          : { text: payload.previousText ? await this.appServer.reviseDraft(payload.previousText, text, this.config.defaultCwd) : text };
+      // A model can reintroduce fillers or stutters. Keep deterministic cleanup
+      // on the final draft too, including every bounded rewrite fallback.
+      const revisedText = cleanInitialPhonon ? cleanPhononFillers(edit.text) : edit.text;
+      const beforeDelivery = performance.now();
       await this.send({
         version: 1,
         kind: "transcription.ready",
         requestId: payload.requestId,
         threadId: payload.threadId,
         text: revisedText,
+        ...((text !== rawText || payload.finalIntent) && !payload.previousText ? { rawText } : {}),
+        ...(edit.notice ? { editNotice: edit.notice } : {}),
+        ...(edit.editChoices ? { editChoices: edit.editChoices } : {}),
         revised: payload.previousText != null,
       });
+      const deliveredAt = performance.now();
+      const ms = (value: number) => Math.round(value * 1000) / 1000;
+      console.log(JSON.stringify({ level: "info", message: "transcription.bridge.timing",
+        backend: isPhonon ? "phonon" : "other", audioBytes: audio.byteLength, cleanupApplied: cleanupDiagnostics !== undefined,
+        ...(cleanupDiagnostics ? { cleanupDiagnostics } : {}),
+        ...(explicitRepairDiagnostics ? { explicitRepairDiagnostics } : {}),
+        rewriteOutcome: edit.outcome ?? "not_requested", postCleanupApplied: cleanInitialPhonon,
+        postCleanupChanged: revisedText !== edit.text,
+        base64DecodeMs: ms(decodedAt - startedAt), transcriberMs: ms(transcribedAt - decodedAt),
+        cleanupMs: ms(cleanedAt - transcribedAt), revisionMs: ms(beforeDelivery - cleanedAt),
+        encryptAndResultRelayMs: ms(deliveredAt - beforeDelivery), bridgeTotalMs: ms(deliveredAt - startedAt),
+      }));
     } finally {
       audio.fill(0);
     }
@@ -374,6 +596,7 @@ export class BridgeService {
 
   private async onTerminal(event: TerminalEvent): Promise<void> {
     await this.send({ version: 1, ...event });
+    this.turnTiming.markThread(event.threadId, "terminalSentToWatch");
     if (this.watchedThreadId === event.threadId && Date.now() <= this.watchExpiresAt) {
       await this.sendChatSnapshot(event.threadId, undefined, true).catch((error: unknown) => {
         console.error(JSON.stringify({
@@ -383,6 +606,7 @@ export class BridgeService {
         }));
       });
     }
+    this.turnTiming.finishThread(event.threadId);
     void this.processPendingTurns().catch(() => undefined);
     await this.sendSessions().catch((error: unknown) => {
       console.error(JSON.stringify({ level: "error", message: "Could not refresh sessions", error: publicError(error) }));
@@ -395,24 +619,25 @@ export class BridgeService {
 
   private async reportRealtimeVoiceCapability(): Promise<void> {
     const capability = await this.appServer.realtimeVoiceCapability();
-    const messageByBlocker = {
-      realtime_api_unavailable: "Realtime voice is unavailable: this Codex App Server does not expose a compatible realtime API.",
-      model_catalog_unavailable: "Realtime voice is unavailable: the Codex model catalog could not be verified.",
-      gpt_live_model_unavailable: "Realtime voice is unavailable: GPT-Live-1 is not in this Codex App Server model catalog.",
-      watch_transport_not_implemented: "GPT-Live-1 is cataloged; realtime voice remains disabled pending a reviewed watch transport.",
-    } as const;
     console.info(JSON.stringify({
-      level: capability.blocker === "watch_transport_not_implemented" ? "info" : "warn",
-      message: messageByBlocker[capability.blocker],
+      level: capability.realtimeApiAvailable ? "info" : "warn",
+      message: capability.realtimeApiAvailable
+        ? "Codex WebRTC signaling is exposed; voice entitlement is verified only by a negotiated call."
+        : "Codex realtime API is unavailable.",
       realtimeVoiceAvailable: capability.available,
       realtimeApiAvailable: capability.realtimeApiAvailable,
-      gptLiveModelAvailable: capability.gptLiveModelAvailable,
       realtimeVoiceBlocker: capability.blocker,
     }));
   }
 
-  private async sendSessions(): Promise<void> {
+  private async sendSessions(requestId?: string): Promise<void> {
     const sessions: SessionView[] = await this.appServer.listSessions();
+    const cloudSession = await this.cloudTextSession?.session() ?? await this.cloudTextProof?.session();
+    if (cloudSession) {
+      const duplicate = sessions.findIndex((session) => session.id === cloudSession.id);
+      if (duplicate >= 0) sessions.splice(duplicate, 1);
+      sessions.unshift(cloudSession);
+    }
     let models: ModelView[] = [];
     try {
       models = await this.appServer.listModels();
@@ -424,8 +649,19 @@ export class BridgeService {
       }));
     }
     const snapshot: SendablePayload = { version: 1, kind: "sessions.snapshot", sessions };
-    if (models.length > 0) snapshot.models = models;
+    if (requestId !== undefined) snapshot.requestId = requestId;
+    snapshot.models = models; // Missing/failed catalog must revoke cached Fast availability.
+    snapshot.generatedAt = Date.now();
+    snapshot.fastMode = await this.fastModeAdvertisement();
     await this.send(snapshot);
+  }
+
+  private async fastModeAdvertisement(): Promise<{
+    protocolVersion: number; supported: boolean; eligible: boolean; defaultModel: string | null;
+  }> {
+    const capability = await this.appServer.fastModeCapability(this.config.defaultCwd)
+      .catch(() => ({ supported: this.appServer.supportsFastMode, eligible: false, defaultModel: null }));
+    return { protocolVersion: 1, ...capability };
   }
 
   private async sendChatSnapshot(
@@ -433,14 +669,31 @@ export class BridgeService {
     requestId?: string,
     forceRefresh = false,
   ): Promise<void> {
-    const snapshot = await this.appServer.chatSnapshot(threadId, requestId !== undefined || forceRefresh);
+    const cloudRoute = await this.cloudTextRoute(threadId);
+    if (cloudRoute && cloudRoute === this.cloudTextSession) {
+      // A direct refresh also carries durable request progress, without waiting
+      // for the periodic callback or allowing a snapshot failure to hide it.
+      await cloudRoute.publish((payload) => this.send(payload), false);
+      await cloudRoute.deliverSnapshot((payload) => this.send(payload), requestId, { trigger: "direct",
+        subscriptionAcceptedAt: this.watchAcceptedAt, subscriptionExpiresAt: this.watchExpiresAt });
+      return;
+    }
+    const snapshot = cloudRoute
+      ? await cloudRoute.snapshot()
+      : await this.appServer.chatSnapshot(threadId, requestId !== undefined || forceRefresh);
     await this.send({
       version: 1,
       kind: "chat.snapshot",
       requestId,
       ...snapshot,
-      generatedAt: Date.now(),
+      generatedAt: "generatedAt" in snapshot && typeof snapshot.generatedAt === "number" ? snapshot.generatedAt : Date.now(),
     });
+    if (!cloudRoute) this.turnTiming.markThread(threadId, forceRefresh ? "finalSnapshotSent" : "firstStreamSnapshotSent");
+  }
+
+  private async cloudTextRoute(threadId: unknown): Promise<CloudTextSession | CloudTextProof | null> {
+    if (this.cloudTextSession?.owns(threadId) && await this.cloudTextSession.configured()) return this.cloudTextSession;
+    return this.cloudTextProof?.owns(threadId) ? this.cloudTextProof : null;
   }
 
   private onAgentOutput(threadId: string): Promise<void> {
@@ -459,7 +712,8 @@ export class BridgeService {
   }
 
   private async send(payload: SendablePayload): Promise<void> {
-    if ((payload.kind === "turn.accepted" || payload.kind === "turn.error") &&
+    if ((payload.kind === "turn.accepted" || payload.kind === "turn.error" || payload.kind === "live.taskCreated" ||
+        (payload.kind === "live.error" && payload.callId === undefined)) &&
         typeof payload.requestId === "string") {
       payload = await this.turnReceipts.finish(
         payload.requestId, payload, payload.deliveryUncertain !== true, payload.deferred === true,
@@ -574,9 +828,10 @@ export class BridgeService {
             followUpAction: followUpMode,
           }, baseline),
           pending.payload.followUpAction ?? "default",
+          ...(pending.payload.fastMode !== undefined ? [pending.payload.fastMode] as const : []),
         );
       } catch (error) {
-        if (error instanceof ForeignThreadSelectionError || error instanceof ForeignThreadSteerError) {
+        if (error instanceof ForeignThreadSelectionError || error instanceof ForeignThreadSteerError || error instanceof FastModeUnavailableError) {
           // Persist the terminal decision before notifying the watch. A crash
           // or lost notification must never revive this rejected submission.
           const blocked = { ...pending.payload, blockedReason: error.message };
@@ -612,6 +867,7 @@ export class BridgeService {
   }
 
   private async finishPendingTurn(requestId: string, threadId: string, steered = false): Promise<void> {
+    const fastMode = this.pendingTurns.get(requestId)?.payload.fastMode;
     await this.removePendingTurn(requestId);
     await this.send({
       version: 1,
@@ -619,9 +875,10 @@ export class BridgeService {
       requestId,
       threadId,
       selectionApplied: true,
-      message: steered
+      message: [steered
         ? "Steered the active turn. Your selected model and reasoning will be used for the next new turn."
         : "Watch model and reasoning selection applied. Prompt submitted in this chat.",
+        tierNotice(fastMode)].filter(Boolean).join(" "),
     });
     await this.sendSessions().catch(() => undefined);
   }
@@ -639,6 +896,11 @@ export class BridgeService {
     this.persistTask = this.persistTask.catch(() => undefined).then(() => writeConfig(this.config));
     await this.persistTask;
   }
+}
+
+function tierNotice(fastMode?: boolean): string | undefined {
+  if (fastMode === undefined) return undefined;
+  return `${fastMode ? "Fast" : "Standard"} requested for new turns in this task. An already-running turn keeps its current tier.`;
 }
 
 function turnAcceptedMessage(result: TurnSubmissionResult): string | undefined {
@@ -664,6 +926,14 @@ export function publicError(error: unknown): string {
 
 export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): string {
   const message = publicError(error);
+  if (kind.startsWith("live.")) {
+    if (kind === "live.start" && /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|another (?:Codex )?client|owns this session/iu.test(message)) {
+      return "Another Codex client holds this task's writer. Voice did not start. Restore the shared Desktop/bridge connection, then reconnect to this task.";
+    }
+    if (/timed out/iu.test(message))
+      return "Codex did not confirm this voice request. Check the call in Codex before reconnecting.";
+    return message;
+  }
   if (/timed out/iu.test(message)) {
     if (kind === "feedback.submit") {
       return "Codex did not acknowledge the feedback. Keep Codex and your private bridge running, then retry.";
@@ -701,8 +971,14 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
 
 const CHAT_SYNC_DEBOUNCE_MS = 700;
 const CHAT_WATCH_TTL_MS = 90_000;
+const POST_CALL_REFRESH_DELAY_MS = 750;
+const LIVE_CAPABILITY_CACHE_MS = 60_000;
 const PENDING_TURN_RETRY_MS = 2_000;
 const MAX_PENDING_TURNS = 20;
+
+function supportsLiveVoice(capability: RealtimeVoiceCapability, voice: string): boolean {
+  return capability.realtimeApiAvailable && Boolean(capability.voices?.v1.includes(voice));
+}
 
 function isRetryablePendingTurnError(error: unknown): boolean {
   return /active writer|actively writing this session|active session in another client|session is (?:currently )?active in another client|not found|no rollout|not available|temporarily unavailable|cancel(?:led|ed)/iu

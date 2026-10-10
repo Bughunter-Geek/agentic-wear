@@ -18,6 +18,8 @@ type PendingRequest = {
   resolve: (text: string) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  startedAt: number;
+  readyWaitMs: number;
 };
 
 export class LocalWhisperTranscriber implements Transcriber {
@@ -29,6 +31,10 @@ export class LocalWhisperTranscriber implements Transcriber {
     private readonly pythonPath = localWhisperPythonPath(),
     private readonly ffmpegPath = resolveFfmpegPath(),
     private readonly model = localWhisperModel(),
+    private readonly workerOptions: {
+      path?: string; environment?: NodeJS.ProcessEnv; label?: string;
+      command?: { executable: string; args: readonly string[] };
+    } = {},
   ) {}
 
   async prepare(): Promise<void> {
@@ -39,21 +45,24 @@ export class LocalWhisperTranscriber implements Transcriber {
     if (!isSupportedAudioMimeType(mimeType) || audio.byteLength < 1_024 || audio.byteLength > MAX_AUDIO_BYTES) {
       throw new Error("Voice recordings must be between 1 KiB and the four-minute limit");
     }
+    const beforeReady = performance.now();
     const worker = await this.ensureWorker();
+    const readyWaitMs = performance.now() - beforeReady;
+    const startedAt = performance.now();
     const id = randomUUID();
     return new Promise<string>((resolveRequest, rejectRequest) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        rejectRequest(new Error("Local Whisper took too long to respond"));
+        rejectRequest(new Error(`${this.workerLabel()} took too long to respond`));
       }, requestTimeoutMs);
-      this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timeout });
+      this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timeout, startedAt, readyWaitMs });
       worker.stdin.write(`${JSON.stringify({ id, audioBase64: Buffer.from(audio).toString("base64"), mimeType })}\n`, (error) => {
         if (!error) return;
         const pending = this.pending.get(id);
         if (!pending) return;
         clearTimeout(pending.timeout);
         this.pending.delete(id);
-        pending.reject(new Error("Could not send audio to Local Whisper"));
+        pending.reject(new Error(`Could not send audio to ${this.workerLabel()}`));
       });
     });
   }
@@ -62,7 +71,7 @@ export class LocalWhisperTranscriber implements Transcriber {
     const worker = this.worker;
     this.worker = null;
     this.ready = null;
-    this.failPending(new Error("Local Whisper stopped"));
+    this.failPending(new Error(`${this.workerLabel()} stopped`));
     if (!worker || worker.killed || worker.exitCode !== null) return;
     const cleanExit = await new Promise<boolean>((resolveExit) => {
       const timeout = setTimeout(() => resolveExit(false), 2_000);
@@ -75,18 +84,23 @@ export class LocalWhisperTranscriber implements Transcriber {
     if (!cleanExit && !worker.killed && worker.exitCode === null) worker.kill("SIGTERM");
   }
 
+  private workerLabel(): string {
+    return this.workerOptions.label ?? "Local Whisper";
+  }
+
   private async ensureWorker(): Promise<ChildProcessWithoutNullStreams> {
     if (!this.worker || !this.ready) this.startWorker();
     await this.ready;
-    if (!this.worker) throw new Error("Local Whisper is unavailable");
+    if (!this.worker) throw new Error(`${this.workerLabel()} is unavailable`);
     return this.worker;
   }
 
   private startWorker(): void {
+    const command = this.workerOptions.command;
     const worker = spawn(
-      this.pythonPath,
-      [workerPath(), "--model", this.model, "--ffmpeg", this.ffmpegPath],
-      { env: localWhisperEnvironment(), stdio: ["pipe", "pipe", "pipe"] },
+      command?.executable ?? this.pythonPath,
+      command ? [...command.args] : [this.workerOptions.path ?? workerPath(), "--model", this.model, "--ffmpeg", this.ffmpegPath],
+      { env: this.workerOptions.environment ?? localWhisperEnvironment(), stdio: ["pipe", "pipe", "pipe"] },
     );
     this.worker = worker;
     this.ready = new Promise<void>((resolveReady, rejectReady) => {
@@ -110,19 +124,30 @@ export class LocalWhisperTranscriber implements Transcriber {
         if (!pending) return;
         clearTimeout(pending.timeout);
         this.pending.delete(message.id);
-        if (message.type === "result") pending.resolve(message.text);
+        if (message.type === "result") {
+          if (this.workerLabel() === "Local Phonon-2") {
+            const roundTripMs = performance.now() - pending.startedAt;
+            const timing = message.timing;
+            console.log(JSON.stringify({ level: "info", message: "phonon.worker.timing",
+              readyWaitMs: roundMs(pending.readyWaitMs), workerRoundTripMs: roundMs(roundTripMs),
+              ...timing,
+              ...(timing ? { ipcAndQueueMs: roundMs(Math.max(0, roundTripMs - timing.decodeMs - timing.inferenceMs)) } : {}),
+            }));
+          }
+          pending.resolve(message.text);
+        }
         else pending.reject(new Error(message.message));
       });
       worker.stderr.on("data", (chunk: Buffer) => {
         const detail = chunk.toString("utf8").trim();
-        if (detail) console.error(JSON.stringify({ level: "info", message: "Local Whisper", detail: detail.slice(0, 500) }));
+        if (detail) console.error(JSON.stringify({ level: "info", message: this.workerOptions.label ?? "Local Whisper", detail: detail.slice(0, 500) }));
       });
-      worker.once("error", () => failStart("Local Whisper could not start; run `agentic-wear transcription setup`"));
+      worker.once("error", () => failStart(`${this.workerLabel()} could not start; check the selected transcription runtime`));
       worker.once("exit", (code, signal) => {
         this.worker = null;
         this.ready = null;
-        failStart("Local Whisper stopped before it was ready; run `agentic-wear transcription setup`");
-        this.failPending(new Error(`Local Whisper stopped (${signal ?? code ?? "unknown"})`));
+        failStart(`${this.workerLabel()} stopped before it was ready; check the selected transcription runtime`);
+        this.failPending(new Error(`${this.workerLabel()} stopped (${signal ?? code ?? "unknown"})`));
       });
     });
   }
@@ -196,13 +221,13 @@ export async function setupLocalWhisper(): Promise<void> {
   );
 }
 
-export function resolveTranscriptionProvider(value = process.env.AGENTIC_WEAR_TRANSCRIPTION_PROVIDER): "local" | "openai" {
+export function resolveTranscriptionProvider(value = process.env.AGENTIC_WEAR_TRANSCRIPTION_PROVIDER): "local" | "phonon" | "openai" {
   const normalized = value?.trim().toLowerCase() || "local";
-  if (normalized === "local" || normalized === "openai") return normalized;
-  throw new Error("AGENTIC_WEAR_TRANSCRIPTION_PROVIDER must be `local` or `openai`");
+  if (normalized === "local" || normalized === "phonon" || normalized === "openai") return normalized;
+  throw new Error("AGENTIC_WEAR_TRANSCRIPTION_PROVIDER must be `local`, `phonon` or `openai`");
 }
 
-function resolveFfmpegPath(): string {
+export function resolveFfmpegPath(): string {
   const configured = process.env.AGENTIC_WEAR_FFMPEG_PATH?.trim();
   if (configured) return configured;
   for (const candidate of ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]) {
@@ -243,7 +268,7 @@ function runVisible(executable: string, args: string[], env: NodeJS.ProcessEnv =
 
 type WorkerMessage =
   | { type: "ready" }
-  | { type: "result"; id: string; text: string }
+  | { type: "result"; id: string; text: string; timing?: WorkerTiming }
   | { type: "error"; id: string; message: string };
 
 function parseWorkerMessage(line: string): WorkerMessage | null {
@@ -257,7 +282,7 @@ function parseWorkerMessage(line: string): WorkerMessage | null {
     if (type === "result") {
       const text = Reflect.get(value, "text");
       return typeof text === "string" && text.trim()
-        ? { type, id, text: text.trim().slice(0, MAX_TRANSCRIPT_CHARS) }
+        ? { type, id, text: text.trim().slice(0, MAX_TRANSCRIPT_CHARS), timing: parseWorkerTiming(Reflect.get(value, "timing")) }
         : null;
     }
     if (type === "error") {
@@ -270,4 +295,13 @@ function parseWorkerMessage(line: string): WorkerMessage | null {
   } catch {
     return null;
   }
+}
+
+function roundMs(value: number): number { return Math.round(value * 1000) / 1000; }
+type WorkerTiming = { decodeMs: number; inferenceMs: number; audioDurationMs: number };
+function parseWorkerTiming(value: unknown): WorkerTiming | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const decodeMs = Reflect.get(value, "decodeMs"), inferenceMs = Reflect.get(value, "inferenceMs"), audioDurationMs = Reflect.get(value, "audioDurationMs");
+  if (![decodeMs, inferenceMs, audioDurationMs].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1_000_000)) return undefined;
+  return { decodeMs: decodeMs as number, inferenceMs: inferenceMs as number, audioDurationMs: audioDurationMs as number };
 }

@@ -16,6 +16,10 @@ type ClientInternals = {
   restartStalePrivateAppServer: (threadId: string) => Promise<boolean>;
   restartPrivateAppServer: () => Promise<void>;
   child: unknown;
+  realtimeThreads: Set<string>;
+  realtimeReleaseAfterTurn: Set<string>;
+  releaseRealtimeLease: (threadId: string) => Promise<void>;
+  performPrivateAppServerRestart: () => Promise<void>;
   activeThreadSynchronizations: number;
   lastStaleRestartAt: number;
   emitRecentTerminals: (
@@ -466,6 +470,60 @@ describe("AppServerClient session delivery", () => {
     expect(sendMessageToThread).not.toHaveBeenCalled();
   });
 
+  it("merges live voice transcript segments into chat history by timeline position", async () => {
+    const target = new AppServerClient(new Set(), async () => {}, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle", false) });
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/turns/list") return Promise.resolve({
+        data: [{ id: "turn-voice", status: "completed", items: [
+          { id: "delegated-user", type: "userMessage", content: [{ type: "text", text: "Check the build." }] },
+          { id: "delegated-answer", type: "agentMessage", phase: "final_answer", text: "The build passes." },
+        ] }, { id: "turn-text", status: "completed", items: [
+          { id: "typed-user", type: "userMessage", content: [{ type: "text", text: "Typed earlier." }] },
+        ] }],
+        nextCursor: null, backwardsCursor: null,
+      });
+      if (method === "thread/timeline/list") return Promise.resolve({
+        activeRealtimeSessionAtPageStart: null, nextCursor: null,
+        data: [
+          { type: "item", position: 2, turnId: "turn-text", item: { id: "typed-user", type: "userMessage" } },
+          { type: "realtime", position: 5, item: { id: "rt-start", realtimeSessionId: "call-1", type: "realtimeSessionStarted" } },
+          { type: "realtime", position: 6, item: { id: "rt-user-1", realtimeSessionId: "call-1", type: "transcriptSegment", role: "user", text: " Is the build green? " } },
+          { type: "item", position: 8, turnId: "turn-voice", item: { id: "delegated-user", type: "userMessage" } },
+          { type: "item", position: 9, turnId: "turn-voice", item: { id: "delegated-answer", type: "agentMessage" } },
+          { type: "realtime", position: 10, item: { id: "rt-assistant-1", realtimeSessionId: "call-1", type: "transcriptSegment", role: "assistant", text: "Yes, it passes." } },
+          { type: "realtime", position: 11, item: { id: "rt-empty", realtimeSessionId: "call-1", type: "transcriptSegment", role: "user", text: "   " } },
+          { type: "realtime", position: 12, item: { id: "rt-closed", realtimeSessionId: "call-1", type: "realtimeSessionClosed", outcome: "ended" } },
+        ],
+      });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+
+    const snapshot = await target.chatSnapshot("thread-1", true);
+    expect(snapshot.messages.map(({ id, role }) => `${role}:${id}`)).toEqual([
+      "user:typed-user", "user:rt-user-1", "user:delegated-user", "assistant:delegated-answer", "assistant:rt-assistant-1",
+    ]);
+    expect(snapshot.messages[1]).toMatchObject({ text: "Is the build green?", turnId: "realtime:call-1", kind: "message" });
+    expect(snapshot.messages[4]).toMatchObject({ phase: "final_answer" });
+  });
+
+  it("keeps turn history when the voice timeline read is unavailable", async () => {
+    const target = new AppServerClient(new Set(), async () => {}, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: thread("idle", false) });
+      if (method === "thread/queue/list") return Promise.resolve({ data: [], nextCursor: null });
+      if (method === "thread/turns/list") return Promise.resolve({ data: [{ id: "turn-1", status: "completed", items: [
+        { id: "user-1", type: "userMessage", content: [{ type: "text", text: "Hello" }] },
+      ] }], nextCursor: null, backwardsCursor: null });
+      return Promise.reject(new Error("method not found: thread/timeline/list"));
+    });
+    const snapshot = await target.chatSnapshot("thread-1", true);
+    expect(snapshot.messages.map(({ id }) => id)).toEqual(["user-1"]);
+  });
+
   it("shows an accepted Watch prompt immediately and replaces it with canonical history", async () => {
     const onAgentOutput = vi.fn().mockResolvedValue(undefined);
     const target = new AppServerClient(
@@ -528,6 +586,7 @@ describe("AppServerClient session delivery", () => {
     const snapshot = await target.chatSnapshot("thread-1");
     expect(snapshot.messages).toContainEqual(expect.objectContaining({
       id: "watch-visible-1",
+      watchRequestId: "watch-visible-1",
       role: "user",
       text: "Visible on the Watch immediately.",
     }));
@@ -540,6 +599,10 @@ describe("AppServerClient session delivery", () => {
       "canonical-assistant-1",
     ]);
     expect(canonical.messages.filter(({ role }) => role === "user")).toHaveLength(1);
+    // The Watch matches its local echo to the canonical prompt by this exact id;
+    // without it the echo is appended below the reply.
+    expect(canonical.messages[0]).toMatchObject({ watchRequestId: "watch-visible-1" });
+    expect(canonical.messages[1]).not.toHaveProperty("watchRequestId");
     expect(historyReads).toBe(2);
   });
 
@@ -1241,7 +1304,63 @@ describe("AppServerClient session delivery", () => {
     }
   });
 
-  it("reports realtime voice as unavailable when GPT-Live-1 is absent from the Codex catalog", async () => {
+  it("starts realtime with WebRTC without changing thread permissions or coding model", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read" || method === "thread/resume") return Promise.resolve({ thread: thread("idle") });
+      if (method === "thread/unsubscribe") return Promise.resolve({ status: "unsubscribed" });
+      return Promise.resolve({});
+    });
+    await target.startRealtime("thread-1", "v=0 audio offer", "cove");
+    expect(internals.request).toHaveBeenCalledWith("thread/resume", expect.objectContaining({ threadId: "thread-1", excludeTurns: true }));
+    expect(internals.request).toHaveBeenCalledWith("thread/realtime/start", {
+      threadId: "thread-1", transport: { type: "webrtc", sdp: "v=0 audio offer" },
+      outputModality: "audio", voice: "cove", version: "v3", includeStartupContext: true,
+      realtimeStartInstructions: expect.stringContaining("unavailable"),
+    });
+    await target.stopRealtime("thread-1");
+    expect(internals.request).toHaveBeenCalledWith("thread/realtime/stop", { threadId: "thread-1" });
+  });
+
+  it("defers private App Server restart until voice and delegated work release their leases", async () => {
+    const internals = client() as unknown as ClientInternals;
+    internals.child = {};
+    internals.performPrivateAppServerRestart = vi.fn(async () => {});
+    internals.realtimeThreads.add("thread-1");
+    await internals.restartPrivateAppServer();
+    expect(internals.performPrivateAppServerRestart).not.toHaveBeenCalled();
+    let active = true;
+    internals.request = vi.fn(async (method: string) => method === "thread/read"
+      ? { thread: thread(active ? "active" : "idle") } : { status: "unsubscribed" });
+    await internals.releaseRealtimeLease("thread-1");
+    expect(internals.realtimeReleaseAfterTurn.has("thread-1")).toBe(true);
+    expect(internals.performPrivateAppServerRestart).not.toHaveBeenCalled();
+    active = false;
+    await internals.releaseRealtimeLease("thread-1");
+    expect(internals.realtimeReleaseAfterTurn.size).toBe(0);
+    expect(internals.performPrivateAppServerRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a voice lease when the server closes the session unexpectedly", async () => {
+    const internals = client() as unknown as ClientInternals;
+    internals.realtimeThreads.add("thread-1");
+    internals.request = vi.fn(async (method: string) => method === "thread/read"
+      ? { thread: thread("idle") } : { status: "unsubscribed" });
+    await internals.handleNotification("thread/realtime/closed", { threadId: "thread-1" });
+    expect(internals.realtimeThreads.size).toBe(0);
+    expect(internals.request).toHaveBeenCalledWith("thread/unsubscribe", { threadId: "thread-1" });
+  });
+
+  it("refuses to take over an active task for voice", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.resolve({ thread: thread("active") }));
+    await expect(target.startRealtime("thread-1", "offer", "cove")).rejects.toThrow("busy");
+    expect(internals.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("discovers realtime without using the coding model catalog as a voice entitlement gate", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     internals.request = vi.fn((method: string) => {
@@ -1269,13 +1388,58 @@ describe("AppServerClient session delivery", () => {
       available: false,
       realtimeApiAvailable: true,
       voices: { v1: ["cove"], v2: ["marin"], defaultV1: "cove", defaultV2: "marin" },
-      gptLiveModelAvailable: false,
-      blocker: "gpt_live_model_unavailable",
+      transport: "webrtc",
+      entitlement: "unverified",
+      blocker: "session_not_verified",
     });
     expect(internals.request).toHaveBeenCalledWith("thread/realtime/listVoices", {});
+    expect(internals.request).not.toHaveBeenCalledWith("model/list", expect.anything());
   });
 
-  it("keeps realtime voice disabled when GPT-Live-1 is cataloged but no watch transport exists", async () => {
+  it("rejects an unavailable cloud task before voice catalog, resume or session start", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.reject(new Error("thread not loaded")));
+    await expect(target.realtimeVoiceCapability("cloud-task")).rejects.toThrow("supported host connection");
+    expect(internals.request).toHaveBeenCalledExactlyOnceWith("thread/read", { threadId: "cloud-task", includeTurns: false }, 10_000);
+  });
+
+  it("checks a local voice target without attaching or changing task settings", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    const methods: string[] = [];
+    internals.request = vi.fn(async (method: string) => {
+      methods.push(method);
+      return method === "thread/read" ? { thread: thread("notLoaded") }
+        : { voices: { v1: ["cove"], v2: ["marin"], defaultV1: "cove", defaultV2: "marin" } };
+    });
+    await expect(target.realtimeVoiceCapability("thread-1")).resolves.toMatchObject({ realtimeApiAvailable: true });
+    expect(methods).toEqual(["thread/read", "thread/realtime/listVoices"]);
+  });
+
+  it("rejects a mismatched task before starting voice", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(async () => ({ thread: { ...thread("idle"), id: "different-thread" } }));
+    await expect(target.startRealtime("thread-1", "offer", "cove")).rejects.toThrow("different task");
+    expect(internals.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("advertises Sol as the watch default when the V3 catalog supports it", async () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(async () => ({ voices: {
+      v1: ["cove", "sol"], v2: ["marin"], defaultV1: "cove", defaultV2: "marin",
+    } }));
+    const capability = await target.realtimeVoiceCapability();
+    expect(capability.voices).toEqual({
+      v1: ["cove", "sol"], v2: ["marin"], defaultV1: "sol", defaultV2: "marin",
+    });
+    expect(capability.entitlement).toBe("unverified");
+    expect(internals.request).toHaveBeenCalledExactlyOnceWith("thread/realtime/listVoices", {});
+  });
+
+  it("keeps voice entitlement unverified even when a coding model uses the GPT-Live name", async () => {
     const target = client();
     const internals = target as unknown as ClientInternals;
     internals.request = vi.fn((method: string) => {
@@ -1302,8 +1466,8 @@ describe("AppServerClient session delivery", () => {
     await expect(target.realtimeVoiceCapability()).resolves.toMatchObject({
       available: false,
       realtimeApiAvailable: true,
-      gptLiveModelAvailable: true,
-      blocker: "watch_transport_not_implemented",
+      entitlement: "unverified",
+      blocker: "session_not_verified",
     });
   });
 
@@ -1315,7 +1479,7 @@ describe("AppServerClient session delivery", () => {
     await expect(target.realtimeVoiceCapability()).resolves.toMatchObject({
       available: false,
       realtimeApiAvailable: false,
-      gptLiveModelAvailable: false,
+      entitlement: "unverified",
       blocker: "realtime_api_unavailable",
     });
     expect(internals.request).toHaveBeenCalledTimes(1);
@@ -2149,7 +2313,8 @@ describe("AppServerClient session delivery", () => {
 
     expect(snapshot.paragraphs.at(-1)?.text).toBe("Working safely");
     expect(outputThreads).toEqual(["thread-1"]);
-    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/list"]);
+    // Only the initial fresh load reads the voice timeline; the streamed delta uses the cache.
+    expect(methods).toEqual(["thread/read", "thread/turns/list", "thread/queue/list", "thread/timeline/list"]);
   });
 
   it("uploads explicit thumbs feedback without logs and tags the exact response", async () => {

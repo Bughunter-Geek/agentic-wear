@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { voiceChatToolsConfig, voiceChatToolInstructions } from "./voice-chat-tools-config.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -28,11 +29,14 @@ import type { CodexAppTurnSubmitter } from "./codex-app-tools-client.js";
 export type SessionView = {
   id: string;
   title: string;
+  /** Epoch milliseconds on the watch wire (native App Server threads use seconds). */
   updatedAt: number;
   status: "active" | "idle" | "error" | "notLoaded";
   ownedByWear: boolean;
   canAcceptDirectInput: boolean;
   watchReady: boolean;
+  model?: string | null;
+  modelProvider?: string;
 };
 
 export type ModelView = {
@@ -41,6 +45,8 @@ export type ModelView = {
   model: string;
   defaultReasoningEffort: string;
   supportedReasoningEfforts: string[];
+  isDefault?: boolean;
+  fastTier?: "priority" | null;
 };
 
 export type TurnSubmissionResult = {
@@ -54,6 +60,7 @@ export type TurnSubmissionResult = {
 
 export class ForeignThreadSelectionError extends Error {}
 export class ForeignThreadSteerError extends Error {}
+export class FastModeUnavailableError extends Error {}
 
 export type ActiveFollowUpMode = "queue" | "steer";
 
@@ -69,17 +76,14 @@ export type ExternalTurnDeliveryStatus = "delivered" | "waiting" | "retry";
 
 type ThreadSettings = { model: string | null; effort: string | null };
 
-/**
- * Diagnostic only. Audio remains on the encrypted recording/transcription path
- * until the watch has a separately reviewed full-duplex protocol.
- */
+/** Discovery is not entitlement: only a successfully negotiated call proves access. */
 export type RealtimeVoiceCapability = {
-  /** Always false until a reviewed encrypted full-duplex watch transport exists. */
   available: false;
   realtimeApiAvailable: boolean;
   voices: { v1: string[]; v2: string[]; defaultV1: string | null; defaultV2: string | null } | null;
-  gptLiveModelAvailable: boolean;
-  blocker: "realtime_api_unavailable" | "model_catalog_unavailable" | "gpt_live_model_unavailable" | "watch_transport_not_implemented";
+  transport: "webrtc";
+  entitlement: "unverified";
+  blocker: "realtime_api_unavailable" | "session_not_verified";
 };
 
 export type TerminalEvent = {
@@ -112,6 +116,8 @@ export type ChatParagraph = {
 export type ChatMessage = {
   id: string;
   turnId: string;
+  /** Exact request correlation: trusted cloud requests, or the App Server `clientId` of local user messages. */
+  watchRequestId?: string;
   role: "user" | "assistant";
   kind: "message" | "permission";
   text: string;
@@ -156,6 +162,8 @@ type EphemeralRevision = {
 type CachedChatMessage = {
   id: string;
   turnId: string;
+  /** The submitting client's message id (App Server `clientId`); Watch request UUID for Watch prompts. */
+  watchRequestId?: string;
   role: ChatMessage["role"];
   kind: ChatMessage["kind"];
   text: string;
@@ -249,6 +257,11 @@ export class AppServerClient {
   // are explicitly released after terminal delivery so mobile/desktop clients
   // can take over without inheriting a bridge-held subscription.
   private readonly controlledThreads = new Set<string>();
+  private readonly realtimeThreads = new Set<string>();
+  private readonly realtimeStopRequests = new Set<string>();
+  private readonly realtimeClosedDuringStop = new Set<string>();
+  private readonly realtimeReleaseAfterTurn = new Set<string>();
+  private readonly realtimeLeaseReleases = new Map<string, Promise<void>>();
   // Polling can observe more than one completed turn. Associate ownership with
   // the exact turn we started or steered so an older completion can never
   // release a newer in-progress turn.
@@ -264,6 +277,9 @@ export class AppServerClient {
   private readonly pendingPermissionMessages = new Map<string, { threadId: string; message: CachedChatMessage }>();
   private modelCache: ModelView[] | null = null;
   private modelCacheExpiresAt = 0;
+  private fastProtocolSupported = false;
+
+  get supportsFastMode(): boolean { return this.fastProtocolSupported; }
   private privateRestartTask: Promise<void> | null = null;
   private readonly staleRestartedThreadIds = new Set<string>();
   private activeThreadSynchronizations = 0;
@@ -403,6 +419,8 @@ export class AppServerClient {
     if (!supportsThreadQueue(initialized.userAgent)) {
       throw new Error(`Agentic Wear requires Codex App Server 0.150 or newer for safe cross-device queueing; connected server reported ${initialized.userAgent}`);
     }
+    this.fastProtocolSupported = supportsFastModeProtocol(initialized.userAgent);
+    this.modelCache = null; // Reconnect must refresh the host catalog.
     this.notify("initialized", {});
   }
 
@@ -425,8 +443,31 @@ export class AppServerClient {
     return response.data.filter(isTopLevelUserThread).map((thread) => this.sessionView(thread));
   }
 
-  async listModels(): Promise<ModelView[]> {
-    if (this.modelCache && Date.now() < this.modelCacheExpiresAt) return this.modelCache;
+  async createVoiceTask(cwd: string): Promise<SessionView> {
+    // A user-requested empty local task. Inherit native host defaults; do not
+    // override model, effort, sandbox or approval policy and do not run a turn.
+    const thread = responseWithThreadSchema.parse(await this.request("thread/start", {
+      cwd, ephemeral: false, serviceName: "Agentic Wear",
+    })).thread;
+    this.threadCache.set(thread.id, thread);
+    this.controlledThreads.add(thread.id);
+    try {
+      await this.request("thread/name/set", { threadId: thread.id, name: "Voice with Codex" });
+      thread.name = "Voice with Codex";
+      // Native paginated history has no source rollout before a first turn.
+      // Initialize it through the supported resume response before releasing
+      // the creating subscription; never fabricate a turn or a history file.
+      const initialized = responseWithThreadSchema.parse(await this.request("thread/resume", {
+        threadId: thread.id, excludeTurns: false,
+      })).thread;
+      if (initialized.id !== thread.id) throw new Error("Codex initialized a different voice task");
+      this.threadCache.set(thread.id, initialized);
+      return this.sessionView(initialized);
+    } finally { await this.releaseThread(thread.id); }
+  }
+
+  async listModels(forceRefresh = false): Promise<ModelView[]> {
+    if (!forceRefresh && this.modelCache && Date.now() < this.modelCacheExpiresAt) return this.modelCache;
     const models: ModelView[] = [];
     let cursor: string | null = null;
     for (let page = 0; page < 8; page += 1) {
@@ -444,6 +485,8 @@ export class AppServerClient {
           model: model.model,
           defaultReasoningEffort: model.defaultReasoningEffort,
           supportedReasoningEfforts: [...new Set(model.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort))],
+          ...(model.isDefault !== undefined ? { isDefault: model.isDefault } : {}),
+          ...(this.supportsFastMode ? { fastTier: model.serviceTiers?.some(tier => tier.id === "priority") ? "priority" as const : null } : {}),
         });
       }
       if (!response.nextCursor || response.data.length === 0) break;
@@ -454,49 +497,221 @@ export class AppServerClient {
     return this.modelCache;
   }
 
-  /**
-   * This is deliberately diagnostic-only. A voice list proves that the App
-   * Server has an experimental realtime surface, not that GPT-Live-1 is
-   * available to this subscription or that the watch can safely start a
-   * full-duplex transport.
-   */
-  async realtimeVoiceCapability(): Promise<RealtimeVoiceCapability> {
-    let voices: RealtimeVoiceCapability["voices"] = null;
-    try {
-      voices = realtimeVoiceListResponseSchema.parse(
-        await this.request("thread/realtime/listVoices", {}),
-      ).voices;
-    } catch {
-      return {
-        available: false,
-        realtimeApiAvailable: false,
-        voices: null,
-        gptLiveModelAvailable: false,
-        blocker: "realtime_api_unavailable",
-      };
-    }
+  /** Metadata only; never refresh credentials or modify account/global configuration. */
+  async fastModeCapability(cwd: string | null = null): Promise<{
+    supported: boolean; eligible: boolean; defaultModel: string | null;
+  }> {
+    if (!this.supportsFastMode) return { supported: false, eligible: false, defaultModel: null };
+    const [rawConfig, rawAccount] = await Promise.all([
+      this.request("config/read", { includeLayers: false, cwd }, 5_000),
+      this.request("account/read", { refreshToken: false }, 5_000),
+    ]);
+    const { config } = z.object({ config: z.object({
+      model: z.string().nullable().optional(), model_provider: z.string().nullable().optional(),
+      features: z.object({ fast_mode: z.boolean().optional() }).passthrough().optional(),
+    }).passthrough() }).passthrough().parse(rawConfig);
+    const { account } = z.object({ account: z.object({ type: z.string() }).passthrough().nullable() })
+      .passthrough().parse(rawAccount);
+    return { supported: true,
+      eligible: account?.type === "chatgpt" && (config.model_provider ?? "openai") === "openai" && config.features?.fast_mode !== false,
+      defaultModel: config.model ?? null };
+  }
 
+  private async serviceTierForSubmission(
+    fastMode: boolean | undefined, model: string | null, thread: CodexThread | null, cwd: string | null,
+  ): Promise<string | undefined> {
+    // Omission preserves the protocol of older watches and cross-chat tools.
+    if (fastMode === undefined) return undefined;
+    if (!this.supportsFastMode) throw new FastModeUnavailableError("This Codex host cannot set Fast or Standard safely. Update the bridge/host and refresh Sessions. Nothing was sent.");
+    if (!fastMode) return "default"; // Explicitly overrides an inherited priority/ultrafast default.
+    const capability = await this.fastModeCapability(cwd);
+    if (!capability.eligible || thread && thread.modelProvider !== "openai")
+      throw new FastModeUnavailableError("Fast is unavailable for this provider or sign-in. Turn Fast off to send using Standard. Nothing was sent.");
+    const selected = model ?? (typeof thread?.model === "string" ? thread.model : capability.defaultModel);
+    // Never infer entitlement from a model name or reuse a stale catalog for a paid request.
+    const catalog = await this.listModels(true);
+    const option = selected ? catalog.find(candidate => candidate.model === selected) : catalog.find(candidate => candidate.isDefault);
+    if (!option?.fastTier)
+      throw new FastModeUnavailableError("This model does not advertise Fast on this host. Refresh Sessions or turn Fast off. Nothing was sent; the model and reasoning were not changed.");
+    return option.fastTier;
+  }
+
+  async realtimeVoiceCapability(threadId?: string): Promise<RealtimeVoiceCapability> {
+    if (threadId) await this.readRealtimeThread(threadId);
     try {
-      const gptLiveModelAvailable = (await this.listModels())
-        .some((model) => model.id === "gpt-live-1" || model.model === "gpt-live-1");
-      return {
-        // A catalog entry is necessary but not sufficient: no realtime watch
-        // transport is implemented or enabled by this diagnostic.
-        available: false,
-        realtimeApiAvailable: true,
-        voices,
-        gptLiveModelAvailable,
-        blocker: gptLiveModelAvailable ? "watch_transport_not_implemented" : "gpt_live_model_unavailable",
-      };
+      const { voices } = realtimeVoiceListResponseSchema.parse(
+        await this.request("thread/realtime/listVoices", {}),
+      );
+      // Agentic Wear's default is Sol, requested by the user. Keep the
+      // upstream catalog intact; advertise the bridge-selected default only
+      // when that voice is supported by this host's V3/V1 catalog.
+      const watchVoices = voices.v1.includes("sol") ? { ...voices, defaultV1: "sol" } : voices;
+      return { available: false, realtimeApiAvailable: true, voices: watchVoices, transport: "webrtc",
+        entitlement: "unverified", blocker: "session_not_verified" };
     } catch {
-      return {
-        available: false,
-        realtimeApiAvailable: true,
-        voices,
-        gptLiveModelAvailable: false,
-        blocker: "model_catalog_unavailable",
-      };
+      return { available: false, realtimeApiAvailable: false, voices: null, transport: "webrtc",
+        entitlement: "unverified", blocker: "realtime_api_unavailable" };
     }
+  }
+
+  private realtimeHandler: ((method: string, params: unknown) => Promise<void>) | null = null;
+
+  setRealtimeHandler(handler: (method: string, params: unknown) => Promise<void>): void {
+    this.realtimeHandler = handler;
+  }
+
+  private turnStageHandler: ((threadId: string, stage: "turnStarted" | "firstDelta" | "turnCompleted") => void) | null = null;
+
+  setTurnStageHandler(handler: (threadId: string, stage: "turnStarted" | "firstDelta" | "turnCompleted") => void): void {
+    this.turnStageHandler = handler;
+  }
+
+  private async readRealtimeThread(threadId: string): Promise<CodexThread> {
+    let thread: CodexThread;
+    try {
+      thread = responseWithThreadSchema.parse(await this.request("thread/read", {
+        threadId, includeTurns: false,
+      }, 10_000)).thread;
+    } catch (error) {
+      if (error instanceof Error && /thread not loaded|thread.*not found|no rollout found/iu.test(error.message)) {
+        throw new Error("This chat is not available on the local Codex voice bridge. Cloud tasks and your dot need a supported host connection; select a local task for this voice route.");
+      }
+      throw error;
+    }
+    if (thread.id !== threadId) throw new Error("Codex returned a different task. Voice was not started.");
+    if (thread.status.type === "active") throw new Error("This task is busy. Finish its active turn before starting voice.");
+    if (thread.status.type === "systemError") throw new Error("This task needs recovery before starting voice.");
+    return thread;
+  }
+
+  async startRealtime(threadId: string, sdp: string, voice: string, fastMode?: boolean): Promise<void> {
+    // The closed notification may reach the watch before its old subscription
+    // finishes releasing. Never let that cleanup unsubscribe a newer call.
+    const releasing = this.realtimeLeaseReleases.get(threadId);
+    if (releasing) await releasing;
+    else if (this.realtimeReleaseAfterTurn.has(threadId)) await this.releaseRealtimeLease(threadId);
+    if (this.realtimeReleaseAfterTurn.has(threadId))
+      throw new Error("Work from the previous voice call still holds this task. Let it finish and check the task in Codex before reconnecting.");
+    const current = await this.readRealtimeThread(threadId);
+    const serviceTier = await this.serviceTierForSubmission(fastMode, null, current, typeof current.cwd === "string" ? current.cwd : null);
+    // Only release this connection's already-idle subscription. Never restart a
+    // process, stop a turn, or force another client's writer to attach tools.
+    if (this.controlledThreads.has(threadId)) await this.releaseThread(threadId);
+    const config = voiceChatToolsConfig(threadId);
+    // Empty Codex threads can forget their loaded effort when unsubscribed.
+    // Carry forward the observed selection, never choose a replacement.
+    if (typeof current.reasoningEffort === "string") config.model_reasoning_effort = current.reasoningEffort;
+    responseWithThreadSchema.parse(await this.request("thread/resume", {
+      threadId, excludeTurns: true, config,
+    }));
+    this.realtimeThreads.add(threadId);
+    try {
+      if (serviceTier !== undefined) await this.request("thread/settings/update", { threadId, serviceTier });
+      let voiceToolsAvailable = false;
+      try {
+        const inventory = z.object({ data: z.array(z.object({
+          name: z.string(), tools: z.record(z.string(), z.unknown()),
+        }).passthrough()) }).passthrough().parse(await this.request("mcpServerStatus/list", {
+          threadId, serverName: "agentic_wear_voice_chats",
+        }, 5_000));
+        const tools = inventory.data.find(server => server.name === "agentic_wear_voice_chats")?.tools ?? {};
+        voiceToolsAvailable = ["find_local_codex_chats", "prepare_local_codex_message", "send_local_codex_message"]
+          .every(name => Object.hasOwn(tools, name));
+      } catch { /* An auxiliary catalog failure must not remove ordinary voice. */ }
+      if (!voiceToolsAvailable) console.warn(JSON.stringify({ level: "warn",
+        message: "This loaded Codex runtime did not attach cross-chat voice tools; ordinary voice remains available." }));
+      await this.request("thread/realtime/start", {
+        threadId, transport: { type: "webrtc", sdp }, outputModality: "audio", voice,
+        version: "v3", includeStartupContext: true,
+        realtimeStartInstructions: voiceChatToolInstructions(voiceToolsAvailable),
+      });
+    } catch (error) {
+      await this.releaseRealtimeLease(threadId);
+      throw error;
+    }
+  }
+
+  async stopRealtime(threadId: string): Promise<void> {
+    this.realtimeStopRequests.add(threadId);
+    try {
+      await this.request("thread/realtime/stop", { threadId });
+      await this.releaseRealtimeLease(threadId);
+    } finally {
+      try {
+        // A native closed event confirms our call ended even if the stop RPC's
+        // acknowledgment was lost. Wait for the RPC to settle before cleanup.
+        if (this.realtimeClosedDuringStop.delete(threadId)) await this.releaseRealtimeLease(threadId);
+      } finally { this.realtimeStopRequests.delete(threadId); }
+    }
+  }
+
+  async releaseEndedRealtimeLeases(): Promise<void> {
+    for (const threadId of this.realtimeReleaseAfterTurn) await this.releaseRealtimeLease(threadId);
+  }
+
+  private releaseRealtimeLease(threadId: string): Promise<void> {
+    const pending = this.realtimeLeaseReleases.get(threadId);
+    if (pending) return pending;
+    if (!this.realtimeThreads.delete(threadId) && !this.realtimeReleaseAfterTurn.has(threadId)) return Promise.resolve();
+    this.realtimeReleaseAfterTurn.add(threadId);
+    const operation = this.performRealtimeLeaseRelease(threadId).finally(() => {
+      this.realtimeLeaseReleases.delete(threadId);
+    });
+    this.realtimeLeaseReleases.set(threadId, operation);
+    return operation;
+  }
+
+  private async performRealtimeLeaseRelease(threadId: string): Promise<void> {
+    // Voice may have delegated work that must continue after the audio call.
+    // Retain that task until terminal delivery or the next bounded lease check.
+    try {
+      const thread = await this.readThread(threadId, true);
+      if (thread.status.type === "active") return;
+    } catch { return; } // Retry at the next lease check or shutdown.
+    if (await this.releaseThread(threadId)) this.realtimeReleaseAfterTurn.delete(threadId);
+    await this.restartPrivateAppServer();
+  }
+
+  async getVoiceChat(threadId: string): Promise<SessionView> {
+    const thread = responseWithThreadSchema.parse(await this.request("thread/read", {
+      threadId, includeTurns: false,
+    })).thread;
+    if (thread.id !== threadId || thread.parentThreadId || thread.ephemeral === true)
+      throw new Error("Destination is not an existing local user chat. Nothing was sent.");
+    return this.sessionView(thread);
+  }
+
+  async listVoiceChats(): Promise<SessionView[]> {
+    const chats = new Map<string, SessionView>();
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    for (let page = 0; page < 20; page++) {
+      const result = threadListResponseSchema.parse(await this.request("thread/list", {
+        limit: 100, cursor, archived: false, sortKey: "recency_at", sortDirection: "desc",
+        useStateDbOnly: true,
+      }));
+      for (const thread of result.data) chats.set(thread.id, this.sessionView(thread));
+      cursor = result.nextCursor;
+      if (cursor === null) return [...chats.values()];
+      if (seen.has(cursor)) throw new Error("Codex repeated its destination cursor. Nothing was sent.");
+      seen.add(cursor);
+    }
+    throw new Error("Too many local chats to resolve safely in one request. Nothing was sent.");
+  }
+
+  /** Queue only: preserves the destination writer, settings and active turn. */
+  async queueVoiceMessage(threadId: string, text: string, messageId: string): Promise<{ threadId: string; queuedSubmissionId: string }> {
+    const current = responseWithThreadSchema.parse(await this.request("thread/read", {
+      threadId, includeTurns: false,
+    })).thread;
+    if (current.id !== threadId) throw new Error("Destination identity changed. Nothing was sent.");
+    if (current.status.type === "systemError") throw new Error("Destination needs recovery. Nothing was sent.");
+    const accepted = queuedSubmissionResponseSchema.parse(await this.request("thread/queue/add", {
+      threadId, input: [textInput(text)], clientUserMessageId: messageId,
+    }));
+    if (accepted.queuedSubmission.clientUserMessageId !== messageId)
+      throw new Error("Codex returned an unexpected message identity. Delivery is uncertain; do not resend.");
+    return { threadId, queuedSubmissionId: accepted.queuedSubmission.id };
   }
 
   async submitTurn(
@@ -508,6 +723,7 @@ export class AppServerClient {
     clientUserMessageId: string | null = null,
     _beforeExternalDispatch?: (baseline: ExternalTurnBaseline, mode: ActiveFollowUpMode) => Promise<void>,
     followUpAction: FollowUpAction = "default",
+    fastMode?: boolean,
   ): Promise<TurnSubmissionResult> {
     let thread: CodexThread;
     let startQueuedSubmission = false;
@@ -515,7 +731,9 @@ export class AppServerClient {
     let activeFollowUpMode: ActiveFollowUpMode | null = null;
     let previousTurnId: string | null = null;
     const messageId = clientUserMessageId ?? randomUUID();
+    let serviceTier: string | undefined;
     if (threadId === null) {
+      serviceTier = await this.serviceTierForSubmission(fastMode, model, null, defaultCwd);
       const raw = await this.request("thread/start", {
         cwd: defaultCwd,
         approvalPolicy: "on-request",
@@ -523,13 +741,14 @@ export class AppServerClient {
         serviceName: "Agentic Wear",
         ephemeral: false,
         model,
+        ...(serviceTier !== undefined ? { serviceTier } : {}),
         config: { model_reasoning_effort: effort },
       });
       thread = responseWithThreadSchema.parse(raw).thread;
       this.threadCache.set(thread.id, thread);
       this.watchOwnedThreadIds.add(thread.id);
       this.controlledThreads.add(thread.id);
-      const stickySettings: Record<string, unknown> = { threadId: thread.id, effort };
+      const stickySettings: Record<string, unknown> = { threadId: thread.id, effort, ...(serviceTier !== undefined ? { serviceTier } : {}) };
       if (model !== null) stickySettings.model = model;
       try {
         await this.request("thread/settings/update", stickySettings);
@@ -544,6 +763,7 @@ export class AppServerClient {
           clientUserMessageId: messageId,
           model,
           effort,
+          ...(serviceTier !== undefined ? { serviceTier } : {}),
         }));
         this.controlledTurnIds.set(thread.id, started.turn.id);
         this.watchReadyThreads.add(thread.id);
@@ -561,6 +781,7 @@ export class AppServerClient {
     } else {
       thread = await this.retryThreadSynchronization(threadId, async () => {
         const current = await this.readThread(threadId, true);
+        serviceTier = await this.serviceTierForSubmission(fastMode, model, current, typeof current.cwd === "string" ? current.cwd : defaultCwd);
         if (current.status.type === "notLoaded") {
           const latest = await this.latestTurn(current.id);
           previousTurnId = latest?.id ?? null;
@@ -570,10 +791,10 @@ export class AppServerClient {
               // Settings are sticky for the next turn and do not mutate the
               // already-running inference. Apply them before queueing so the
               // Watch selection is captured without a second client relay.
-              await this.updateForeignThreadSettings(current.id, model, effort);
+              await this.updateForeignThreadSettings(current.id, model, effort, serviceTier);
             } else {
               try {
-                await this.steerControlledTurn(current.id, latest.id, text, model, effort, messageId, true);
+                await this.steerControlledTurn(current.id, latest.id, text, model, effort, messageId, true, serviceTier);
               } catch (error) {
                 if (!(error instanceof ForeignThreadSteerError) || followUpAction !== "default") throw error;
                 // Default Send may enqueue when the owning process cannot be
@@ -590,15 +811,15 @@ export class AppServerClient {
           if (followUpAction === "steer") {
             throw new Error("Codex did not expose an active turn to steer");
           }
-          if (!await this.acquireDormantThread(current.id, model, effort)) {
+          if (!await this.acquireDormantThread(current.id, model, effort, serviceTier)) {
             // Another client can retain an idle writer. The durable queue is
             // still canonical and uses the Watch UUID as its idempotency key;
             // that owning client will start it with the sticky selection.
-            await this.updateForeignThreadSettings(current.id, model, effort);
+            await this.updateForeignThreadSettings(current.id, model, effort, serviceTier);
             this.watchReadyThreads.add(current.id);
             return current;
           }
-          await this.updateThreadSettings(current.id, model, effort);
+          await this.updateThreadSettings(current.id, model, effort, serviceTier);
           startQueuedSubmission = true;
           return current;
         }
@@ -606,14 +827,14 @@ export class AppServerClient {
           activeFollowUpMode = this.resolveFollowUpMode(followUpAction);
           const controlledTurnId = this.controlledTurnIds.get(current.id);
           if (activeFollowUpMode === "queue") {
-            await this.updateThreadSettings(current.id, model, effort);
+            await this.updateThreadSettings(current.id, model, effort, serviceTier);
           } else {
             const latest = controlledTurnId ? null : await this.latestTurn(current.id);
             const activeTurnId = controlledTurnId ?? (
               latest && await this.turnIsSteerable(current.id, latest) ? latest.id : null
             );
             if (!activeTurnId) throw new Error("Codex did not expose the active turn to steer");
-            await this.steerControlledTurn(current.id, activeTurnId, text, model, effort, messageId);
+            await this.steerControlledTurn(current.id, activeTurnId, text, model, effort, messageId, false, serviceTier);
             this.controlledThreads.add(current.id);
             this.controlledTurnIds.set(current.id, activeTurnId);
             acceptedState = "running";
@@ -623,6 +844,7 @@ export class AppServerClient {
         const stickySettings: Record<string, unknown> = {
           threadId: current.id,
           effort,
+          ...(serviceTier !== undefined ? { serviceTier } : {}),
         };
         if (model !== null) stickySettings.model = model;
         await this.request("thread/settings/update", stickySettings);
@@ -677,9 +899,9 @@ export class AppServerClient {
     return action === "default" ? this.readFollowUpMode() : action;
   }
 
-  private async updateForeignThreadSettings(threadId: string, model: string | null, effort: string): Promise<void> {
+  private async updateForeignThreadSettings(threadId: string, model: string | null, effort: string, serviceTier?: string): Promise<void> {
     try {
-      await this.updateThreadSettings(threadId, model, effort);
+      await this.updateThreadSettings(threadId, model, effort, serviceTier);
     } catch (error) {
       // A private App Server can read and queue a foreign-owned thread, but
       // settings/update requires its local actor and reports "thread not found".
@@ -687,8 +909,10 @@ export class AppServerClient {
       // its writer. Only queue if the canonical persisted selection already fits.
       if (!(error instanceof Error) || !/^thread not found(?::|$)/iu.test(error.message)) throw error;
       const existing = this.readThreadSettings(threadId);
-      if (existing && existing.effort === effort && (model === null || existing.model === model)) return;
-      throw new ForeignThreadSelectionError(`This chat's owner must apply the Watch selection before sending. In Codex, select ${model ?? "the current model"} with ${effort} reasoning for this chat, then retry. Your prompt has not been sent.`);
+      if (serviceTier === undefined && existing && existing.effort === effort && (model === null || existing.model === model)) return;
+      // Persisted thread metadata does not prove the effective tier. Do not
+      // guess, fall back, or queue a tier-bearing request through a foreign owner.
+      throw new ForeignThreadSelectionError(`This chat's owner must apply the Watch selection before sending. In Codex, select ${model ?? "the current model"} with ${effort} reasoning${serviceTier !== undefined ? ` and ${serviceTier === "priority" ? "Fast" : "Standard"}` : ""} for this chat, then retry. Your prompt has not been sent.`);
     }
   }
 
@@ -696,8 +920,9 @@ export class AppServerClient {
     threadId: string,
     model: string | null,
     effort: string,
+    serviceTier?: string,
   ): Promise<void> {
-    const stickySettings: Record<string, unknown> = { threadId, effort };
+    const stickySettings: Record<string, unknown> = { threadId, effort, ...(serviceTier !== undefined ? { serviceTier } : {}) };
     if (model !== null) stickySettings.model = model;
     await this.request("thread/settings/update", stickySettings);
   }
@@ -710,10 +935,11 @@ export class AppServerClient {
     effort: string,
     messageId: string,
     foreign = false,
+    serviceTier?: string,
   ): Promise<void> {
-    const stickySettings: Record<string, unknown> = { threadId, effort };
+    const stickySettings: Record<string, unknown> = { threadId, effort, ...(serviceTier !== undefined ? { serviceTier } : {}) };
     if (model !== null) stickySettings.model = model;
-    if (foreign) await this.updateForeignThreadSettings(threadId, model, effort);
+    if (foreign) await this.updateForeignThreadSettings(threadId, model, effort, serviceTier);
     else await this.request("thread/settings/update", stickySettings);
     const steered = await this.retryTransientThreadOperation(threadId, async () => {
       try {
@@ -739,11 +965,13 @@ export class AppServerClient {
     threadId: string,
     model: string | null,
     effort: string,
+    serviceTier?: string,
   ): Promise<boolean> {
     const resumeParams: Record<string, unknown> = {
       threadId,
       excludeTurns: true,
       config: { model_reasoning_effort: effort },
+      ...(serviceTier !== undefined ? { serviceTier } : {}),
     };
     if (model !== null) resumeParams.model = model;
     try {
@@ -929,6 +1157,66 @@ export class AppServerClient {
     throw new Error("Codex did not synchronize this session");
   }
 
+  /**
+   * Live voice speech is stored as realtime transcript segments, not turn items, so a
+   * turns-only history hides what the user said in a call. The timeline orders both;
+   * merge the recent segments into the turn messages by that position. History without
+   * them stays usable if this experimental read fails.
+   */
+  private async withRealtimeTranscript(
+    threadId: string,
+    turnMessages: CachedChatMessage[],
+    oldestTurnId: string | undefined,
+  ): Promise<CachedChatMessage[]> {
+    const positions = new Map<string, number>();
+    const segments: { position: number; message: CachedChatMessage }[] = [];
+    try {
+      let cursor: string | null = null;
+      for (let page = 0; page < MAX_TIMELINE_PAGES; page += 1) {
+        const response = timelineListResponseSchema.parse(await this.request("thread/timeline/list", {
+          threadId, limit: TIMELINE_PAGE_SIZE, ...(cursor ? { cursor } : {}),
+        }));
+        let reachedOldestTurn = false;
+        for (const entry of response.data) {
+          if (entry.type === "item" && entry.item?.id) positions.set(entry.item.id, entry.position);
+          if (oldestTurnId !== undefined && (entry.turnId === oldestTurnId || entry.turn_id === oldestTurnId)) reachedOldestTurn = true;
+          const item = entry.item;
+          if (entry.type !== "realtime" || item?.type !== "transcriptSegment" || !item.id || !item.role) continue;
+          const text = item.text?.trim();
+          if (!text) continue;
+          segments.push({ position: entry.position, message: {
+            id: item.id,
+            turnId: `realtime:${item.realtimeSessionId ?? "voice"}`,
+            role: item.role,
+            kind: "message",
+            text: boundedChatText(text),
+            phase: item.role === "assistant" ? "final_answer" : "unknown",
+            approvalId: null,
+            canControl: false,
+            resolved: false,
+          } });
+        }
+        cursor = response.nextCursor ?? null;
+        if (!cursor || reachedOldestTurn) break;
+      }
+    } catch {
+      return turnMessages;
+    }
+    if (segments.length === 0) return turnMessages;
+    segments.sort((a, b) => a.position - b.position);
+    const merged: CachedChatMessage[] = [];
+    let next = 0;
+    for (const message of turnMessages) {
+      const position = positions.get(message.id);
+      if (position !== undefined) {
+        while (next < segments.length && segments[next]!.position < position) merged.push(segments[next++]!.message);
+      }
+      merged.push(message);
+    }
+    while (next < segments.length) merged.push(segments[next++]!.message);
+    return merged;
+  }
+
   private async loadFreshChatSnapshot(threadId: string): Promise<ChatSnapshot> {
     // A normal Watch selection always comes from listSessions(), so its
     // metadata is already cached. Reuse that observation-only record: calling
@@ -984,12 +1272,13 @@ export class AppServerClient {
       // unavailable. Keep the state gray rather than failing the whole chat.
       this.watchReadyThreads.delete(threadId);
     }
-    const messages = response.data
+    const turnMessages = response.data
       .slice()
       .reverse()
       .flatMap((turn) => turn.items
         .map((item) => chatMessageFromItem(turn.id, item))
         .filter((message): message is CachedChatMessage => message !== null));
+    const messages = await this.withRealtimeTranscript(threadId, turnMessages, response.data.at(-1)?.id);
     const optimistic = this.optimisticUserMessages.get(threadId);
     if (optimistic) {
       const canonicalIds = new Set(messages.map(({ id }) => id));
@@ -1144,7 +1433,8 @@ export class AppServerClient {
     // Best effort while the transport can still receive RPC responses. Threads
     // left in this set failed an earlier terminal release and get one final
     // bounded retry before disconnecting.
-    for (const threadId of this.controlledThreads) await this.releaseThread(threadId);
+    for (const threadId of new Set([...this.controlledThreads, ...this.realtimeThreads, ...this.realtimeReleaseAfterTurn]))
+      await this.releaseThread(threadId);
     this.stopping = true;
     this.lines?.close();
     this.lines = null;
@@ -1176,6 +1466,22 @@ export class AppServerClient {
   }
 
   private async handleNotification(method: string, params: unknown): Promise<void> {
+    if (method.startsWith("thread/realtime/")) {
+      try {
+        await this.realtimeHandler?.(method, params);
+      } finally {
+        // Relay delivery failure must not retain our ended voice writer.
+        if (method === "thread/realtime/closed") {
+          const event = z.object({ threadId: z.string() }).safeParse(params);
+          if (event.success) {
+            if (this.realtimeStopRequests.has(event.data.threadId)) {
+              if (this.realtimeThreads.has(event.data.threadId)) this.realtimeClosedDuringStop.add(event.data.threadId);
+            } else await this.releaseRealtimeLease(event.data.threadId);
+          }
+        }
+      }
+      return;
+    }
     if (method === "thread/started") {
       const event = threadStartedSchema.parse(params);
       this.threadCache.set(event.thread.id, event.thread);
@@ -1183,6 +1489,7 @@ export class AppServerClient {
     }
     if (method === "turn/started") {
       const event = turnStartedSchema.parse(params);
+      if (event.threadId) this.turnStageHandler?.(event.threadId, "turnStarted");
       if (event.threadId && this.updateCachedChatStatus(event.threadId, "active")) {
         await this.onAgentOutput(event.threadId);
       }
@@ -1193,6 +1500,7 @@ export class AppServerClient {
       const revision = this.ephemeralRevisions.get(event.threadId);
       if (revision) revision.text += event.delta;
       else {
+        this.turnStageHandler?.(event.threadId, "firstDelta");
         this.updateCachedAgentMessage(event.threadId, event.turnId, event.itemId, event.delta);
         await this.onAgentOutput(event.threadId);
       }
@@ -1220,7 +1528,9 @@ export class AppServerClient {
     const terminal = parseTerminalNotification(method, params);
     if (terminal) {
       const event = terminal;
-      const shouldRelease = this.controlledTurnIds.get(event.threadId) === event.turn.id;
+      this.turnStageHandler?.(event.threadId, "turnCompleted");
+      const shouldRelease = this.controlledTurnIds.get(event.threadId) === event.turn.id &&
+        !this.realtimeThreads.has(event.threadId);
       const internalCancellation = isInternalCancellationFailure(event.turn.status, event.turn.error?.message);
       this.updateCachedChatStatus(
         event.threadId,
@@ -1266,6 +1576,8 @@ export class AppServerClient {
         if (shouldRelease) {
           await this.releaseThread(event.threadId);
           await this.restartPrivateAppServer();
+        } else if (this.realtimeReleaseAfterTurn.has(event.threadId)) {
+          await this.releaseRealtimeLease(event.threadId);
         }
       }
       return;
@@ -1455,7 +1767,8 @@ export class AppServerClient {
   }
 
   private restartPrivateAppServer(): Promise<void> {
-    if (!this.child || this.stopping) return Promise.resolve();
+    if (!this.child || this.stopping || this.realtimeThreads.size > 0 || this.realtimeReleaseAfterTurn.size > 0)
+      return Promise.resolve();
     if (this.privateRestartTask) return this.privateRestartTask;
     this.privateRestartTask = this.performPrivateAppServerRestart().finally(() => {
       this.privateRestartTask = null;
@@ -1535,6 +1848,7 @@ export class AppServerClient {
     const message: CachedChatMessage = {
       id: messageId,
       turnId,
+      watchRequestId: messageId,
       role: "user",
       kind: "message",
       text: boundedChatText(text),
@@ -1699,6 +2013,8 @@ export class AppServerClient {
   private sessionView(thread: CodexThread): SessionView {
     return {
       id: thread.id,
+      ...(typeof thread.model === "string" ? { model: thread.model } : {}),
+      ...(typeof thread.modelProvider === "string" ? { modelProvider: thread.modelProvider } : {}),
       title: threadTitle(thread),
       updatedAt: thread.updatedAt * 1_000,
       status: thread.status.type === "systemError" ? "error" : thread.status.type,
@@ -1770,6 +2086,11 @@ export function isTopLevelUserThread(thread: CodexThread): boolean {
 
 export function isTerminalNewerThan(completedAt: number | null | undefined, observedAtMs: number): boolean {
   return completedAt != null && completedAt * 1_000 >= Math.floor(observedAtMs / 1_000) * 1_000;
+}
+
+export function supportsFastModeProtocol(userAgent: string): boolean {
+  const version = /(?:^|\D)(\d+)\.(\d+)\.(\d+)(?:\D|$)/u.exec(userAgent);
+  return version !== null && (Number(version[1]) > 0 || Number(version[2]) >= 161);
 }
 
 export function supportsThreadQueue(userAgent: string): boolean {
@@ -1864,6 +2185,7 @@ function chatMessageFromItem(
   return {
     id: item.id,
     turnId,
+    ...(item.clientId ? { watchRequestId: item.clientId } : {}),
     role: "user",
     kind: "message",
     text: boundedChatText(text),
@@ -2005,6 +2327,24 @@ const STALE_SERVER_RESTART_COOLDOWN_MS = 30_000;
 const EXTERNAL_DELIVERY_GRACE_MS = 60_000;
 const MAX_EXTERNAL_RECONCILIATION_TURNS = 20;
 const MAX_CHAT_HISTORY_TURNS = 6;
+const TIMELINE_PAGE_SIZE = 100;
+const MAX_TIMELINE_PAGES = 3;
+const timelineListResponseSchema = z.object({
+  data: z.array(z.object({
+    type: z.string(),
+    position: z.number().int().nonnegative(),
+    turnId: z.string().optional(),
+    turn_id: z.string().optional(),
+    item: z.object({
+      id: z.string().optional(),
+      type: z.string(),
+      role: z.enum(["user", "assistant"]).optional(),
+      text: z.string().optional(),
+      realtimeSessionId: z.string().optional(),
+    }).passthrough().optional(),
+  }).passthrough()),
+  nextCursor: z.string().nullable().optional(),
+}).passthrough();
 const MAX_CHAT_PARAGRAPHS = 5;
 const MAX_CHAT_MESSAGES = 12;
 const MAX_CACHED_CHAT_MESSAGES = 12;

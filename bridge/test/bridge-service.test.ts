@@ -3,6 +3,99 @@ import { ForeignThreadSelectionError } from "../src/app-server-client.js";
 import { BridgeService, publicError, publicRequestError } from "../src/bridge-service.js";
 
 describe("BridgeService App Server transport", () => {
+  it("keeps a live call's chat updating past the watch window and refreshes it when the call stops", async () => {
+    vi.useFakeTimers();
+    try {
+      const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+      const sendChatSnapshot = vi.fn().mockResolvedValue(undefined);
+      Object.assign(service, {
+        appServer: { realtimeVoiceCapability: vi.fn().mockResolvedValue({ realtimeApiAvailable: true, voices: { v1: ["marin"] } }) },
+        liveVoice: { start: vi.fn().mockResolvedValue(undefined), heartbeat: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) },
+        sendChatSnapshot,
+        watchedThreadId: null, watchAcceptedAt: 0, watchExpiresAt: 0,
+      });
+      const handle = (payload: unknown) => (service.handleWatchPayload as (value: unknown) => Promise<void>).call(service, payload);
+      vi.setSystemTime(1_000_000);
+      await handle({ version: 1, kind: "live.start", requestId: "r1", callId: "call-1", threadId: "thread-1", sdp: "v=0 m=audio", voice: "marin" });
+      expect(service.watchedThreadId).toBe("thread-1");
+      vi.setSystemTime(1_100_000); // past the 90 s chat window
+      await handle({ version: 1, kind: "live.heartbeat", requestId: "r2", callId: "call-1" });
+      expect(service.watchExpiresAt).toBe(1_190_000);
+      await handle({ version: 1, kind: "live.stop", requestId: "r3", callId: "call-1" });
+      expect(sendChatSnapshot).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(750);
+      expect(sendChatSnapshot).toHaveBeenCalledWith("thread-1", undefined, true);
+      await handle({ version: 1, kind: "live.stop", requestId: "r4", callId: "call-1" });
+      await vi.advanceTimersByTimeAsync(750);
+      expect(sendChatSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reuses the Codex voice catalog across live.start calls for 60 s, refetching once for a missing voice and after expiry", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const catalog = (...voices: string[]) => ({ realtimeApiAvailable: true, voices: { v1: voices } });
+      const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+      const realtimeVoiceCapability = vi.fn()
+        .mockResolvedValueOnce(catalog("marin"))
+        .mockResolvedValueOnce(catalog("marin", "sol"))
+        .mockResolvedValueOnce(catalog("marin", "sol"))
+        .mockResolvedValueOnce(catalog("marin", "sol"));
+      const start = vi.fn().mockResolvedValue(undefined);
+      const send = vi.fn().mockResolvedValue(undefined);
+      Object.assign(service, {
+        appServer: { realtimeVoiceCapability },
+        liveVoice: { start, heartbeat: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) },
+        send,
+        watchedThreadId: null, watchAcceptedAt: 0, watchExpiresAt: 0,
+      });
+      const handle = (callId: string, voice: string) => (service.handleWatchPayload as (value: unknown) => Promise<void>).call(service,
+        { version: 1, kind: "live.start", requestId: `r-${callId}`, callId, threadId: "thread-1", sdp: "v=0 m=audio", voice });
+      const logged = () => log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((entry) => entry.message === "live.voice.capability");
+
+      vi.setSystemTime(1_000_000);
+      await handle("call-1", "marin");
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(1);
+      expect(logged()).toEqual([expect.objectContaining({ level: "info", callId: "call-1", cached: false, durationMs: expect.any(Number) })]);
+
+      vi.setSystemTime(1_030_000); // within 60 s: reused
+      await handle("call-2", "marin");
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(1);
+      expect(logged()[1]).toEqual(expect.objectContaining({ callId: "call-2", cached: true }));
+      expect(start).toHaveBeenCalledTimes(2);
+
+      vi.setSystemTime(1_040_000); // a voice missing from the cached list: exactly one fresh fetch
+      await handle("call-3", "sol");
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(2);
+      expect(logged()[2]).toEqual(expect.objectContaining({ callId: "call-3", cached: false }));
+      expect(start).toHaveBeenLastCalledWith("call-3", "thread-1", "v=0 m=audio", "sol", undefined);
+      await handle("call-4", "sol"); // the refreshed catalog is now the cached one
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(2);
+
+      // Still missing after the fresh fetch: one fetch, then the existing error; nothing starts.
+      await handle("call-5", "cedar");
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(3);
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: "live.error", requestId: "r-call-5", callId: "call-5",
+        message: "Codex voice or the selected voice is unavailable on this host." }));
+      expect(start).toHaveBeenCalledTimes(4);
+
+      vi.setSystemTime(1_040_000 + 59_999); // the entry refreshed at 1_040_000 is still fresh
+      await handle("call-6", "sol");
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(3);
+      vi.setSystemTime(1_040_000 + 60_000); // expired: refetch
+      await handle("call-7", "sol");
+      expect(realtimeVoiceCapability).toHaveBeenCalledTimes(4);
+      expect(logged().at(-1)).toEqual(expect.objectContaining({ callId: "call-7", cached: false }));
+    } finally {
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not block a prompt behind an unfinished chat refresh", async () => {
     let finishRefresh!: () => void;
     const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
@@ -116,6 +209,7 @@ describe("BridgeService App Server transport", () => {
         runSocket: vi.fn().mockResolvedValue(undefined),
       },
       appServer: { connect, close: vi.fn() },
+      liveVoice: { close: vi.fn().mockResolvedValue(undefined) },
       controller: new AbortController(),
       transcriber: {},
       assertWatchPublicKey: vi.fn(),
@@ -310,7 +404,7 @@ describe("BridgeService App Server transport", () => {
     }));
   });
 
-  it("retries an encrypted pending prompt on the original thread with the same idempotency key", async () => {
+  it.each([undefined, false, true])("retries an encrypted pending prompt with its exact tier and idempotency key (%s)", async (fastMode) => {
     const send = vi.fn().mockResolvedValue(undefined);
     const persistPendingTurns = vi.fn().mockResolvedValue(undefined);
     const submitTurn = vi.fn().mockResolvedValue({
@@ -329,6 +423,7 @@ describe("BridgeService App Server transport", () => {
           model: "gpt-5.6-luna",
           effort: "max",
           createdAt: 1_787_900_000_000,
+          ...(fastMode !== undefined ? { fastMode } : {}),
         },
         sealed: { nonce: "nonce", ciphertext: "ciphertext" },
       },
@@ -355,6 +450,7 @@ describe("BridgeService App Server transport", () => {
       "watch-pending-1",
       expect.any(Function),
       "default",
+      ...(fastMode !== undefined ? [fastMode] as const : []),
     );
     expect(pendingTurns.size).toBe(0);
     expect(persistPendingTurns).toHaveBeenCalledOnce();
@@ -422,6 +518,15 @@ describe("BridgeService App Server transport", () => {
 });
 
 describe("publicRequestError", () => {
+  it("explains a voice writer conflict without blaming a still-running turn or losing task identity", () => {
+    expect(publicRequestError(new Error("thread private-task-id already has an active writer"), "live.start"))
+      .toBe("Another Codex client holds this task's writer. Voice did not start. Restore the shared Desktop/bridge connection, then reconnect to this task.");
+  });
+
+  it("does not encourage another call when its voice acknowledgment timed out", () => {
+    expect(publicRequestError(new Error("thread/realtime/start timed out"), "live.start"))
+      .toBe("Codex did not confirm this voice request. Check the call in Codex before reconnecting.");
+  });
   it("preserves a long safe error while redacting credential-shaped values", () => {
     const safeDetail = `The full diagnostic remains available. ${"detail ".repeat(120)}`;
 
@@ -468,4 +573,50 @@ describe("publicRequestError", () => {
     expect(publicRequestError(new Error("bs1 was cancelled"), "chat.watch"))
       .toBe("Codex briefly cancelled the chat-history sync after the bridge retried it. Agentic Wear kept your selection and draft; refresh sessions and retry.");
   });
+});
+
+ describe("transcription timing privacy", () => {
+  it("logs only phase metadata while preserving private draft response", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, { transcriber: { defaultBackend: "phonon", transcribe: vi.fn().mockResolvedValue("uh, private-example") }, send, config: { defaultCwd: "/private-cwd" } });
+    try {
+      const create = service.createTranscription as (payload: unknown) => Promise<void>;
+      await create.call(service, { kind: "transcription.create", requestId: "private-request-id", threadId: "private-thread-id", mimeType: "audio/aac", audioBase64: Buffer.alloc(2048).toString("base64") });
+      const messages = JSON.stringify(log.mock.calls);
+      expect(messages).toContain("transcription.bridge.timing");
+      for (const secret of ["private-example", "private-request-id", "private-thread-id", "/private-cwd", "audioBase64"]) expect(messages).not.toContain(secret);
+      expect(send.mock.calls[0]?.[0]).toMatchObject({ text: "private-example", rawText: "uh, private-example" });
+    } finally { log.mockRestore(); }
+  });
+ });
+
+describe("new local draft protocol versus legacy watch", () => {
+ it("retains raw recognition and never invokes Codex for new local editing", async () => {
+  const send=vi.fn().mockResolvedValue(undefined);
+  const reviseDraft=vi.fn();
+  const rewrite=vi.fn().mockResolvedValue({text:"Yesterday I bought green flowers.",notice:"Review before Send."});
+  const service=Object.create(BridgeService.prototype) as Record<string,unknown>;
+  Object.assign(service,{send,config:{defaultCwd:"/tmp"},appServer:{reviseDraft},draftEditor:{rewrite},transcriber:{defaultBackend:"phonon",transcribe:vi.fn().mockResolvedValue("Yesterday red, no green flowers.")}});
+  const create=service.createTranscription as (p:unknown)=>Promise<void>;
+  const base={kind:"transcription.create",requestId:"new-test",threadId:null,mimeType:"audio/aac",audioBase64:Buffer.alloc(2048).toString("base64")};
+  await create.call(service,{...base,finalIntent:true});
+  expect(send).toHaveBeenLastCalledWith(expect.objectContaining({text:"Yesterday I bought green flowers.",rawText:"Yesterday red, no green flowers."}));
+  await create.call(service,{...base,localEdit:true,previousText:"current draft"});
+  expect(rewrite).toHaveBeenLastCalledWith("Yesterday red, no green flowers.","current draft");
+  expect(reviseDraft).not.toHaveBeenCalled();
+ });
+ it("does not introduce model editing for legacy build 51 requests",async()=>{
+  const send=vi.fn().mockResolvedValue(undefined),rewrite=vi.fn(),reviseDraft=vi.fn().mockResolvedValue("legacy revision");
+  const service=Object.create(BridgeService.prototype) as Record<string,unknown>;
+  Object.assign(service,{send,config:{defaultCwd:"/tmp"},draftEditor:{rewrite},appServer:{reviseDraft},transcriber:{defaultBackend:"phonon",transcribe:vi.fn().mockResolvedValue("plain words")}});
+  const create=service.createTranscription as (p:unknown)=>Promise<void>;
+  const base={kind:"transcription.create",requestId:"old-test",threadId:null,mimeType:"audio/aac",audioBase64:Buffer.alloc(2048).toString("base64")};
+  await create.call(service,base);
+  expect(send).toHaveBeenLastCalledWith(expect.objectContaining({text:"plain words"}));
+  await create.call(service,{...base,previousText:"old draft"});
+  expect(reviseDraft).toHaveBeenCalledOnce();
+  expect(rewrite).not.toHaveBeenCalled();
+ });
 });
