@@ -43,6 +43,18 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
       callHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(), threadHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(),
       state: z.string().regex(/^[A-Z_]{1,32}$/u).optional(), count: z.number().int().min(0).max(65_536).optional() }).strict()).max(80),
   }).strict(),
+  // Metadata-only notification timing from the Watch: epoch milliseconds on the Watch clock and
+  // per-alert decisions. Never message text, titles or details.
+  z.object({ version: z.literal(1), kind: z.literal("notify.trace"), requestId: safeId,
+    pushReceivedAt: z.number().int().nonnegative(),
+    fetchStartedAt: z.number().int().nonnegative(),
+    fetchCompletedAt: z.number().int().nonnegative(),
+    alerts: z.array(z.object({
+      eventId: z.string().max(300),
+      decision: z.enum(["posted", "duplicate", "suppressed_notify_off", "suppressed_before_foreground"]),
+      decidedAt: z.number().int().nonnegative(),
+    }).strict()).max(10),
+  }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("session.sync"), requestId: safeId }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("draft.prepare"), requestId: safeId }).strict(),
   z.object({

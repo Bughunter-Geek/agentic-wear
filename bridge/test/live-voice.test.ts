@@ -88,3 +88,38 @@ describe("Watch voice trace", () => {
     expect(watchPayloadSchema.safeParse({ ...base, events: [{ stage: "END", elapsedMs: 1, sdp: "v=0" }] }).success).toBe(false);
   });
 });
+
+describe("Watch notification trace", () => {
+  const base = {
+    version: 1, kind: "notify.trace", requestId: "r1",
+    pushReceivedAt: 1_787_900_001_000, fetchStartedAt: 1_787_900_001_050, fetchCompletedAt: 1_787_900_001_400,
+  };
+  const alert = { eventId: "turn:0198-thread:0198-turn:completed", decision: "posted", decidedAt: 1_787_900_001_450 };
+
+  it("accepts push, fetch and per-alert decision timings", () => {
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [] }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [alert] }).success).toBe(true);
+    for (const decision of ["posted", "duplicate", "suppressed_notify_off", "suppressed_before_foreground"]) {
+      expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ ...alert, decision }] }).success).toBe(true);
+    }
+    // The longest event id the bridge can produce (128-char thread and turn ids) fits.
+    const longest = `turn:${"t".repeat(128)}:${"u".repeat(128)}:interrupted`;
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ ...alert, eventId: longest }] }).success).toBe(true);
+  });
+
+  it("rejects free text, extra fields, bad numbers and oversize batches", () => {
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ ...alert, decision: "The agent finished its work" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ ...alert, title: "Private chat" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ ...alert, detail: "reply text" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [], message: "reply text" }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ eventId: alert.eventId, decision: "posted" }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, pushReceivedAt: -1, alerts: [] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, fetchStartedAt: 1.5, alerts: [] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, fetchCompletedAt: "1787900001400", alerts: [] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [{ ...alert, eventId: "e".repeat(301) }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: Array.from({ length: 11 }, () => alert) }).success).toBe(false);
+    const { pushReceivedAt: _omitted, ...withoutPush } = base;
+    expect(watchPayloadSchema.safeParse({ ...withoutPush, alerts: [] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base }).success).toBe(false);
+  });
+});

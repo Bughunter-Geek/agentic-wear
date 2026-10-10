@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppServerClient, parsePersistedFollowUpMode, supportsThreadQueue } from "../src/app-server-client.js";
 
 type ClientInternals = {
@@ -9,6 +9,7 @@ type ClientInternals = {
   controlledThreads: Set<string>;
   controlledTurnIds: Map<string, string>;
   watchReadyThreads: Set<string>;
+  hotThreads: Map<string, number>;
   openDaemonSocket: () => Promise<void>;
   openStdio: () => void;
   initialize: () => Promise<void>;
@@ -2647,5 +2648,363 @@ describe("AppServerClient session delivery", () => {
     ]);
     expect(internals.controlledThreads.has("thread-1")).toBe(false);
     expect(internals.controlledTurnIds.has("thread-1")).toBe(false);
+  });
+});
+
+describe("AppServerClient terminal detection logging", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function detectedLines(log: { mock: { calls: unknown[][] } }): Array<Record<string, unknown>> {
+    return log.mock.calls
+      .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+      .filter((entry) => entry.message === "watch.terminal.detected");
+  }
+
+  it("logs a notification-detected terminal event once, as metadata only", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const delivered: string[] = [];
+    const target = new AppServerClient(new Set(["thread-1"]), async (event) => {
+      delivered.push(event.eventId);
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn((method: string) => {
+      if (method === "thread/read") return Promise.resolve({ thread: { ...thread("idle"), name: "Private chat title" } });
+      return Promise.reject(new Error(`Unexpected method ${method}`));
+    });
+    const notification = { threadId: "thread-1", turn: { id: "turn-1", status: "completed", completedAt: 1_787_900_010, error: null } };
+
+    const before = Date.now();
+    await internals.handleNotification("turn/completed", notification);
+    await internals.handleNotification("turn/completed", notification);
+    const after = Date.now();
+
+    expect(delivered).toEqual(["turn:thread-1:turn-1:completed"]);
+    const lines = detectedLines(log);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      level: "info",
+      message: "watch.terminal.detected",
+      eventId: "turn:thread-1:turn-1:completed",
+      threadId: "thread-1",
+      kind: "terminal.completed",
+      source: "notification",
+      occurredAt: 1_787_900_010_000,
+    });
+    expect(lines[0]?.detectedAt).toBeGreaterThanOrEqual(before);
+    expect(lines[0]?.detectedAt).toBeLessThanOrEqual(after);
+    expect(Object.keys(lines[0] ?? {}).sort()).toEqual(
+      ["detectedAt", "eventId", "kind", "level", "message", "occurredAt", "source", "threadId"],
+    );
+    expect(log.mock.calls.map(([line]) => String(line)).join("\n")).not.toContain("Private chat title");
+  });
+
+  it("logs a monitor-detected terminal event with the monitor source", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.resolve({
+      data: [{ id: "turn-desktop", status: "failed", completedAt: 1_787_900_020, error: { message: "Private failure text" } }],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+
+    await internals.emitRecentTerminals({
+      id: "thread-1",
+      title: "Private chat title",
+      updatedAt: 1_787_900_020_000,
+      status: "notLoaded",
+      ownedByWear: false,
+      canAcceptDirectInput: false,
+    }, 1_787_900_000_000);
+
+    const lines = detectedLines(log);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      eventId: "turn:thread-1:turn-desktop:failed",
+      threadId: "thread-1",
+      kind: "terminal.failed",
+      source: "monitor",
+      occurredAt: 1_787_900_020_000,
+    });
+    expect(log.mock.calls.map(([line]) => String(line)).join("\n")).not.toMatch(/Private (failure text|chat title)/u);
+  });
+
+  it("does not log detection for a deduplicated event", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.resolve({
+      data: [{ id: "turn-1", status: "completed", completedAt: 1_787_900_020, error: null }],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+    const session = {
+      id: "thread-1", title: "Chat", updatedAt: 1_787_900_020_000, status: "notLoaded" as const,
+      ownedByWear: false, canAcceptDirectInput: false,
+    };
+
+    await internals.emitRecentTerminals(session, 1_787_900_000_000);
+    await internals.emitRecentTerminals(session, 1_787_900_000_000);
+
+    expect(detectedLines(log)).toHaveLength(1);
+  });
+
+  it("does not claim detection when delivery to the Watch fails, and retries the event", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    let failNext = true;
+    const delivered: string[] = [];
+    const target = new AppServerClient(new Set(), async (event) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("relay unavailable");
+      }
+      delivered.push(event.eventId);
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(() => Promise.resolve({
+      data: [{ id: "turn-1", status: "completed", completedAt: 1_787_900_020, error: null }],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+    const session = {
+      id: "thread-1", title: "Chat", updatedAt: 1_787_900_020_000, status: "notLoaded" as const,
+      ownedByWear: false, canAcceptDirectInput: false,
+    };
+
+    await expect(internals.emitRecentTerminals(session, 1_787_900_000_000)).rejects.toThrow("relay unavailable");
+    await internals.emitRecentTerminals(session, 1_787_900_000_000);
+
+    expect(delivered).toEqual(["turn:thread-1:turn-1:completed"]);
+    // Detection is logged on each attempt that is not a duplicate: first failed send, then the retry.
+    expect(detectedLines(log)).toHaveLength(2);
+  });
+});
+
+describe("AppServerClient hot-thread terminal fast lane", () => {
+  const T0 = 1_787_900_000_000;
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function session(id: string) {
+    return {
+      id,
+      title: `Chat ${id}`,
+      updatedAt: T0,
+      status: "notLoaded" as const,
+      ownedByWear: false,
+      canAcceptDirectInput: false,
+    };
+  }
+
+  // A monitored client over fake time. `finished` lists the threads whose newest
+  // turn has completed (desktop-style, outside the bridge's own connection).
+  function monitored(threadIds: string[]) {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const delivered: string[] = [];
+    const target = new AppServerClient(new Set(), async (event) => {
+      delivered.push(event.eventId);
+    }, async () => {});
+    const internals = target as unknown as ClientInternals;
+    const listed = [...threadIds];
+    const finished = new Set<string>();
+    const listCalls = { count: 0 };
+    const scans = new Map<string, number>();
+    internals.listSessions = vi.fn(async () => {
+      listCalls.count += 1;
+      return listed.map(session);
+    });
+    internals.request = vi.fn(async (method: string, params: unknown) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected method ${method}`);
+      const { threadId } = params as { threadId: string };
+      scans.set(threadId, (scans.get(threadId) ?? 0) + 1);
+      return {
+        data: [
+          ...(finished.has(threadId)
+            ? [{ id: "turn-new", status: "completed", completedAt: T0 / 1_000 + 2, error: null }]
+            : []),
+          { id: "turn-old", status: "completed", completedAt: T0 / 1_000 - 600, error: null },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    });
+    const abort = new AbortController();
+    const running = target.monitorTerminals(abort.signal);
+    return {
+      target,
+      internals,
+      delivered,
+      listed,
+      finished,
+      listCalls,
+      scans,
+      advance: (ms: number) => vi.advanceTimersByTimeAsync(ms),
+      stop: async () => {
+        abort.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        await running;
+      },
+    };
+  }
+
+  it("emits a hot thread's finished turn on the next tick while a cold thread waits for the full scan", async () => {
+    const f = monitored(["hot", "cold"]);
+    await f.advance(0); // baseline
+    expect(f.scans.get("hot")).toBe(1);
+    f.target.markHot("hot");
+    f.finished.add("hot").add("cold");
+
+    await f.advance(999);
+    expect(f.delivered).toEqual([]);
+    await f.advance(1); // first one-second tick
+    expect(f.delivered).toEqual(["turn:hot:turn-new:completed"]);
+
+    // The cold thread is not looked at again until the five-second full scan.
+    await f.advance(3_000); // t = 4 s
+    expect(f.delivered).toEqual(["turn:hot:turn-new:completed"]);
+    expect(f.scans.get("cold")).toBe(1);
+    expect(f.listCalls.count).toBe(1);
+    await f.advance(1_000); // t = 5 s: full scan
+    expect(f.delivered).toEqual(["turn:hot:turn-new:completed", "turn:cold:turn-new:completed"]);
+    expect(f.listCalls.count).toBe(2);
+    await f.stop();
+  });
+
+  it("never emits the same turn twice, and scans a hot thread once per tick including full-scan ticks", async () => {
+    const f = monitored(["hot", "cold"]);
+    await f.advance(0);
+    f.target.markHot("hot");
+    f.finished.add("hot").add("cold");
+
+    await f.advance(5_000);
+    // baseline + four hot-lane ticks + one full scan (not a second hot pass on that tick)
+    expect(f.scans.get("hot")).toBe(1 + 4 + 1);
+    expect(f.scans.get("cold")).toBe(1 + 1);
+
+    await f.advance(20_000);
+    expect(f.delivered).toEqual(["turn:hot:turn-new:completed", "turn:cold:turn-new:completed"]);
+    expect(new Set(f.delivered).size).toBe(f.delivered.length);
+    await f.stop();
+  });
+
+  it("does not poll a hot thread that is missing from the last full listing until the next full scan", async () => {
+    const f = monitored(["cold"]);
+    await f.advance(0);
+    f.target.markHot("unlisted");
+    f.finished.add("unlisted");
+
+    await f.advance(4_000);
+    expect(f.scans.get("unlisted")).toBeUndefined();
+    expect(f.delivered).toEqual([]);
+
+    f.listed.push("unlisted");
+    await f.advance(1_000); // full scan finds it
+    expect(f.delivered).toEqual(["turn:unlisted:turn-new:completed"]);
+    // From then on it is a listed hot thread again and rides the one-second lane.
+    await f.advance(2_000);
+    expect(f.scans.get("unlisted")).toBe(1 + 2);
+    await f.stop();
+  });
+
+  it("stops the fast lane when a hot entry expires after two minutes", async () => {
+    const f = monitored(["hot", "cold"]);
+    await f.advance(0);
+    f.target.markHot("hot");
+    expect(f.internals.hotThreads.get("hot")).toBe(T0 + 120_000);
+
+    await f.advance(119_000);
+    expect(f.internals.hotThreads.has("hot")).toBe(true);
+    const beforeExpiry = f.scans.get("hot") ?? 0;
+    await f.advance(1_000); // 120 s: expired and pruned on this tick
+    expect(f.internals.hotThreads.has("hot")).toBe(false);
+    // The expiring tick (120 s) is also a full scan, so exactly one more scan happened.
+    expect(f.scans.get("hot")).toBe(beforeExpiry + 1);
+
+    // Afterwards only the five-second full scan visits the thread.
+    const afterExpiry = f.scans.get("hot") ?? 0;
+    await f.advance(10_000);
+    expect(f.scans.get("hot")).toBe(afterExpiry + 2);
+    await f.stop();
+  });
+
+  it("honours a custom hot duration and refreshes an existing entry", async () => {
+    const f = monitored(["hot"]);
+    await f.advance(0);
+    f.target.markHot("hot", 3_000);
+    await f.advance(2_000);
+    f.target.markHot("hot", 3_000); // extended to t = 5 s
+    expect(f.internals.hotThreads.get("hot")).toBe(T0 + 5_000);
+    await f.advance(2_000);
+    expect(f.internals.hotThreads.has("hot")).toBe(true);
+    await f.advance(1_000);
+    expect(f.internals.hotThreads.has("hot")).toBe(false);
+    await f.stop();
+  });
+
+  it("keeps at most 32 hot threads, dropping the oldest", () => {
+    const target = client();
+    const internals = target as unknown as ClientInternals;
+    for (let index = 0; index < 40; index += 1) target.markHot(`thread-${index}`);
+    expect(internals.hotThreads.size).toBe(32);
+    expect(internals.hotThreads.has("thread-7")).toBe(false);
+    expect(internals.hotThreads.has("thread-8")).toBe(true);
+    expect(internals.hotThreads.has("thread-39")).toBe(true);
+    // Re-marking makes an entry the newest rather than adding a duplicate.
+    target.markHot("thread-8");
+    target.markHot("thread-40");
+    expect(internals.hotThreads.size).toBe(32);
+    expect(internals.hotThreads.has("thread-8")).toBe(true);
+    expect(internals.hotThreads.has("thread-9")).toBe(false);
+  });
+
+  it("leaves bridge-controlled turns to the notification path on hot ticks but still covers them on the full scan", async () => {
+    const f = monitored(["controlled", "foreign"]);
+    await f.advance(0); // baseline: one scan each
+    f.target.markHot("controlled");
+    f.target.markHot("foreign");
+    f.internals.controlledTurnIds.set("controlled", "turn-running");
+
+    await f.advance(4_000); // four hot ticks, no full scan yet
+    expect(f.scans.get("controlled")).toBe(1);
+    expect(f.scans.get("foreign")).toBe(1 + 4);
+
+    await f.advance(1_000); // full scan at 5 s covers both
+    expect(f.scans.get("controlled")).toBe(1 + 1);
+    expect(f.scans.get("foreign")).toBe(1 + 4 + 1);
+
+    // Once the bridge no longer controls the thread, the hot lane picks it up again.
+    f.internals.controlledTurnIds.delete("controlled");
+    await f.advance(2_000);
+    expect(f.scans.get("controlled")).toBe(1 + 1 + 2);
+    expect(f.scans.get("foreign")).toBe(1 + 4 + 1 + 2);
+    await f.stop();
+  });
+
+  it("keeps the monitor alive when a hot-lane scan fails", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = monitored(["hot"]);
+    await f.advance(0);
+    f.target.markHot("hot");
+    const request = f.internals.request;
+    let fail = true;
+    f.internals.request = vi.fn(async (method: string, params: unknown) => {
+      if (fail) {
+        fail = false;
+        throw new Error("app server busy");
+      }
+      return request(method, params);
+    });
+    f.finished.add("hot");
+
+    await f.advance(1_000); // fails
+    expect(f.delivered).toEqual([]);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("terminal monitor retrying"));
+    await f.advance(1_000); // recovers on the next tick
+    expect(f.delivered).toEqual(["turn:hot:turn-new:completed"]);
+    await f.stop();
   });
 });

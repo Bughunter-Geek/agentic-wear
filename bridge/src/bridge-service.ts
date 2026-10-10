@@ -341,6 +341,13 @@ export class BridgeService {
           console.log(JSON.stringify({ level: "info", message: "live.voice.watchTrace", callId: payload.callId,
             events: payload.events.map(({ stage, elapsedMs, state, count }) => ({ stage, elapsedMs, state, count })) }));
           return;
+        case "notify.trace":
+          // Watch-side push -> fetch -> notify timings (watch wall clock) and per-alert decisions.
+          // The Watch sends no message text; only ids, decision names and epoch milliseconds.
+          console.log(JSON.stringify({ level: "info", message: "watch.notify.trace", receivedAt: Date.now(),
+            pushReceivedAt: payload.pushReceivedAt, fetchStartedAt: payload.fetchStartedAt,
+            fetchCompletedAt: payload.fetchCompletedAt, alerts: payload.alerts }));
+          return;
         case "session.sync":
           // Foreground watch refresh is an earlier, explicit user-use signal than
           // recording. Warm only the configured Phonon route; never block the
@@ -402,6 +409,12 @@ export class BridgeService {
           );
           this.turnTiming.bindThread(payload.requestId, result.threadId);
           this.turnTiming.markRequest(payload.requestId, "appServerAccepted");
+          // Routing metadata only: ids and states, never prompt or reply text.
+          console.log(JSON.stringify({ level: "info", message: "watch.turn.route", requestId: payload.requestId,
+            threadId: result.threadId, state: result.state, created: result.created, steered: result.steered ?? false,
+            followUpMode: result.followUpMode ?? null }));
+          // The Watch is using this chat, so poll it every second until its turn finishes.
+          this.appServer.markHot(result.threadId);
           if (result.created) await this.persistOwnedThreads();
           if (result.state === "waiting") {
             await this.storePendingTurn(pendingPayload(
@@ -596,6 +609,8 @@ export class BridgeService {
 
   private async onTerminal(event: TerminalEvent): Promise<void> {
     await this.send({ version: 1, ...event });
+    console.log(JSON.stringify({ level: "info", message: "watch.terminal.sent", eventId: event.eventId,
+      threadId: event.threadId, sentAt: Date.now() }));
     this.turnTiming.markThread(event.threadId, "terminalSentToWatch");
     if (this.watchedThreadId === event.threadId && Date.now() <= this.watchExpiresAt) {
       await this.sendChatSnapshot(event.threadId, undefined, true).catch((error: unknown) => {

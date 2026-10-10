@@ -267,6 +267,11 @@ export class AppServerClient {
   // release a newer in-progress turn.
   private readonly controlledTurnIds = new Map<string, string>();
   private readonly deliveredTerminalEvents = new Set<string>();
+  // threadId -> epoch ms until which the monitor polls this chat every
+  // HOT_SCAN_INTERVAL_MS instead of waiting for the full scan. Fed by Watch
+  // submissions so a reply to a chat the Watch just used is noticed quickly even
+  // when another client (e.g. Codex desktop) finishes the turn.
+  private readonly hotThreads = new Map<string, number>();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
   private readonly optimisticUserMessages = new Map<string, Map<string, CachedChatMessage>>();
@@ -1386,27 +1391,61 @@ export class AppServerClient {
     }
   }
 
+  markHot(threadId: string, forMs = HOT_THREAD_MS): void {
+    // Re-insert so the map stays ordered oldest-first by last marking.
+    this.hotThreads.delete(threadId);
+    this.hotThreads.set(threadId, Date.now() + forMs);
+    while (this.hotThreads.size > MAX_HOT_THREADS) {
+      const oldest = this.hotThreads.keys().next().value;
+      if (oldest === undefined) break;
+      this.hotThreads.delete(oldest);
+    }
+  }
+
   async monitorTerminals(signal: AbortSignal, intervalMs = 5_000): Promise<void> {
     const monitoredSince = Date.now();
-    const initialSessions = (await this.listSessions()).slice(0, MAX_TERMINAL_SCAN_SESSIONS);
+    let sessions = (await this.listSessions()).slice(0, MAX_TERMINAL_SCAN_SESSIONS);
     // Establish a baseline before polling. This prevents every bridge restart
     // from replaying already-finished work while leaving an in-progress turn
     // eligible once it reaches a terminal state.
-    for (const session of initialSessions) {
+    for (const session of sessions) {
       await this.rememberRecentTerminals(session).catch((error: unknown) => {
         console.error(JSON.stringify({ level: "error", message: "terminal baseline skipped", error: safeError(error) }));
       });
     }
+    // One tick per HOT_SCAN_INTERVAL_MS (never longer than the full-scan
+    // interval itself, so a small test interval stays fast). Chats the Watch
+    // recently used are polled on every tick; every chat is polled on each full
+    // scan (default: every fifth tick, i.e. 5 s).
+    const tickMs = Math.max(1, Math.min(HOT_SCAN_INTERVAL_MS, intervalMs));
+    const ticksPerFullScan = Math.max(1, Math.round(intervalMs / tickMs));
+    let tick = 0;
     while (!signal.aborted) {
-      await delay(intervalMs, signal);
+      await delay(tickMs, signal);
       if (signal.aborted) return;
+      tick += 1;
       try {
+        const now = Date.now();
+        for (const [threadId, hotUntil] of this.hotThreads) {
+          if (hotUntil <= now) this.hotThreads.delete(threadId);
+        }
         // Some Codex clients own their writer in another process and expose the
         // session as `notLoaded` here. Their status/updatedAt can therefore lag.
         // Poll recent turns directly instead of gating completion detection on
         // those advisory fields.
-        const sessions = (await this.listSessions()).slice(0, MAX_TERMINAL_SCAN_SESSIONS);
-        for (const session of sessions) await this.emitRecentTerminals(session, monitoredSince);
+        if (tick % ticksPerFullScan === 0) {
+          sessions = (await this.listSessions()).slice(0, MAX_TERMINAL_SCAN_SESSIONS);
+          for (const session of sessions) await this.emitRecentTerminals(session, monitoredSince);
+        } else {
+          // A hot chat missing from the last full list waits for the next full scan.
+          // The bridge's own App Server notification reports its controlled turns immediately and performs the
+          // release/restart cleanup; the hot lane is for turns finished by other clients.
+          for (const session of sessions) {
+            if (this.hotThreads.has(session.id) && !this.controlledTurnIds.has(session.id)) {
+              await this.emitRecentTerminals(session, monitoredSince);
+            }
+          }
+        }
       } catch (error) {
         console.error(JSON.stringify({ level: "error", message: "terminal monitor retrying", error: safeError(error) }));
       }
@@ -1571,7 +1610,7 @@ export class AppServerClient {
           title: threadTitle(thread),
           detail,
           occurredAt,
-        });
+        }, "notification");
       } finally {
         if (shouldRelease) {
           await this.releaseThread(event.threadId);
@@ -1973,7 +2012,7 @@ export class AppServerClient {
         title: session.title,
         detail,
         occurredAt: turn.completedAt! * 1_000,
-      });
+      }, "monitor");
       if (this.controlledTurnIds.get(session.id) === turn.id) {
         await this.releaseThread(session.id);
       }
@@ -1991,9 +2030,20 @@ export class AppServerClient {
     for (const turn of turns) this.rememberTerminalEvent(`turn:${session.id}:${turn.id}:${turn.status}`);
   }
 
-  private async emitTerminal(event: TerminalEvent): Promise<void> {
+  private async emitTerminal(event: TerminalEvent, source: "notification" | "monitor"): Promise<void> {
     if (this.deliveredTerminalEvents.has(event.eventId)) return;
     this.rememberTerminalEvent(event.eventId);
+    // Metadata only: never log the title or detail, which can carry prompt or reply text.
+    console.log(JSON.stringify({
+      level: "info",
+      message: "watch.terminal.detected",
+      eventId: event.eventId,
+      threadId: event.threadId,
+      kind: event.kind,
+      source,
+      occurredAt: event.occurredAt,
+      detectedAt: Date.now(),
+    }));
     try {
       await this.onTerminal(event);
     } catch (error) {
@@ -2354,3 +2404,6 @@ const MAX_CACHED_CHATS = 20;
 const MAX_PENDING_PERMISSION_MESSAGES = 100;
 const MAX_TERMINAL_SCAN_TURNS = 8;
 const MAX_TERMINAL_SCAN_SESSIONS = 12;
+const HOT_THREAD_MS = 120_000;
+const HOT_SCAN_INTERVAL_MS = 1_000;
+const MAX_HOT_THREADS = 32;

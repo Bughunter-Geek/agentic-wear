@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ForeignThreadSelectionError } from "../src/app-server-client.js";
+import { ForeignThreadSelectionError, type TerminalEvent } from "../src/app-server-client.js";
 import { BridgeService, publicError, publicRequestError } from "../src/bridge-service.js";
 
 describe("BridgeService App Server transport", () => {
@@ -222,9 +222,12 @@ describe("BridgeService App Server transport", () => {
   it("acknowledges an owner-blocked prompt as waiting after durable persistence", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const storePendingTurn = vi.fn().mockResolvedValue(undefined);
+    const markHot = vi.fn();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
     Object.assign(service, {
       appServer: {
+        markHot,
         submitTurn: vi.fn().mockResolvedValue({
           threadId: "thread-1",
           created: false,
@@ -278,6 +281,18 @@ describe("BridgeService App Server transport", () => {
       message: expect.stringContaining("Queued on the Watch"),
     }));
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.error" }));
+    // The chat the Watch just used gets the one-second fast lane.
+    expect(markHot).toHaveBeenCalledExactlyOnceWith("thread-1");
+    // Routing is logged with ids and states only, never the prompt text.
+    const lines = log.mock.calls.map(([line]) => String(line));
+    const route = lines.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((entry) => entry.message === "watch.turn.route");
+    expect(route).toEqual({
+      level: "info", message: "watch.turn.route", requestId: "watch-owner-held-1", threadId: "thread-1",
+      state: "waiting", created: false, steered: false, followUpMode: "queue",
+    });
+    expect(lines.join("\n")).not.toContain("Continue once.");
+    log.mockRestore();
   });
 
   it("persists and acknowledges a prompt when cross-client session sync is transiently unavailable", async () => {
@@ -352,9 +367,11 @@ describe("BridgeService App Server transport", () => {
         followUpMode: "steer",
       };
     });
+    const markHot = vi.fn();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
     Object.assign(service, {
-      appServer: { submitTurn },
+      appServer: { submitTurn, markHot },
       config: { defaultCwd: "/tmp" },
       send,
       sendSessions: vi.fn().mockResolvedValue(undefined),
@@ -402,6 +419,12 @@ describe("BridgeService App Server transport", () => {
       selectionApplied: true,
       message: expect.stringContaining("Steered the active turn"),
     }));
+    expect(markHot).toHaveBeenCalledExactlyOnceWith("thread-1");
+    expect(log).toHaveBeenCalledWith(JSON.stringify({
+      level: "info", message: "watch.turn.route", requestId: "watch-model-change-1", threadId: "thread-1",
+      state: "running", created: false, steered: true, followUpMode: "steer",
+    }));
+    log.mockRestore();
   });
 
   it.each([undefined, false, true])("retries an encrypted pending prompt with its exact tier and idempotency key (%s)", async (fastMode) => {
@@ -591,6 +614,76 @@ describe("publicRequestError", () => {
     } finally { log.mockRestore(); }
   });
  });
+
+describe("Watch terminal and notification diagnostics", () => {
+  it("logs when a terminal event is sent to the Watch, without its title or detail", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, {
+      send,
+      watchedThreadId: null,
+      watchExpiresAt: 0,
+      processPendingTurns: vi.fn().mockResolvedValue(undefined),
+      sendSessions: vi.fn().mockResolvedValue(undefined),
+    });
+    const event: TerminalEvent = {
+      eventId: "turn:thread-1:turn-9:completed",
+      kind: "terminal.completed",
+      turnScope: "topLevel",
+      threadId: "thread-1",
+      title: "Private title",
+      detail: "Private reply text",
+      occurredAt: 1_787_900_000_000,
+    };
+
+    const before = Date.now();
+    await (service as unknown as { onTerminal: (event: TerminalEvent) => Promise<void> }).onTerminal(event);
+    const after = Date.now();
+
+    expect(send).toHaveBeenCalledWith({ version: 1, ...event });
+    const entries = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+    const sent = entries.find((entry) => entry.message === "watch.terminal.sent");
+    expect(sent).toMatchObject({ level: "info", eventId: event.eventId, threadId: "thread-1" });
+    expect(sent?.sentAt).toBeGreaterThanOrEqual(before);
+    expect(sent?.sentAt).toBeLessThanOrEqual(after);
+    expect(Object.keys(sent ?? {}).sort()).toEqual(["eventId", "level", "message", "sentAt", "threadId"]);
+    expect(log.mock.calls.map(([line]) => String(line)).join("\n")).not.toMatch(/Private (title|reply text)/u);
+    log.mockRestore();
+  });
+
+  it("logs the Watch notification trace as metadata and sends nothing back", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, { send });
+    const payload = {
+      version: 1 as const,
+      kind: "notify.trace" as const,
+      requestId: "trace-1",
+      pushReceivedAt: 1_787_900_001_000,
+      fetchStartedAt: 1_787_900_001_050,
+      fetchCompletedAt: 1_787_900_001_400,
+      alerts: [{ eventId: "turn:thread-1:turn-9:completed", decision: "posted" as const, decidedAt: 1_787_900_001_450 }],
+    };
+
+    const before = Date.now();
+    await (service as unknown as { handleWatchPayload: (payload: unknown) => Promise<void> }).handleWatchPayload(payload);
+
+    const entry = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(entry).toMatchObject({
+      level: "info",
+      message: "watch.notify.trace",
+      pushReceivedAt: payload.pushReceivedAt,
+      fetchStartedAt: payload.fetchStartedAt,
+      fetchCompletedAt: payload.fetchCompletedAt,
+      alerts: payload.alerts,
+    });
+    expect(entry.receivedAt).toBeGreaterThanOrEqual(before);
+    expect(send).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
+});
 
 describe("new local draft protocol versus legacy watch", () => {
  it("retains raw recognition and never invokes Codex for new local editing", async () => {
