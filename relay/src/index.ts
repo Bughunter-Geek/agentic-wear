@@ -198,7 +198,10 @@ export function acknowledgeStoredEnvelope(
     }).catch((error: unknown) => {
       // Never include credentials, identifiers, audio or transcript content in wake diagnostics.
       const known = error instanceof WakeFailure ? error.diagnostics : null;
-      log("error", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 0, ...wakeFields(known) });
+      const failure: Record<string, string | number> = error instanceof WakeFailure
+        ? { stage: error.stage, httpStatus: error.httpStatus, fcmErrorCode: error.fcmErrorCode ?? "none" }
+        : {};
+      log("error", "inbox.wake.timing", { wakeMs: Math.round(performance.now() - started), success: 0, ...wakeFields(known), ...failure });
     }));
   }
   return Response.json({ accepted: true, inserted }, { status: 202 });

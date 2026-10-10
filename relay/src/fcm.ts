@@ -13,8 +13,54 @@ export const MAX_PUSH_ENVELOPE_CHARS = 3_000;
 export type WakeDiagnostics = { envelopeAttached: boolean; envelopeChars: number };
 
 /** Carries metadata-only diagnostics when the FCM send fails. */
+export type WakeStage = "oauth" | "fcm" | "network";
+
 export class WakeFailure extends Error {
-  constructor(message: string, readonly diagnostics: WakeDiagnostics | null) { super(message); }
+  constructor(
+    message: string,
+    readonly diagnostics: WakeDiagnostics | null,
+    readonly stage: WakeStage = "network",
+    readonly httpStatus: number = 0,
+    readonly fcmErrorCode: string | null = null,
+  ) { super(message); }
+}
+
+/** Internal carrier of non-sensitive stage details; never holds remote text. */
+class StageError extends Error {
+  constructor(readonly stage: WakeStage, readonly httpStatus: number, readonly code: string | null) { super("wake stage failed"); }
+}
+
+const OAUTH_CODE = /^[a-z_]{1,40}$/u;
+const FCM_CODE = /^[A-Z_]{1,40}$/u;
+
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch { return null; }
+}
+
+async function readBoundedOrEmpty(response: Response): Promise<string> {
+  try { return await drainBounded(response, 16_384); } catch { return ""; }
+}
+
+export function extractOAuthErrorCode(body: string): string | null {
+  const code = parseJsonObject(body)?.error;
+  return typeof code === "string" && OAUTH_CODE.test(code) ? code : null;
+}
+
+export function extractFcmErrorCode(body: string): string | null {
+  const error = parseJsonObject(body)?.error;
+  if (typeof error !== "object" || error === null) return null;
+  const { details, status } = error as { details?: unknown; status?: unknown };
+  if (Array.isArray(details)) {
+    for (const detail of details) {
+      if (typeof detail !== "object" || detail === null) continue;
+      const { "@type": type, errorCode } = detail as Record<string, unknown>;
+      if (typeof type === "string" && type.endsWith("FcmError") && typeof errorCode === "string" && FCM_CODE.test(errorCode)) return errorCode;
+    }
+  }
+  return typeof status === "string" && FCM_CODE.test(status) ? status : null;
 }
 
 /** Pure decision: attach the envelope only when it serializes within the push size limit. */
@@ -32,9 +78,10 @@ export async function wakeWatch(env: Env, installationId: string, pairId: string
   const diagnostics = { envelopeAttached, envelopeChars };
   try {
     await sendWake(env, installationId, pairId, envelope);
-  } catch {
+  } catch (error) {
     // Never carry the original error text: it could include remote response content.
-    throw new WakeFailure("FCM wake failed", diagnostics);
+    if (error instanceof StageError) throw new WakeFailure("FCM wake failed", diagnostics, error.stage, error.httpStatus, error.code);
+    throw new WakeFailure("FCM wake failed", diagnostics, "network", 0, null);
   }
   return diagnostics;
 }
@@ -53,7 +100,7 @@ async function sendWake(env: Env, installationId: string, pairId: string, envelo
       body: JSON.stringify(buildWakeMessage(installationId, pairId, envelope)),
     },
   );
-  if (!response.ok) throw new Error(`FCM wake failed with status ${response.status}`);
+  if (!response.ok) throw new StageError("fcm", response.status, extractFcmErrorCode(await readBoundedOrEmpty(response)));
   await drainBounded(response, 16_384);
 }
 
@@ -91,15 +138,20 @@ async function createAccessToken(env: Env): Promise<string> {
     exp: now + 3_600,
   });
   const unsigned = `${encodedHeader}.${encodedClaims}`;
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    pemBytes(env.FIREBASE_PRIVATE_KEY),
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(unsigned));
-  const assertion = `${unsigned}.${bytesToBase64Url(new Uint8Array(signature))}`;
+  let assertion: string;
+  try {
+    const key = await crypto.subtle.importKey(
+      "pkcs8",
+      pemBytes(env.FIREBASE_PRIVATE_KEY),
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(unsigned));
+    assertion = `${unsigned}.${bytesToBase64Url(new Uint8Array(signature))}`;
+  } catch {
+    throw new StageError("oauth", 0, null);
+  }
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: {
@@ -111,10 +163,10 @@ async function createAccessToken(env: Env): Promise<string> {
       assertion,
     }),
   });
-  if (!response.ok) throw new Error(`Firebase authentication failed with status ${response.status}`);
-  const parsed: OAuthResponse = JSON.parse(await drainBounded(response, 16_384));
+  if (!response.ok) throw new StageError("oauth", response.status, extractOAuthErrorCode(await readBoundedOrEmpty(response)));
+  const parsed: OAuthResponse = parseJsonObject(await readBoundedOrEmpty(response)) ?? {};
   if (typeof parsed.access_token !== "string" || parsed.access_token.length < 20) {
-    throw new Error("Firebase authentication returned no access token");
+    throw new StageError("oauth", 0, null);
   }
   cachedAccessToken = {
     token: parsed.access_token,
