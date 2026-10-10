@@ -93,6 +93,7 @@ object PayloadCodec {
         .put("pushReceivedAt", trace.pushReceivedAtMillis)
         .put("fetchStartedAt", trace.fetchStartedAtMillis)
         .put("fetchCompletedAt", trace.fetchCompletedAtMillis)
+        .put("fetchAttempt", trace.fetchAttempt.coerceIn(1, MAX_NOTIFY_TRACE_FETCH_ATTEMPT))
         .put(
             "alerts",
             JSONArray().apply {
@@ -107,6 +108,38 @@ object PayloadCodec {
             },
         )
         .toString()
+
+    /**
+     * Metadata-only relay failure report for the bridge (`relay.failures`): the operation name, HTTP
+     * status (0 = no response), exception class name and Watch epoch milliseconds of each failed
+     * attempt. Never a message, URL, id, token or error text. Values are clamped to what the
+     * bridge schema accepts so one odd entry cannot get the whole report rejected.
+     */
+    internal fun encodeRelayFailures(requestId: String, failures: List<RelayFailure>): String = JSONObject()
+        .put("version", 1)
+        .put("kind", "relay.failures")
+        .put("requestId", requestId)
+        .put(
+            "failures",
+            JSONArray().apply {
+                failures.takeLast(RelayFailureLog.MAX_ENTRIES).forEach { failure ->
+                    put(
+                        JSONObject()
+                            .put("op", failure.op)
+                            .put("status", failure.status.coerceIn(0, MAX_RELAY_FAILURE_STATUS))
+                            .put("errorClass", safeErrorClass(failure.errorClass))
+                            .put("at", failure.at.coerceAtLeast(0L)),
+                    )
+                }
+            },
+        )
+        .toString()
+
+    private fun safeErrorClass(value: String): String {
+        val safe = value.filter { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '.' || it == '$' }
+            .take(MAX_ERROR_CLASS_CHARS)
+        return safe.ifEmpty { "Unknown" }
+    }
 
     fun decodeSessions(json: JSONObject): List<AgentSession> {
         if (json.optInt("version") != 1 || json.optString("kind") != "sessions.snapshot") return emptyList()
@@ -576,6 +609,9 @@ object PayloadCodec {
     private fun isSafeModelValue(value: String): Boolean = value.length in 1..128 &&
         value.all { it.isLetterOrDigit() || it in "-_.:/" }
 
+    private const val MAX_NOTIFY_TRACE_FETCH_ATTEMPT = 10
+    private const val MAX_RELAY_FAILURE_STATUS = 599
+    private const val MAX_ERROR_CLASS_CHARS = 80
     private const val MAX_CHAT_MESSAGES = 12
     private const val MAX_CHAT_MESSAGE_CHARS = 6_000
 }

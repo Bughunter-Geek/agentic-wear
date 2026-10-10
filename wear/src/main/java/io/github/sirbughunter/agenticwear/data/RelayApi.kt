@@ -30,6 +30,7 @@ class RelayApi {
             .put("watchPublicKey", watchPublicKey)
         fcmInstallationId?.let { pairingBody.put("fcmInstallationId", it) }
         val response = request(
+            op = RelayOp.PAIRING,
             url = "$normalizedUrl/v1/pair/complete",
             method = "POST",
             body = pairingBody.toString(),
@@ -40,6 +41,7 @@ class RelayApi {
         val bridgePublicKey = response.getString("bridgePublicKey")
         val watchProof = authenticator.createProof("watch", bridgePublicKey, watchPublicKey)
         request(
+            op = RelayOp.PAIRING,
             url = "$normalizedUrl/v1/pairs/${encodePath(returnedPairId)}/confirm-watch",
             method = "POST",
             bearer = watchCredential,
@@ -48,6 +50,7 @@ class RelayApi {
         val deadline = System.currentTimeMillis() + PAIR_CONFIRMATION_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             val status = request(
+                op = RelayOp.PAIRING,
                 url = "$normalizedUrl/v1/pairs/${encodePath(returnedPairId)}/watch-status",
                 method = "GET",
                 bearer = watchCredential,
@@ -66,6 +69,7 @@ class RelayApi {
 
     suspend fun sendToBridge(pairing: Pairing, envelope: JSONObject) {
         request(
+            op = RelayOp.SEND_TO_BRIDGE,
             url = "${pairing.relayUrl}/v1/pairs/${encodePath(pairing.pairId)}/to-bridge",
             method = "POST",
             bearer = pairing.watchCredential,
@@ -75,6 +79,7 @@ class RelayApi {
     }
 
     suspend fun fetchInbox(pairing: Pairing): List<JSONObject> = request(
+        op = RelayOp.FETCH_INBOX,
         url = "${pairing.relayUrl}/v1/pairs/${encodePath(pairing.pairId)}/inbox",
         method = "GET",
         bearer = pairing.watchCredential,
@@ -84,6 +89,7 @@ class RelayApi {
     suspend fun acknowledge(pairing: Pairing, messageIds: List<String>) {
         if (messageIds.isEmpty()) return
         request(
+            op = RelayOp.ACKNOWLEDGE,
             url = "${pairing.relayUrl}/v1/pairs/${encodePath(pairing.pairId)}/ack",
             method = "POST",
             bearer = pairing.watchCredential,
@@ -94,6 +100,7 @@ class RelayApi {
 
     suspend fun updateFcmRegistration(pairing: Pairing, installationId: String) {
         request(
+            op = RelayOp.FCM_REGISTRATION,
             url = "${pairing.relayUrl}/v1/pairs/${encodePath(pairing.pairId)}/registration",
             method = "PUT",
             bearer = pairing.watchCredential,
@@ -103,6 +110,7 @@ class RelayApi {
     }
 
     private suspend fun request(
+        op: String,
         url: String,
         method: String,
         bearer: String? = null,
@@ -113,7 +121,12 @@ class RelayApi {
         while (true) {
             try {
                 return requestOnce(url, method, bearer, body)
+            } catch (error: RelayException) {
+                // Every failed attempt is recorded, metadata only; HTTP errors are never retried here.
+                RelayFailureLog.record(op, error.status, "RelayException", System.currentTimeMillis())
+                throw error
             } catch (error: IOException) {
+                RelayFailureLog.record(op, 0, error.javaClass.simpleName, System.currentTimeMillis())
                 val retryDelayMillis = if (retryTransientFailures) {
                     relayRetryDelayMillis(error, retryIndex)
                 } else {
@@ -195,6 +208,15 @@ class RelayApi {
         private const val MAX_RESPONSE_BYTES = 768 * 1_024
         private const val PAIR_CONFIRMATION_TIMEOUT_MS = 30_000L
     }
+}
+
+/** The fixed operation names recorded in [RelayFailureLog] and accepted by the bridge's `relay.failures` schema. */
+internal object RelayOp {
+    const val PAIRING = "pairing"
+    const val SEND_TO_BRIDGE = "sendToBridge"
+    const val FETCH_INBOX = "fetchInbox"
+    const val ACKNOWLEDGE = "acknowledge"
+    const val FCM_REGISTRATION = "fcmRegistration"
 }
 
 internal fun relayRetryDelayMillis(error: Throwable, retryIndex: Int): Long? {

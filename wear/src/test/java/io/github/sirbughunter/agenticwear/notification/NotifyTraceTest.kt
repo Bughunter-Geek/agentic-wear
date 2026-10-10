@@ -100,4 +100,31 @@ class NotifyTraceTest {
         assertEquals(MAX_NOTIFY_TRACE_ALERTS, first.alerts.size)
         assertEquals(MAX_NOTIFY_TRACE_ALERTS, recorder.result()!!.alerts.size)
     }
+
+    @Test
+    fun `a trace is for the first fetch attempt unless told otherwise`() {
+        val recorder = NotifyTraceRecorder(pushReceivedAtMillis = 1_000L)
+        recorder.alertDecided("turn:a:b:completed", AlertDecision.POSTED, 1_450L)
+
+        assertEquals(1, recorder.result()!!.fetchAttempt)
+        assertEquals(1, NotifyTrace(1L, 2L, 3L, emptyList()).fetchAttempt)
+    }
+
+    @Test
+    fun `the trace carries the fetch attempt it was recorded on`() {
+        for (attempt in 1..4) {
+            val recorder = NotifyTraceRecorder(pushReceivedAtMillis = 1_000L, fetchAttempt = attempt)
+            recorder.fetchStarted(5_050L)
+            recorder.fetchCompleted(5_400L)
+            recorder.alertDecided("turn:a:b:completed", AlertDecision.POSTED, 5_450L)
+
+            val trace = recorder.result()!!
+            assertEquals(attempt, trace.fetchAttempt)
+            // The attempt label never changes the push, fetch or alert timings.
+            assertEquals(1_000L, trace.pushReceivedAtMillis)
+            assertEquals(5_050L, trace.fetchStartedAtMillis)
+            assertEquals(5_400L, trace.fetchCompletedAtMillis)
+            assertEquals(listOf(TerminalAlertTrace("turn:a:b:completed", AlertDecision.POSTED, 5_450L)), trace.alerts)
+        }
+    }
 }

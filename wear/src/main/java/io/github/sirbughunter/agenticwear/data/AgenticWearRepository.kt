@@ -21,6 +21,7 @@ import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotificati
 import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -413,9 +414,10 @@ class AgenticWearRepository(private val context: Context) {
     /**
      * [pushReceivedAt] (Watch wall clock) is set only for refreshes started by an FCM push. It enables
      * a metadata-only `notify.trace` to the bridge; it never changes what is fetched or notified.
+     * [fetchAttempt] is the 1-based attempt of the push fetch and only labels that trace.
      */
-    suspend fun refreshInbox(notify: Boolean = true, pushReceivedAt: Long? = null): Int {
-        return refreshInboxBatch(notify, pushReceivedAt = pushReceivedAt).handled
+    suspend fun refreshInbox(notify: Boolean = true, pushReceivedAt: Long? = null, fetchAttempt: Int = 1): Int {
+        return refreshInboxBatch(notify, pushReceivedAt = pushReceivedAt, fetchAttempt = fetchAttempt).handled
     }
 
     suspend fun refreshInboxAndSessions(notify: Boolean = true, notifyAfterMillis: Long? = null) {
@@ -431,11 +433,14 @@ class AgenticWearRepository(private val context: Context) {
         notify: Boolean,
         notifyAfterMillis: Long? = null,
         pushReceivedAt: Long? = null,
+        fetchAttempt: Int = 1,
     ): InboxRefreshResult {
-        val trace = pushReceivedAt?.let(::NotifyTraceRecorder)
+        val trace = pushReceivedAt?.let { NotifyTraceRecorder(it, fetchAttempt) }
         val result = refreshInboxExclusively(notify, notifyAfterMillis, trace)
         // After the lock is released, so a slow relay can never hold up other inbox refreshes.
         trace?.result()?.let { sendNotifyTraceBestEffort(it) }
+        // The relay just answered, so this is the moment a report of earlier failures can get through.
+        if (result.fetchSucceeded) sendRelayFailuresBestEffort()
         return result
     }
 
@@ -444,7 +449,7 @@ class AgenticWearRepository(private val context: Context) {
         notifyAfterMillis: Long?,
         trace: NotifyTraceRecorder?,
     ): InboxRefreshResult = inboxRefreshMutex.withLock {
-        val pairing = pairingStore.read() ?: return@withLock InboxRefreshResult(0, false)
+        val pairing = pairingStore.read() ?: return@withLock InboxRefreshResult(0, false, fetchSucceeded = false)
         val fetchedAt = SystemClock.elapsedRealtime()
         trace?.fetchStarted(System.currentTimeMillis())
         val envelopes = relay.fetchInbox(pairing)
@@ -478,7 +483,7 @@ class AgenticWearRepository(private val context: Context) {
             queue = inboxAcknowledgements,
             acknowledge = { relay.acknowledge(pairing, acknowledged); VoiceLatency.duration("inbox_ack", acknowledgedAt) },
         )
-        InboxRefreshResult(handled, receivedSessionSnapshot)
+        InboxRefreshResult(handled, receivedSessionSnapshot, fetchSucceeded = true)
     }
 
     suspend fun updateFcmRegistration(installationId: String) {
@@ -529,6 +534,32 @@ class AgenticWearRepository(private val context: Context) {
             throw cancelled
         } catch (_: Exception) {
             // Best effort by design.
+        }
+    }
+
+    /**
+     * Diagnostics only, like [sendNotifyTraceBestEffort]: reports the recent failed relay attempts (operation,
+     * status, exception class, time; no text) in one `relay.failures` payload and forgets exactly the entries it
+     * reported once the relay accepted it. Any failure or delay is dropped; the entries then wait for the next
+     * successful refresh. Skipped while another refresh is already reporting, so a push and a foreground
+     * refresh finishing together do not send the same entries twice.
+     */
+    private suspend fun sendRelayFailuresBestEffort() {
+        val failures = RelayFailureLog.snapshot()
+        if (failures.isEmpty()) return
+        if (!relayFailureReportInFlight.compareAndSet(false, true)) return
+        try {
+            val sent = withTimeoutOrNull(RELAY_FAILURES_SEND_TIMEOUT_MS) {
+                sendEncoded(PayloadCodec.encodeRelayFailures(UUID.randomUUID().toString(), failures))
+                true
+            }
+            if (sent == true) RelayFailureLog.clear(failures)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Best effort by design.
+        } finally {
+            relayFailureReportInFlight.set(false)
         }
     }
 
@@ -777,6 +808,8 @@ class AgenticWearRepository(private val context: Context) {
         private val activeTurnConfirmations = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private const val CHAT_REFRESH_REQUEST_TIMEOUT_MS = 5_000L
         private const val NOTIFY_TRACE_SEND_TIMEOUT_MS = 4_000L
+        private const val RELAY_FAILURES_SEND_TIMEOUT_MS = 4_000L
+        private val relayFailureReportInFlight = AtomicBoolean(false)
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private const val MAX_RECORDING_BYTES = 1_300_000
         private val recordingRetry = RecordingRetryCache()
@@ -796,6 +829,8 @@ class AgenticWearRepository(private val context: Context) {
 private data class InboxRefreshResult(
     val handled: Int,
     val receivedSessionSnapshot: Boolean,
+    /** True once `relay.fetchInbox` returned; false when there was no pairing to fetch for. */
+    val fetchSucceeded: Boolean,
 )
 
 internal fun transcriptionReplyDelaysMs(): LongArray =
