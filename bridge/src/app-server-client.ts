@@ -180,13 +180,16 @@ type CachedChat = {
   messages: CachedChatMessage[];
 };
 
-const itemsPreviewResponseSchema = z.object({
-  data: z.array(z.object({
+const itemsPreviewResponseSchema = z.object({ data: z.array(z.unknown()) }).passthrough();
+const itemsPreviewEntrySchema = z.object({
+  turnId: z.string().optional(),
+  item: z.object({
     type: z.string(),
     text: z.string().optional(),
     phase: z.string().nullable().optional(),
-  }).passthrough()),
+  }).passthrough(),
 }).passthrough();
+
 const responseWithThreadSchema = z.object({ thread: threadSchema }).passthrough();
 const threadStartedSchema = z.object({ thread: threadSchema }).passthrough();
 const initializeResponseSchema = z.object({ userAgent: z.string().min(1).max(200) }).passthrough();
@@ -2001,7 +2004,13 @@ export class AppServerClient {
       }, 1_500);
       const parsed = itemsPreviewResponseSchema.safeParse(raw);
       if (!parsed.success) return null;
-      const messages = parsed.data.data.filter((item) => item.type === "agentMessage" && item.text?.trim());
+      const messages = parsed.data.data.flatMap((raw) => {
+        const entry = itemsPreviewEntrySchema.safeParse(raw);
+        if (!entry.success) return [];
+        const { turnId: entryTurnId, item } = entry.data;
+        if (entryTurnId !== undefined && entryTurnId !== turnId) return [];
+        return item.type === "agentMessage" && item.text?.trim() ? [item] : [];
+      });
       return (messages.find((item) => item.phase === "final_answer") ?? messages[0])?.text ?? null;
     } catch {
       return null;

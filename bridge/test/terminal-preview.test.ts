@@ -115,9 +115,9 @@ describe("terminal.completed preview", () => {
       if (method === "thread/items/list") {
         return Promise.resolve({
           data: [
-            { type: "agentMessage", id: "a2", text: "Later note", phase: "commentary" },
-            { type: "agentMessage", id: "a1", text: "The real   answer", phase: "final_answer" },
-            { type: "userMessage", id: "u1" },
+            { turnId: "turn-1", item: { type: "agentMessage", id: "a2", text: "Later note", phase: "commentary" } },
+            { turnId: "turn-1", item: { type: "agentMessage", id: "a1", text: "The real   answer", phase: "final_answer" } },
+            { turnId: "turn-1", item: { type: "userMessage", id: "u1" } },
           ],
           nextCursor: null,
         });
@@ -135,7 +135,7 @@ describe("terminal.completed preview", () => {
     for (const items of [
       () => Promise.reject(new Error("timeout")),
       () => Promise.resolve({ nope: true }),
-      () => Promise.resolve({ data: [{ type: "agentMessage", text: "  " }] }),
+      () => Promise.resolve({ data: [{ turnId: "turn-1", item: { type: "agentMessage", text: "  " } }] }),
     ]) {
       const { events, internals } = setup();
       internals.request = vi.fn((method: string) =>
@@ -145,12 +145,31 @@ describe("terminal.completed preview", () => {
     }
   });
 
+  it("skips odd entries, other item types and other turns", async () => {
+    const { events, internals } = setup();
+    internals.request = vi.fn((method: string) =>
+      method === "thread/turns/list"
+        ? Promise.resolve(turnsList)
+        : Promise.resolve({
+          data: [
+            "garbage",
+            { turnId: "turn-1" },
+            { turnId: "turn-other", item: { type: "agentMessage", text: "Wrong turn", phase: "final_answer" } },
+            { turnId: "turn-1", item: { type: "commandExecution", id: "c1", command: "ls" } },
+            { turnId: "turn-1", item: { type: "agentMessage", text: "Newest note", phase: "commentary" } },
+            { turnId: "turn-1", item: { type: "agentMessage", text: "Right answer", phase: "final_answer" } },
+          ],
+        }));
+    await internals.emitRecentTerminals(session, 1_787_900_000_000);
+    expect(events[0]?.detail).toBe("Right answer");
+  });
+
   it("shows the inbox title and summary for a directive-only reply", async () => {
     const { events, internals } = setup();
     internals.request = vi.fn((method: string) =>
       method === "thread/turns/list"
         ? Promise.resolve(turnsList)
-        : Promise.resolve({ data: [{ type: "agentMessage", text: '::inbox-item{title="Nightly" summary="All green"}', phase: "final_answer" }] }));
+        : Promise.resolve({ data: [{ turnId: "turn-1", item: { type: "agentMessage", text: '::inbox-item{title="Nightly" summary="All green"}', phase: "final_answer" } }] }));
     await internals.emitRecentTerminals(session, 1_787_900_000_000);
     expect(events[0]?.detail).toBe("Nightly: All green");
   });
