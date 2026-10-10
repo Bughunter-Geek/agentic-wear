@@ -22,3 +22,10 @@ bridge/.agentic-wear/
 qa/
 **/google-services.json
 *service-account*.json
+
+# Local bridge test runs, old build snapshots and dependency symlinks
+bridge/.automatic-cloud-tests/
+bridge/.bounded-poll-tests/
+bridge/.proof-test-runs/
+bridge/dist.before-*/
+node_modules
