@@ -83,6 +83,7 @@ data class WearUiState(
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val collapseUpdates: Boolean = true,
+    val popSoundEnabled: Boolean = true,
     val selectedModel: String? = null,
     val reasoningEffort: String = ReasoningEffortPolicy.DEFAULT,
     val relayUrl: String = "",
@@ -242,6 +243,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun setCollapseUpdates(enabled: Boolean) {
         preferences.collapseUpdates = enabled
         _state.update { current -> current.copy(collapseUpdates = enabled) }
+    }
+
+    fun setPopSoundEnabled(enabled: Boolean) {
+        preferences.popSoundEnabled = enabled
+        _state.update { current -> current.copy(popSoundEnabled = enabled) }
     }
 
     fun setModel(model: String?) {
@@ -890,6 +896,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 ApprovalMode.ALERT_ONLY
             },
             collapseUpdates = preferences.collapseUpdates,
+            popSoundEnabled = preferences.popSoundEnabled,
             selectedModel = if (normalized == "transcript") models.first().model else null,
             reasoningEffort = if (normalized == "transcript") "high" else ReasoningEffortPolicy.DEFAULT,
             relayUrl = "https://relay.example.workers.dev",
@@ -1374,6 +1381,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             transcriptionEngine = preferences.transcriptionEngine,
             approvalMode = preferences.approvalMode,
             collapseUpdates = preferences.collapseUpdates,
+            popSoundEnabled = preferences.popSoundEnabled,
             selectedModel = preferences.selectedModel,
             reasoningEffort = preferences.reasoningEffort,
             relayUrl = preferences.relayUrl,

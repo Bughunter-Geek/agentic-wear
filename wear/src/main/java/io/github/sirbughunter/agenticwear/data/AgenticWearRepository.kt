@@ -1034,7 +1034,7 @@ internal fun isAcknowledgedChatRead(requestId: String, snapshotRequestId: String
 private fun presentAlert(context: Context, alert: AgentAlert, firstDelivery: Boolean, shouldNotify: Boolean) {
     when (alertPresentation(firstDelivery, shouldNotify, AppForeground.isForeground)) {
         AlertPresentation.NOTIFY -> AgentNotifier.post(context, alert)
-        AlertPresentation.POP -> MessagePop.play(context)
+        AlertPresentation.POP -> MessagePop.play(context, AppPreferences(context).popSoundEnabled)
         AlertPresentation.NONE -> Unit
     }
 }

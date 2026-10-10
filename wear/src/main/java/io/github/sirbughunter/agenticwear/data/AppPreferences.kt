@@ -48,6 +48,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean(KEY_COLLAPSE_UPDATES, true)
         set(value) = prefs.edit { putBoolean(KEY_COLLAPSE_UPDATES, value) }
 
+    var popSoundEnabled: Boolean
+        get() = prefs.getBoolean(KEY_POP_SOUND, DEFAULT_POP_SOUND_ENABLED)
+        set(value) = prefs.edit { putBoolean(KEY_POP_SOUND, value) }
+
     /** Null means use the model selected by Codex on the bridge. */
     var selectedModel: String?
         get() = prefs.getString(KEY_MODEL, null)?.takeIf(::isSafeModel)
@@ -306,6 +310,8 @@ class AppPreferences(context: Context) {
         private const val KEY_ENGINE = "transcription_engine"
         private const val KEY_APPROVAL_MODE = "approval_mode"
         private const val KEY_COLLAPSE_UPDATES = "collapse_updates"
+        internal const val DEFAULT_POP_SOUND_ENABLED = true
+        private const val KEY_POP_SOUND = "pop_sound_enabled"
         private const val KEY_MODEL = "model"
         private const val KEY_REASONING_EFFORT = "reasoning_effort"
         private const val KEY_SESSIONS = "sessions"

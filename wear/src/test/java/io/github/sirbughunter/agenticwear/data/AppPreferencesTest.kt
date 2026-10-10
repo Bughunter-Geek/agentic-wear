@@ -15,6 +15,11 @@ class AppPreferencesTest {
     }
 
     @Test
+    fun `pop sound defaults to enabled`() {
+        assertTrue(AppPreferences.DEFAULT_POP_SOUND_ENABLED)
+    }
+
+    @Test
     fun `legacy GPT preference migrates to private bridge whisper`() {
         assertEquals(TranscriptionEngine.BRIDGE_WHISPER, storedTranscriptionEngine("GPT_TRANSCRIBE"))
     }

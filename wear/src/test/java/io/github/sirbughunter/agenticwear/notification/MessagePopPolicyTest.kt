@@ -1,7 +1,6 @@
 package io.github.sirbughunter.agenticwear.notification
 
 import android.app.NotificationManager
-import android.media.AudioManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -28,14 +27,15 @@ class MessagePopPolicyTest {
 
     @Test
     fun quietModeGate() {
-        val normal = AudioManager.RINGER_MODE_NORMAL
-        assertTrue(shouldPlayPop(normal, NotificationManager.INTERRUPTION_FILTER_ALL))
-        assertTrue(shouldPlayPop(normal, NotificationManager.INTERRUPTION_FILTER_UNKNOWN))
-        assertFalse(shouldPlayPop(normal, NotificationManager.INTERRUPTION_FILTER_NONE))
-        assertFalse(shouldPlayPop(normal, NotificationManager.INTERRUPTION_FILTER_PRIORITY))
-        assertFalse(shouldPlayPop(normal, NotificationManager.INTERRUPTION_FILTER_ALARMS))
-        assertFalse(shouldPlayPop(AudioManager.RINGER_MODE_VIBRATE, NotificationManager.INTERRUPTION_FILTER_ALL))
-        assertFalse(shouldPlayPop(AudioManager.RINGER_MODE_SILENT, NotificationManager.INTERRUPTION_FILTER_ALL))
+        val all = NotificationManager.INTERRUPTION_FILTER_ALL
+        assertTrue(shouldPlayPop(true, all))
+        assertTrue(shouldPlayPop(true, NotificationManager.INTERRUPTION_FILTER_UNKNOWN))
+        assertFalse(shouldPlayPop(true, NotificationManager.INTERRUPTION_FILTER_NONE))
+        assertFalse(shouldPlayPop(true, NotificationManager.INTERRUPTION_FILTER_PRIORITY))
+        assertFalse(shouldPlayPop(true, NotificationManager.INTERRUPTION_FILTER_ALARMS))
+        assertFalse(shouldPlayPop(false, all))
+        assertFalse(shouldPlayPop(false, NotificationManager.INTERRUPTION_FILTER_UNKNOWN))
+        assertFalse(shouldPlayPop(false, NotificationManager.INTERRUPTION_FILTER_NONE))
     }
 
     @Test
