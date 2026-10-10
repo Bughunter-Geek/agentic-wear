@@ -19,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.wear.compose.foundation.LocalAmbientModeManager
 import androidx.wear.compose.foundation.rememberAmbientModeManager
 import io.github.sirbughunter.agenticwear.ui.AgenticWearApp
+import io.github.sirbughunter.agenticwear.live.LiveVoiceActivity
 import io.github.sirbughunter.agenticwear.ui.AgenticWearTheme
 import io.github.sirbughunter.agenticwear.ui.AgenticWearViewModel
 import io.github.sirbughunter.agenticwear.ui.extractPairingCode
@@ -32,12 +33,13 @@ class MainActivity : ComponentActivity() {
     private var requestingMicrophonePermission = false
     private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         requestingMicrophonePermission = false
-        if (granted) viewModel.beginPushToTalk()
+        if (granted) viewModel.beginPushToTalk() else viewModel.cancelPreparedEdit()
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (openLiveVoiceDemo(intent)) { finish(); return }
         handleIntent(intent)
         setContent {
             val ambientModeManager = rememberAmbientModeManager()
@@ -63,6 +65,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (openLiveVoiceDemo(intent)) return
         handleIntent(intent)
     }
 
@@ -89,7 +92,7 @@ class MainActivity : ComponentActivity() {
                         recording = state.recording,
                         transcribing = state.transcribing,
                         transcriptionElapsedMillis = state.transcriptionElapsedMillis,
-                    )
+                    ) || state.appUpdate.stage == io.github.sirbughunter.agenticwear.update.UpdateStage.DOWNLOADING
                 }
                 .distinctUntilChanged()
                 .collect(::setKeepScreenOn)
@@ -102,6 +105,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun togglePushToTalk() {
+        if (io.github.sirbughunter.agenticwear.live.LiveVoiceService.state.value.phase in setOf("creating", "connecting", "live", "reconnecting")) {
+            startActivity(Intent(this, io.github.sirbughunter.agenticwear.live.LiveVoiceActivity::class.java))
+            return
+        }
         if (viewModel.state.value.recording) {
             viewModel.endPushToTalk()
             return
@@ -115,6 +122,15 @@ class MainActivity : ComponentActivity() {
             requestingMicrophonePermission = true
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    private fun openLiveVoiceDemo(source: Intent?): Boolean {
+        val demo = source?.getStringExtra(EXTRA_DEMO_STATE)
+        if (!BuildConfig.DEBUG || demo !in LiveVoiceActivity.DEMO_STATES) return false
+        startActivity(Intent(this, LiveVoiceActivity::class.java)
+            .putExtra(EXTRA_DEMO_STATE, demo)
+            .putExtra(LiveVoiceActivity.EXTRA_DEMO_COLOUR, source?.getStringExtra(LiveVoiceActivity.EXTRA_DEMO_COLOUR)))
+        return true
     }
 
     private fun requestNotificationPermission() {
@@ -136,13 +152,14 @@ class MainActivity : ComponentActivity() {
                 viewModel.openSession(threadId)
             }
         } else if (intent?.hasExtra(EXTRA_ALERT_EVENT_ID) == true) {
-            viewModel.openAlert(intent.getStringExtra(EXTRA_ALERT_EVENT_ID))
+            viewModel.openAlert(intent.getStringExtra(EXTRA_ALERT_EVENT_ID), intent.getBooleanExtra(EXTRA_ALERT_READ_ONLY, false))
         }
     }
 
     companion object {
         const val EXTRA_DEMO_STATE = "io.github.sirbughunter.agenticwear.DEMO_STATE"
         const val EXTRA_ALERT_EVENT_ID = "io.github.sirbughunter.agenticwear.ALERT_EVENT_ID"
+        const val EXTRA_ALERT_READ_ONLY = "io.github.sirbughunter.agenticwear.ALERT_READ_ONLY"
         const val EXTRA_PAIRING_CODE = "io.github.sirbughunter.agenticwear.PAIRING_CODE"
         const val EXTRA_THREAD_ID = "io.github.sirbughunter.agenticwear.THREAD_ID"
     }

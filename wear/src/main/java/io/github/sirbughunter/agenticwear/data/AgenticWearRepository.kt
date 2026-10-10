@@ -6,17 +6,28 @@ import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.withEditBase
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
+import io.github.sirbughunter.agenticwear.model.terminalSubmissionPhase
+import io.github.sirbughunter.agenticwear.model.SubmittedTurn
+import io.github.sirbughunter.agenticwear.model.SubmissionPhase
+import io.github.sirbughunter.agenticwear.model.submissionPhaseFromWire
 import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
 import io.github.sirbughunter.agenticwear.tile.RecentSessionsTileService
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import android.os.SystemClock
+import io.github.sirbughunter.agenticwear.voice.VoiceLatency
 import org.json.JSONObject
 
 class AgenticWearRepository(private val context: Context) {
@@ -27,6 +38,13 @@ class AgenticWearRepository(private val context: Context) {
     private val relay = RelayApi()
 
     val isPaired: Boolean get() = pairingStore.read() != null
+
+    fun restoreUnconfirmedTurn() {
+        val id = preferences.pendingTurnRequestId ?: return
+        if (activeTurnConfirmations.contains(id)) return
+        preferences.pending = false
+        preferences.updateSubmittedTurn(id) { it.progress(SubmissionPhase.UNCERTAIN) }
+    }
 
     suspend fun pair(code: String, relayUrl: String) {
         val normalizedUrl = RelayUrlPolicy.normalize(relayUrl)
@@ -59,49 +77,101 @@ class AgenticWearRepository(private val context: Context) {
 
     suspend fun syncSessions() = send(BridgePayload.SessionSync(UUID.randomUUID().toString()))
 
+    suspend fun prepareDraft() {
+        if (preferences.transcriptionEngine.bridgeBackend == "phonon" || preferences.revisionBase != null) {
+            send(BridgePayload.PrepareDraft(UUID.randomUUID().toString()))
+        }
+    }
+
+    fun canRetryTranscript(requestId: String): Boolean =
+        recordingRetry.available(requestId, SystemClock.elapsedRealtime())
+
+    fun clearRetryRecording() {
+        retryExpiryJob?.cancel()
+        retryExpiryJob = null
+        recordingRetry.clear()
+    }
+
+    suspend fun retryTranscript(previousReview: Transcript, requestId: String, notifyAfterMillis: Long? = null): String {
+        check(!preferences.pending && preferences.pendingTranscriptionRequestId == null) { "A voice request is already active" }
+        check(preferences.transcriptionEngine.usesBridge) { "Retry requires a Mac transcriber" }
+        val replay = recordingRetry.replay(previousReview.requestId, requestId, SystemClock.elapsedRealtime())
+            ?: error("Recording expired. Record again to enable Retry.")
+        // Undo/cancellation returns the review, while the wire payload uses the
+        // original edit base so replaying a voice edit never applies it twice.
+        preferences.revisionBase = previousReview
+        return transcribeBytes(replay.bytes, replay.threadId, requestId, replay.revisionBase, notifyAfterMillis)
+    }
+
     suspend fun transcribe(
         audioFile: File,
         threadId: String?,
         requestId: String,
         notifyAfterMillis: Long? = null,
     ): String {
-        val revisionBase = preferences.revisionBase
         val bytes = audioFile.readBytes()
+        try {
+            require(bytes.isNotEmpty() && bytes.size <= MAX_RECORDING_BYTES) { "Recording is too large; keep it under four minutes" }
+            if (preferences.isTranscriptionCancelled(requestId)) throw CancellationException("Transcription was cancelled")
+            recordingRetry.retain(bytes, requestId, threadId, preferences.revisionBase, SystemClock.elapsedRealtime())
+            retryExpiryJob?.cancel()
+            retryExpiryJob = retryScope.launch {
+                delay(30L * 60L * 1_000L)
+                recordingRetry.expire(SystemClock.elapsedRealtime())
+                broadcastStateChanged()
+            }
+            return transcribeBytes(bytes, threadId, requestId, preferences.revisionBase, notifyAfterMillis) {
+                check(audioFile.delete() || !audioFile.exists()) { "Could not remove the sent recording" }
+            }
+        } finally {
+            bytes.fill(0)
+            audioFile.delete()
+        }
+    }
+
+    private suspend fun transcribeBytes(
+        bytes: ByteArray,
+        threadId: String?,
+        requestId: String,
+        revisionBase: Transcript?,
+        notifyAfterMillis: Long?,
+        afterUpload: () -> Unit = {},
+    ): String {
+        val uploadStarted = SystemClock.elapsedRealtime()
         try {
             if (preferences.isTranscriptionCancelled(requestId)) {
                 throw kotlinx.coroutines.CancellationException("Transcription was cancelled")
             }
-            require(bytes.size <= MAX_RECORDING_BYTES) { "Recording is too large; keep it under four minutes" }
+            require(bytes.isNotEmpty() && bytes.size <= MAX_RECORDING_BYTES) { "Recording is too large; keep it under four minutes" }
             preferences.pending = true
             preferences.pendingTranscriptionRequestId = requestId
             preferences.transcript = null
             preferences.lastError = null
             send(
-                BridgePayload.CreateTranscription(
-                    requestId = requestId,
-                    audioBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
-                    mimeType = "audio/aac",
-                    threadId = threadId,
-                    previousText = revisionBase?.text,
+                recordingTranscriptionPayload(
+                    requestId, Base64.encodeToString(bytes, Base64.NO_WRAP), threadId,
+                    revisionBase, preferences.transcriptionEngine.bridgeBackend,
                 ),
             )
-            check(audioFile.delete() || !audioFile.exists()) { "Could not remove the sent recording" }
+            VoiceLatency.duration("upload", uploadStarted)
+            afterUpload()
             for (waitMillis in transcriptionReplyDelaysMs()) {
                 delay(waitMillis)
                 refreshInboxBatch(notify = true, notifyAfterMillis = notifyAfterMillis)
-                if (preferences.transcript?.requestId == requestId || preferences.lastError != null) break
+                if (shouldFinishTranscriptionWait(requestId, preferences.pendingTranscriptionRequestId, preferences.transcript?.requestId)) break
             }
             return requestId
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            audioFile.delete()
-            if (preferences.pendingTranscriptionRequestId == requestId) {
+            if (preferences.pendingTranscriptionRequestId == requestId ||
+                preferences.pendingTranscriptionRequestId == null && preferences.isTranscriptionCancelled(requestId)) {
+                preferences.revisionBase?.let { preferences.transcript = it }
+                preferences.revisionBase = null
                 preferences.pendingTranscriptionRequestId = null
                 preferences.pending = false
             }
             throw cancelled
         } catch (error: Throwable) {
-            audioFile.delete()
-            revisionBase?.let { preferences.transcript = it }
+            preferences.revisionBase?.let { preferences.transcript = it }
             preferences.revisionBase = null
             preferences.pendingTranscriptionRequestId = null
             preferences.pending = false
@@ -129,8 +199,10 @@ class AgenticWearRepository(private val context: Context) {
         model: String?,
         effort: String,
         followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
+        onPrepared: () -> Unit = {},
     ): String {
         require(text.isNotBlank()) { "Transcript is empty" }
+        clearRetryRecording()
         // An unacknowledged POST may already be executing. Checking again must
         // retain its identity and must not dispatch a duplicate prompt.
         val pairing = pairingStore.read() ?: error("Pair Agentic Wear first")
@@ -150,16 +222,35 @@ class AgenticWearRepository(private val context: Context) {
         )
         val requestId = delivery.requestId
         val envelope = JSONObject(delivery.envelope)
-        preferences.pending = true
-        preferences.pendingTurnRequestId = requestId
-        preferences.lastAcceptedThreadId = null
-        preferences.lastAcceptedTurnRequestId = null
-        preferences.lastSendNotice = null
-        preferences.lastError = null
+        preferences.changeSubmittedTurns { items ->
+            if (items.any { it.requestId == requestId }) items
+            else items + SubmittedTurn(requestId, threadId, text.trim(), System.currentTimeMillis())
+        }
+        onPrepared()
+        return awaitTurnConfirmation(requestId) { relay.sendToBridge(pairing, envelope) }
+    }
+
+    /** Reuse the original encrypted request; a status retry never creates another prompt. */
+    suspend fun retryTurnConfirmation(): String {
+        val requestId = preferences.pendingTurnRequestId ?: error("There is no unconfirmed message to check")
+        val envelope = preferences.pendingTurnEnvelope ?: error("Original delivery is unavailable. Check this chat in Codex before sending again.")
+        val pairing = pairingStore.read() ?: error("Pair Agentic Wear first")
+        return awaitTurnConfirmation(requestId) { relay.sendToBridge(pairing, JSONObject(envelope)) }
+    }
+
+    private suspend fun awaitTurnConfirmation(requestId: String, sendOriginal: suspend () -> Unit): String {
+        check(activeTurnConfirmations.add(requestId)) { "Already checking this message's delivery. No new copy was sent." }
         try {
+            preferences.pending = true
+            preferences.pendingTurnRequestId = requestId
+            preferences.lastAcceptedThreadId = null
+            preferences.lastAcceptedTurnRequestId = null
+            preferences.lastSendNotice = null
+            preferences.lastError = null
+            broadcastStateChanged()
             // Retransmit the same authenticated ciphertext. The bridge replays
             // its durable receipt and cannot dispatch this envelope twice.
-            relay.sendToBridge(pairing, envelope)
+            sendOriginal()
             for (waitMillis in TURN_REPLY_DELAYS_MS) {
                 delay(waitMillis)
                 refreshInboxBatch(notify = true)
@@ -170,6 +261,7 @@ class AgenticWearRepository(private val context: Context) {
                 preferences.pending = false
                 val message = "Still waiting for Codex to confirm this prompt. It may already be running. Retry checks for its confirmation without sending another copy."
                 preferences.lastError = message
+                preferences.updateSubmittedTurn(requestId) { it.progress(SubmissionPhase.UNCERTAIN) }
                 error(message)
             }
             preferences.lastError?.let(::error)
@@ -177,12 +269,17 @@ class AgenticWearRepository(private val context: Context) {
                 ?: error("Codex accepted the request without returning a session. Refresh Sessions and retry.")
         } catch (cancelled: CancellationException) {
             preferences.pending = false
+            preferences.updateSubmittedTurn(requestId) { it.progress(SubmissionPhase.UNCERTAIN) }
             throw cancelled
         } catch (error: Throwable) {
             preferences.pending = false
+            if (preferences.pendingTurnRequestId == requestId) {
+                preferences.updateSubmittedTurn(requestId) { it.progress(SubmissionPhase.UNCERTAIN) }
+            }
             if (preferences.lastError == null) preferences.lastError = error.message
             throw error
         } finally {
+            activeTurnConfirmations.remove(requestId)
             broadcastStateChanged()
         }
     }
@@ -191,17 +288,19 @@ class AgenticWearRepository(private val context: Context) {
         require(threadId.isNotBlank()) { "Choose a Codex session first" }
         val requestId = UUID.randomUUID().toString()
         preferences.pendingChatRequestId = requestId
+        pendingChatRefreshStartedAtMillis = System.currentTimeMillis()
+        preferences.lastReadyChatRequestId = null
         preferences.lastError = null
         send(BridgePayload.WatchChat(requestId, threadId))
         for (waitMillis in CHAT_REPLY_DELAYS_MS) {
             delay(waitMillis)
             refreshInboxBatch(notify = true)
             preferences.chatSnapshot
-                ?.takeIf { it.threadId == threadId && it.requestId == requestId }
+                ?.takeIf { it.threadId == threadId && isAcknowledgedChatRead(requestId, it.requestId, preferences.lastReadyChatRequestId) }
                 ?.let { return it }
-            if (preferences.lastError != null) break
+            if (preferences.pendingChatRequestId != requestId) break
         }
-        val snapshot = preferences.chatSnapshot?.takeIf { it.threadId == threadId && it.requestId == requestId }
+        val snapshot = preferences.chatSnapshot?.takeIf { it.threadId == threadId && isAcknowledgedChatRead(requestId, it.requestId, preferences.lastReadyChatRequestId) }
         if (preferences.pendingChatRequestId == requestId) preferences.pendingChatRequestId = null
         return snapshot
     }
@@ -325,23 +424,37 @@ class AgenticWearRepository(private val context: Context) {
         notifyAfterMillis: Long? = null,
     ): InboxRefreshResult = inboxRefreshMutex.withLock {
         val pairing = pairingStore.read() ?: return@withLock InboxRefreshResult(0, false)
+        val fetchedAt = SystemClock.elapsedRealtime()
         val envelopes = relay.fetchInbox(pairing)
+        VoiceLatency.duration("inbox_fetch", fetchedAt)
         val acknowledged = mutableListOf<String>()
         var handled = 0
         var receivedSessionSnapshot = false
         envelopes.forEach { envelope ->
             val messageId = envelope.optString("messageId")
+            if (recentInboxMessages.handled(messageId)) {
+                // Already processed; only its asynchronous acknowledgement was still in flight.
+                acknowledged += messageId
+                return@forEach
+            }
             val sentAt = envelope.optLong("sentAt")
             runCatching { crypto.decrypt(pairing.pairId, pairing.bridgePublicKey, envelope) }
                 .onSuccess { payload ->
                     processPayload(payload, notify, notifyAfterMillis, messageId, sentAt)
                     if (payload.optString("kind") == "sessions.snapshot") receivedSessionSnapshot = true
-                    if (messageId.isNotBlank()) acknowledged += messageId
+                    if (messageId.isNotBlank()) {
+                        acknowledged += messageId
+                        recentInboxMessages.remember(messageId)
+                    }
                     handled += 1
                 }
         }
-        relay.acknowledge(pairing, acknowledged)
-        if (handled > 0) broadcastStateChanged()
+        val acknowledgedAt = SystemClock.elapsedRealtime()
+        publishBeforeAcknowledgement(
+            publish = { if (handled > 0) broadcastStateChanged() },
+            queue = inboxAcknowledgements,
+            acknowledge = { relay.acknowledge(pairing, acknowledged); VoiceLatency.duration("inbox_ack", acknowledgedAt) },
+        )
         InboxRefreshResult(handled, receivedSessionSnapshot)
     }
 
@@ -350,9 +463,12 @@ class AgenticWearRepository(private val context: Context) {
     }
 
     fun disconnect() {
+        clearRetryRecording()
         pairingStore.clear()
         crypto.clearPairingKey()
         preferences.sessions = emptyList()
+        preferences.changeSubmittedTurns { emptyList() }
+        preferences.localInventoryComplete = null
         preferences.models = emptyList()
         preferences.latestAlert = null
         preferences.transcript = null
@@ -386,11 +502,17 @@ class AgenticWearRepository(private val context: Context) {
         envelopeMessageId: String,
         envelopeSentAt: Long,
     ) {
+        if (payload.optString("kind").startsWith("live.")) {
+            io.github.sirbughunter.agenticwear.live.LiveSignaling.receive(payload, context)
+            return
+        }
         when (payload.optString("kind")) {
             "sessions.snapshot" -> {
                 preferences.sessions = PayloadCodec.decodeSessions(payload)
+                preferences.localInventoryComplete = payload.optJSONObject("discovery")
+                    ?.takeIf { it.optString("scope") == "local" }?.optBoolean("complete", false)
                 if (payload.has("models")) preferences.models = PayloadCodec.decodeModels(payload)
-                preferences.lastError = null
+                // Catalog refresh is unrelated to a failed chat/dictation request.
                 RecentSessionsTileService.requestUpdate(context)
             }
             "transcription.ready" -> {
@@ -402,11 +524,14 @@ class AgenticWearRepository(private val context: Context) {
                         pendingRequestId = preferences.pendingTranscriptionRequestId,
                         incomingRequestId = requestId,
                     ) -> {
-                        preferences.transcript = transcript
+                        preferences.transcript = preferences.revisionBase?.let { base ->
+                            transcript.withEditBase(base)
+                        } ?: transcript
                         preferences.revisionBase = null
                         preferences.pendingTranscriptionRequestId = null
                         preferences.pending = false
                         preferences.lastError = null
+                        VoiceLatency.ready()
                     }
                 }
             }
@@ -423,19 +548,26 @@ class AgenticWearRepository(private val context: Context) {
                         )
                     ) {
                         preferences.chatSnapshot = snapshot
-                        if (snapshot.requestId == preferences.pendingChatRequestId) {
+                        preferences.changeSubmittedTurns { items -> items.map { it.reconcile(snapshot) } }
+                        if (snapshot.requestId != null && snapshot.requestId == preferences.pendingChatRequestId) {
+                            preferences.lastReadyChatRequestId = snapshot.requestId
+                            preferences.lastError = null
                             preferences.pendingChatRequestId = null
                             pendingChatRefreshStartedAtMillis = 0L
                         }
-                        preferences.lastError = null
                     }
                 }
             }
             "terminal.completed", "terminal.failed", "terminal.interrupted", "terminal.blocked",
             "approval.request" -> PayloadCodec.decodeAlert(payload)?.let { alert ->
                 preferences.latestAlert = alert
-                preferences.pending = false
-                preferences.lastError = null
+                if (preferences.pendingTurnRequestId == null) preferences.pending = false
+                if (payload.optString("kind") in setOf("terminal.completed", "terminal.failed", "terminal.interrupted")) {
+                    val requestId = payload.optString("requestId")
+                    if (requestId.isNotBlank()) preferences.updateSubmittedTurn(requestId) {
+                        if (it.threadId != alert.threadId) it else it.progress(terminalSubmissionPhase(payload.optString("kind"), payload.optString("deliveryState"), it.phase))
+                    }
+                }
                 val firstDelivery = preferences.markEventHandled(alert.eventId)
                 if (firstDelivery && shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis)) {
                     AgentNotifier.post(context, alert)
@@ -488,6 +620,9 @@ class AgenticWearRepository(private val context: Context) {
                     !payload.optBoolean("deliveryUncertain")) {
                     preferences.pendingTurnRequestId = null
                 }
+                if (errorKind == "turn.error" && !staleTurnError) {
+                    preferences.updateSubmittedTurn(requestId) { it.progress(if (payload.optBoolean("deliveryUncertain")) SubmissionPhase.UNCERTAIN else SubmissionPhase.FAILED) }
+                }
                 if (errorKind == "approval.error" && requestId == preferences.pendingApprovalRequestId) {
                     preferences.pendingApprovalRequestId = null
                 }
@@ -522,6 +657,9 @@ class AgenticWearRepository(private val context: Context) {
                         preferences.selectedThreadId = acceptedThreadId
                     }
                     preferences.lastAcceptedTurnRequestId = requestId
+                    preferences.updateSubmittedTurn(requestId) {
+                        it.progress(if (payload.optString("state") == "waiting") SubmissionPhase.QUEUED else SubmissionPhase.ACCEPTED, acceptedThreadId)
+                    }
                     preferences.lastSendNotice = payload.optString("message").takeIf(String::isNotBlank)
                     preferences.transcript = null
                     preferences.revisionBase = null
@@ -530,7 +668,12 @@ class AgenticWearRepository(private val context: Context) {
                 }
             }
             "turn.started" -> {
-                if (payload.optString("requestId") == preferences.lastAcceptedTurnRequestId) {
+                val requestId = payload.optString("requestId")
+                preferences.updateSubmittedTurn(requestId) {
+                        it.progress(submissionPhaseFromWire(payload.optString("deliveryState")) ?: if (payload.optBoolean("selectionApplied")) SubmissionPhase.RUNNING else it.phase,
+                            payload.optString("threadId").takeIf(String::isNotBlank), payload.optString("nativeTurnId").takeIf { value -> value.isNotBlank() && value != "null" })
+                }
+                if (requestId == preferences.lastAcceptedTurnRequestId) {
                     preferences.lastSendNotice = payload.optString("message").takeIf(String::isNotBlank)
                     preferences.lastError = null
                 }
@@ -586,15 +729,21 @@ class AgenticWearRepository(private val context: Context) {
     }
 
     companion object {
+        private val activeTurnConfirmations = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private const val CHAT_REFRESH_REQUEST_TIMEOUT_MS = 5_000L
         const val ACTION_STATE_CHANGED = "io.github.sirbughunter.agenticwear.STATE_CHANGED"
         private const val MAX_RECORDING_BYTES = 1_300_000
+        private val recordingRetry = RecordingRetryCache()
+        private val retryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        private var retryExpiryJob: kotlinx.coroutines.Job? = null
         private val SESSION_REPLY_DELAYS_MS = longArrayOf(150, 300, 600, 1_200)
         private val TURN_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 600, 900, 1_200, 1_600, 2_000, 2_500, 3_000, 2_500)
         private val CHAT_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 2_500, 3_000)
         private val FEEDBACK_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 3_000)
         private val APPROVAL_REPLY_DELAYS_MS = longArrayOf(150, 250, 400, 700, 1_000, 1_500, 2_000, 3_000)
         private val inboxRefreshMutex = Mutex()
+        private val inboxAcknowledgements = InboxAcknowledgements(CoroutineScope(SupervisorJob() + Dispatchers.IO))
+        private val recentInboxMessages = RecentInboxMessages()
     }
 }
 
@@ -604,7 +753,9 @@ private data class InboxRefreshResult(
 )
 
 internal fun transcriptionReplyDelaysMs(): LongArray =
-    longArrayOf(150, 200, 250, 350, 500, 700, 1_000, 500, 700, 900, 1_200, 1_600, 2_000)
+    // Foreground voice only: avoid adding up to two seconds of scheduled
+    // idle time after the Mac has finished. Requests remain sequential.
+    LongArray(41) { index -> when (index) { 0 -> 150L; 1 -> 200L; else -> 250L } }
 
 internal fun shouldAcceptTranscriptionResult(
     pendingRequestId: String?,
@@ -659,3 +810,11 @@ internal fun prepareTurnDelivery(
     val id = UUID.randomUUID().toString()
     return PendingTurnDelivery(id, createEnvelope(id), fingerprint).also(persist)
 }
+
+/** Unrelated chat/catalog errors must not end a still-pending dictation. */
+internal fun shouldFinishTranscriptionWait(requestId: String, pendingRequestId: String?, readyRequestId: String?): Boolean =
+    readyRequestId == requestId || pendingRequestId != requestId
+
+/** A newer uncorrelated stream snapshot may replace the matching reply in the same inbox batch. */
+internal fun isAcknowledgedChatRead(requestId: String, snapshotRequestId: String?, acknowledgedRequestId: String?): Boolean =
+    snapshotRequestId == requestId || acknowledgedRequestId == requestId

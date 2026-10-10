@@ -12,7 +12,7 @@ class TranscriptionPollingPolicyTest {
 
         assertEquals(150L, delays.first())
         assertTrue(delays.sum() >= 10_000L)
-        assertTrue(delays.maxOrNull()!! <= 2_000L)
+        assertTrue(delays.maxOrNull()!! <= 250L)
     }
 
     @Test

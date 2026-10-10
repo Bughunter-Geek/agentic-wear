@@ -75,7 +75,7 @@ class VoiceSessionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_BEGIN -> begin(intent)
-            ACTION_FINISH -> finishAndTranscribe()
+            ACTION_FINISH -> finishAndTranscribe(intent.getLongExtra("stop_elapsed", SystemClock.elapsedRealtime()))
         }
         return START_NOT_STICKY
     }
@@ -103,12 +103,14 @@ class VoiceSessionService : Service() {
         runCatching {
             promoteToForeground(transcribing = false)
             acquireWakeLock()
+            repository.clearRetryRecording()
             recorder.start()
         }.onFailure { error ->
             fail(error.message ?: "Could not start the microphone")
             return
         }
 
+        serviceScope.launch(Dispatchers.IO) { runCatching { repository.prepareDraft() } }
         _sessionState.value = VoiceSessionSnapshot(phase = VoiceSessionPhase.RECORDING)
         voiceMonitorJob = serviceScope.launch(Dispatchers.Default) {
             while (isActive && recorder.isRecording) {
@@ -125,19 +127,21 @@ class VoiceSessionService : Service() {
         }
     }
 
-    private fun finishAndTranscribe() {
+    private fun finishAndTranscribe(requestedAt: Long = SystemClock.elapsedRealtime()) {
         if (!recorder.isRecording) return
         voiceMonitorJob?.cancel()
         voiceMonitorJob = null
         timeoutJob?.cancel()
         timeoutJob = null
+        VoiceLatency.start(requestedAt)
         val audio = recorder.stop()
+        VoiceLatency.duration("capture_finish", requestedAt)
         if (audio == null) {
             fail("I didn't catch enough audio. Tap and try again.")
             return
         }
 
-        val startedAt = SystemClock.elapsedRealtime()
+        val startedAt = requestedAt
         val requestId = UUID.randomUUID().toString()
         _sessionState.value = VoiceSessionSnapshot(
             phase = VoiceSessionPhase.TRANSCRIBING,
@@ -281,6 +285,9 @@ class VoiceSessionService : Service() {
         }
 
         fun begin(context: Context, threadId: String?, notifyAfterMillis: Long) {
+            check(io.github.sirbughunter.agenticwear.live.LiveVoiceService.state.value.phase !in setOf("creating", "connecting", "live", "reconnecting")) {
+                "End live voice before starting dictation. Your draft is retained."
+            }
             val intent = Intent(context, VoiceSessionService::class.java)
                 .setAction(ACTION_BEGIN)
                 .putExtra(EXTRA_THREAD_ID, threadId)
@@ -288,8 +295,8 @@ class VoiceSessionService : Service() {
             ContextCompat.startForegroundService(context, intent)
         }
 
-        fun finish(context: Context) {
-            context.startService(Intent(context, VoiceSessionService::class.java).setAction(ACTION_FINISH))
+        fun finish(context: Context, requestedAt: Long = SystemClock.elapsedRealtime()) {
+            context.startService(Intent(context, VoiceSessionService::class.java).setAction(ACTION_FINISH).putExtra("stop_elapsed", requestedAt))
         }
 
         fun cancel(context: Context) {

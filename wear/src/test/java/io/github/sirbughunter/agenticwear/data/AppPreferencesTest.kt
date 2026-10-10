@@ -20,6 +20,11 @@ class AppPreferencesTest {
     }
 
     @Test
+    fun `explicit phonon preference is preserved`() {
+        assertEquals(TranscriptionEngine.BRIDGE_PHONON, storedTranscriptionEngine("BRIDGE_PHONON"))
+    }
+
+    @Test
     fun `explicit device speech preference is preserved`() {
         assertEquals(TranscriptionEngine.DEVICE_SPEECH, storedTranscriptionEngine("DEVICE_SPEECH"))
     }

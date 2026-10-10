@@ -21,14 +21,16 @@ import io.github.sirbughunter.agenticwear.model.SessionStatus
 internal const val TILE_RESOURCES_VERSION = "1"
 
 // Theme color constants matching Agentic Wear dark palette
-internal const val COLOR_INK = 0xFF090A0F.toInt()
-internal const val COLOR_PANEL_RAISED = 0xFF1A1D27.toInt()
-internal const val COLOR_CYAN = 0xFF4DEEEA.toInt()
+internal const val COLOR_INK = 0xFF000000.toInt()
+internal const val COLOR_PANEL_RAISED = 0xFF1C1C1C.toInt()
+internal const val COLOR_CYAN = 0xFF8AB4FF.toInt()
 internal const val COLOR_VIOLET = 0xFF9B51E0.toInt()
-internal const val COLOR_FROST = 0xFFE0E6ED.toInt()
-internal const val COLOR_CORAL = 0xFFFF5A78.toInt()
-internal const val COLOR_MINT = 0xFF64E6AE.toInt()
-internal const val COLOR_MUTED = 0xFF7A8394.toInt()
+internal const val COLOR_FROST = 0xFFF4F4F4.toInt()
+internal const val COLOR_CORAL = 0xFFFF9A9A.toInt()
+internal const val COLOR_MINT = 0xFF5AD08C.toInt()
+internal const val COLOR_MUTED = 0xFFA6A6A6.toInt()
+internal const val COLOR_PRIMARY = 0xFFF4F4F4.toInt()
+internal const val COLOR_ON_PRIMARY = 0xFF0A0A0A.toInt()
 
 object TileLayoutHelper {
 
@@ -51,9 +53,9 @@ object TileLayoutHelper {
         val primaryLayout = PrimaryLayout.Builder(deviceParameters)
             .setResponsiveContentInsetEnabled(true)
             .setPrimaryLabelTextContent(
-                Text.Builder(context, "Recent sessions")
+                Text.Builder(context, "Recent chats")
                     .setTypography(Typography.TYPOGRAPHY_CAPTION1)
-                    .setColor(argb(COLOR_CYAN))
+                    .setColor(argb(COLOR_MUTED))
                     .build(),
             )
 
@@ -62,7 +64,7 @@ object TileLayoutHelper {
                 LayoutElementBuilders.Column.Builder()
                     .setWidth(expand())
                     .addContent(
-                        Text.Builder(context, "No recent sessions")
+                        Text.Builder(context, "No recent chats")
                             .setTypography(Typography.TYPOGRAPHY_BODY1)
                             .setColor(argb(COLOR_FROST))
                             .build(),
@@ -87,8 +89,8 @@ object TileLayoutHelper {
                 )
                     .setChipColors(
                         ChipColors(
-                            COLOR_PANEL_RAISED,
-                            COLOR_CYAN,
+                            COLOR_PRIMARY,
+                            COLOR_ON_PRIMARY,
                         ),
                     )
                     .build(),
@@ -114,14 +116,14 @@ object TileLayoutHelper {
             primaryLayout.setPrimaryChipContent(
                 CompactChip.Builder(
                     context,
-                    if (sessions.size > maxSessions) "All sessions" else "Open app",
+                    if (sessions.size > maxSessions) "All chats" else "Open app",
                     openAppClickable(context, "open_app_recent"),
                     deviceParameters,
                 )
                     .setChipColors(
                         ChipColors(
-                            COLOR_PANEL_RAISED,
-                            COLOR_CYAN,
+                            COLOR_PRIMARY,
+                            COLOR_ON_PRIMARY,
                         ),
                     )
                     .build(),
@@ -150,7 +152,7 @@ object TileLayoutHelper {
                     COLOR_PANEL_RAISED,
                     COLOR_FROST,
                     statusColor,
-                    COLOR_CYAN,
+                    COLOR_FROST,
                 ),
             )
             .build()

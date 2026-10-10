@@ -13,6 +13,7 @@ import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
+import io.github.sirbughunter.agenticwear.model.MAX_LOCAL_SESSION_SNAPSHOT
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
@@ -27,6 +28,7 @@ object PayloadCodec {
             .put("kind", "session.sync")
             .put("requestId", payload.requestId)
             .toString()
+        is BridgePayload.PrepareDraft -> JSONObject().put("version", 1).put("kind", "draft.prepare").put("requestId", payload.requestId).toString()
         is BridgePayload.CreateTranscription -> JSONObject()
             .put("version", 1)
             .put("kind", "transcription.create")
@@ -35,6 +37,8 @@ object PayloadCodec {
             .put("mimeType", payload.mimeType)
             .put("threadId", payload.threadId)
             .put("previousText", payload.previousText)
+            .apply { if (payload.finalIntent) put("finalIntent", true); if (payload.localEdit) put("localEdit", true) }
+            .apply { payload.backend?.let { put("backend", it) } }
             .toString()
         is BridgePayload.SubmitTurn -> JSONObject()
             .put("version", 1)
@@ -80,7 +84,7 @@ object PayloadCodec {
         if (json.optInt("version") != 1 || json.optString("kind") != "sessions.snapshot") return emptyList()
         val data = json.optJSONArray("sessions") ?: return emptyList()
         return buildList {
-            for (index in 0 until minOf(data.length(), 50)) {
+            for (index in 0 until minOf(data.length(), MAX_LOCAL_SESSION_SNAPSHOT)) {
                 val value = data.optJSONObject(index) ?: continue
                 val id = value.optString("id").takeIf(::isSafeId) ?: continue
                 val title = clean(value.optString("title"), 100).ifEmpty { "Untitled session" }
@@ -99,6 +103,8 @@ object PayloadCodec {
                         ownedByWear = value.optBoolean("ownedByWear", false),
                         canAcceptDirectInput = value.optBoolean("canAcceptDirectInput", false),
                         watchReady = value.optBoolean("watchReady", false),
+                        pinned = value.optBoolean("pinned", false),
+                        source = clean(value.optString("source"), 64).takeIf { it.isNotBlank() },
                     ),
                 )
             }
@@ -205,6 +211,11 @@ object PayloadCodec {
             text = text,
             threadId = json.optString("threadId").takeIf(::isSafeId),
             revised = json.optBoolean("revised", false),
+            editNotice = clean(json.optString("editNotice"), 240).takeIf { it.isNotEmpty() },
+            editChoices = (json.optJSONArray("editChoices") ?: JSONArray()).let { choices ->
+                (0 until minOf(choices.length(), 5)).mapNotNull { i -> clean(choices.optString(i), MAX_TRANSCRIPT_CHARS).takeIf { it.isNotEmpty() } }
+            },
+            rawText = if (json.has("rawText")) clean(json.optString("rawText"), MAX_TRANSCRIPT_CHARS).takeIf { it.isNotEmpty() } else null,
         )
     }
 
@@ -290,7 +301,8 @@ object PayloadCodec {
                             .put("phase", message.phase.name)
                             .put("approvalId", message.approvalId)
                             .put("canControl", message.canControl)
-                            .put("resolved", message.resolved),
+                            .put("resolved", message.resolved)
+                            .put("watchRequestId", message.watchRequestId),
                     )
                 }
             },
@@ -334,7 +346,7 @@ object PayloadCodec {
     }.getOrNull()
 
     fun sessionsToJson(sessions: List<AgentSession>): String = JSONArray().apply {
-        sessions.take(50).forEach { session ->
+        sessions.take(MAX_LOCAL_SESSION_SNAPSHOT).forEach { session ->
             put(
                 JSONObject()
                     .put("id", session.id)
@@ -343,7 +355,9 @@ object PayloadCodec {
                     .put("status", session.status.name)
                     .put("ownedByWear", session.ownedByWear)
                     .put("canAcceptDirectInput", session.canAcceptDirectInput)
-                    .put("watchReady", session.watchReady),
+                    .put("watchReady", session.watchReady)
+                    .put("pinned", session.pinned)
+                    .put("source", session.source),
             )
         }
     }.toString()
@@ -393,7 +407,7 @@ object PayloadCodec {
     fun sessionsFromJson(value: String): List<AgentSession> = runCatching {
         val data = JSONArray(value)
         buildList {
-            for (index in 0 until minOf(data.length(), 50)) {
+            for (index in 0 until minOf(data.length(), MAX_LOCAL_SESSION_SNAPSHOT)) {
                 val item = data.optJSONObject(index) ?: continue
                 val id = item.optString("id").takeIf(::isSafeId) ?: continue
                 add(
@@ -406,6 +420,8 @@ object PayloadCodec {
                         ownedByWear = item.optBoolean("ownedByWear"),
                         canAcceptDirectInput = item.optBoolean("canAcceptDirectInput"),
                         watchReady = item.optBoolean("watchReady"),
+                        pinned = item.optBoolean("pinned"),
+                        source = item.optString("source").takeIf { !item.isNull("source") && it.isNotBlank() },
                     ),
                 )
             }
@@ -482,6 +498,7 @@ object PayloadCodec {
                     approvalId = item.optString("approvalId").takeIf(::isSafeId),
                     canControl = item.optBoolean("canControl", false),
                     resolved = item.optBoolean("resolved", false),
+                    watchRequestId = item.optString("watchRequestId").takeIf(::isSafeId),
                 ),
             )
         }
@@ -509,6 +526,7 @@ object PayloadCodec {
                     approvalId = item.optString("approvalId").takeIf(::isSafeId),
                     canControl = item.optBoolean("canControl", false),
                     resolved = item.optBoolean("resolved", false),
+                    watchRequestId = item.optString("watchRequestId").takeIf(::isSafeId),
                 ),
             )
         }

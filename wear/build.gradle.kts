@@ -94,6 +94,23 @@ val firebase = firebaseConfig(
 fun firebaseValue(property: String, fileKey: String): String =
     configured(property).ifBlank { firebase[fileKey].orEmpty() }
 
+val liveVoiceRuntime = configured("AGENTIC_WEAR_LIVE_VOICE_RUNTIME") == "true"
+val liveVoiceAbis = configured("AGENTIC_WEAR_LIVE_VOICE_ABI")
+    .split(',').map(String::trim).filter(String::isNotBlank).toSet()
+val liveVoiceLocales = configured("AGENTIC_WEAR_LIVE_VOICE_RESOURCE_LANGUAGES")
+    .split(',').map(String::trim).filter(String::isNotBlank).toSet()
+require(liveVoiceLocales.all { it.matches(Regex("[a-z]{2,3}(-r[A-Z]{2})?")) }) {
+    "AGENTIC_WEAR_LIVE_VOICE_RESOURCE_LANGUAGES must contain Android resource language qualifiers."
+}
+require(liveVoiceAbis.all { it in setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }) {
+    "AGENTIC_WEAR_LIVE_VOICE_ABI must contain supported comma-separated Android ABIs."
+}
+if (liveVoiceRuntime && configured("AGENTIC_WEAR_PRIVATE_UPDATES_ONLY") == "true") {
+    require(liveVoiceAbis.isEmpty() || liveVoiceAbis.containsAll(setOf("armeabi-v7a", "arm64-v8a"))) {
+        "Private live voice updates must retain both ARM32 and ARM64 watch support."
+    }
+}
+
 android {
     namespace = "io.github.sirbughunter.agenticwear"
     compileSdk = 37
@@ -106,6 +123,14 @@ android {
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        if (liveVoiceRuntime && liveVoiceAbis.isNotEmpty()) {
+            ndk { abiFilters += liveVoiceAbis }
+        }
+        if (liveVoiceRuntime && liveVoiceLocales.isNotEmpty()) {
+            resourceConfigurations += liveVoiceLocales
+        }
+
+        buildConfigField("boolean", "LIVE_VOICE_RUNTIME", liveVoiceRuntime.toString())
         buildConfigField("String", "DEFAULT_RELAY_URL", quoted(defaultRelayUrl))
         buildConfigField("String", "FIREBASE_APPLICATION_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_APPLICATION_ID", "applicationId")))
         buildConfigField("String", "FIREBASE_PROJECT_ID", quoted(firebaseValue("AGENTIC_WEAR_FIREBASE_PROJECT_ID", "projectId")))
@@ -114,6 +139,7 @@ android {
         buildConfigField("String", "UPDATE_MANIFEST_URL", quoted(configuredUpdateManifestUrl))
         buildConfigField("String", "UPDATE_MANIFEST_FALLBACK_URL", quoted(configuredUpdateManifestFallbackUrl))
         buildConfigField("String", "RELEASE_CHANNEL", quoted(developmentChannel))
+        buildConfigField("boolean", "PRIVATE_UPDATES_ONLY", (configured("AGENTIC_WEAR_PRIVATE_UPDATES_ONLY") == "true").toString())
     }
 
     signingConfigs {
@@ -125,6 +151,17 @@ android {
                 keyPassword = releaseKeyPassword
             }
         }
+    }
+
+    sourceSets.getByName("main").kotlin.directories.add(
+        if (liveVoiceRuntime) "src/liveWebRtc/java" else "src/noLiveWebRtc/java",
+    )
+
+    if (liveVoiceRuntime && liveVoiceAbis.isNotEmpty()) {
+        // Fit both ARM variants under the private relay's unchanged 8 MiB cap.
+        // Android extracts compressed native libraries and DEX at installation.
+        packaging.jniLibs.useLegacyPackaging = true
+        packaging.dex.useLegacyPackaging = true
     }
 
     buildTypes {
@@ -164,6 +201,7 @@ android {
 }
 
 dependencies {
+    if (liveVoiceRuntime) implementation("io.github.webrtc-sdk:android-prefixed-stripped:150.7871.01")
     val composeBom = platform("androidx.compose:compose-bom:2025.05.00")
     val firebaseBom = platform("com.google.firebase:firebase-bom:34.18.0")
 

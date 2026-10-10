@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.FileProvider
 import io.github.sirbughunter.agenticwear.BuildConfig
+import io.github.sirbughunter.agenticwear.data.SecurePairingStore
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
@@ -31,6 +32,7 @@ data class AppRelease(
     val apkUrl: String,
     val sha256: String,
     val apkSize: Long?,
+    val expiresAt: Long? = null,
 )
 
 data class UpdateUiState(
@@ -51,13 +53,16 @@ internal fun newestAvailableRelease(releases: Iterable<AppRelease>, installedVer
     releases.maxByOrNull(AppRelease::versionCode)?.takeIf { it.versionCode > installedVersionCode }
 
 class AppUpdateManager(private val context: Context) {
-    private val manifestUrls = updateManifestCandidates(
+    private val pairingStore = SecurePairingStore(context)
+    private val manifestUrls: List<URL> get() = if (BuildConfig.PRIVATE_UPDATES_ONLY) {
+        pairingStore.read()?.let { listOf(validatedUrl(it.relayUrl.trimEnd('/') + "/v1/pairs/${it.pairId}/private-update/manifest")) } ?: emptyList()
+    } else updateManifestCandidates(
         BuildConfig.UPDATE_MANIFEST_URL,
         BuildConfig.UPDATE_MANIFEST_FALLBACK_URL,
     ).map(::validatedUrl)
     private val updatePreferences = context.getSharedPreferences(UPDATE_PREFERENCES, Context.MODE_PRIVATE)
     private val activeChecks = ConcurrentHashMap.newKeySet<ManifestCheckRun>()
-    val enabled: Boolean = manifestUrls.isNotEmpty()
+    val enabled: Boolean get() = manifestUrls.isNotEmpty()
 
     fun cachedRelease(): AppRelease? {
         val encoded = updatePreferences.getString(KEY_CACHED_RELEASE, null) ?: return null
@@ -145,70 +150,29 @@ class AppUpdateManager(private val context: Context) {
             .put("versionName", release.versionName)
             .put("apkUrl", release.apkUrl)
             .put("sha256", release.sha256)
-            .apply { release.apkSize?.let { put("apkSize", it) } }
+            .apply { release.apkSize?.let { put("apkSize", it) }; release.expiresAt?.let { put("expiresAt", it) } }
             .toString()
         updatePreferences.edit().putString(KEY_CACHED_RELEASE, encoded).commit()
     }
 
+    @Volatile private var downloadCancelled = false
+    @Volatile private var downloadConnection: HttpURLConnection? = null
+
+    @Volatile private var discardPartialDownload = false
+    fun cancelDownload(discardPartial: Boolean = false) { discardPartialDownload = discardPartialDownload || discardPartial; downloadCancelled = true; downloadConnection?.disconnect() }
+
     fun download(release: AppRelease, onProgress: (Int) -> Unit): File {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 10 * 60_000L
         val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
-        val partial = File(updatesDir, "agentic-wear-${release.versionCode}.partial.apk")
-        val destination = File(updatesDir, "agentic-wear-${release.versionCode}.apk")
-        partial.delete()
-        destination.delete()
-
-        val connection = openConnection(validatedUrl(release.apkUrl), APK_MIME_TYPE)
-        val expectedBytes = release.apkSize ?: connection.contentLengthLong.takeIf { it > 0 }
-        if (expectedBytes != null && expectedBytes > MAX_APK_BYTES) {
-            connection.disconnect()
-            throw IOException("Update is larger than the allowed download size")
-        }
-
-        val digest = MessageDigest.getInstance("SHA-256")
-        var total = 0L
-        var lastProgress = -1
-        try {
-            connection.inputStream.buffered().use { input ->
-                partial.outputStream().buffered().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        total += read
-                        if (total > MAX_APK_BYTES) throw IOException("Update is larger than the allowed download size")
-                        output.write(buffer, 0, read)
-                        digest.update(buffer, 0, read)
-                        val progress = expectedBytes?.let { ((total * 100L) / it).coerceIn(0L, 100L).toInt() } ?: 0
-                        if (progress != lastProgress) {
-                            lastProgress = progress
-                            onProgress(progress)
-                        }
-                    }
-                }
-            }
-        } catch (error: Throwable) {
-            partial.delete()
-            throw error
-        } finally {
-            connection.disconnect()
-        }
-
-        if (release.apkSize != null && total != release.apkSize) {
-            partial.delete()
-            throw IOException("Update download size does not match its manifest")
-        }
-        val actualSha256 = digest.digest().toHex()
-        if (!actualSha256.equals(release.sha256, ignoreCase = true)) {
-            partial.delete()
-            throw IOException("Update checksum verification failed")
-        }
-        verifyPackage(partial, release)
-        if (!partial.renameTo(destination)) {
-            partial.delete()
-            throw IOException("Could not finalize the downloaded update")
-        }
-        onProgress(100)
-        return destination
+        val stem = "agentic-wear-${release.versionCode}-${release.sha256.take(16)}"
+        return try {
+            verifiedUpdateDownload(File(updatesDir, "$stem.partial.apk"), File(updatesDir, "$stem.apk"), release, MAX_APK_BYTES,
+                open = { offset -> openConnection(validatedUrl(release.apkUrl), APK_MIME_TYPE, offset).also { downloadConnection = it } },
+                checkActive = {
+                    if (downloadCancelled) throw UpdateDownloadCancelled(discardPartialDownload)
+                    if (android.os.SystemClock.elapsedRealtime() >= deadline) throw UpdateDownloadCancelled(false)
+                }, onProgress = onProgress, verifyPackage = { verifyPackage(it, release) })
+        } finally { downloadConnection = null; if (discardPartialDownload) File(updatesDir, "$stem.partial.apk").delete() }
     }
 
     fun canRequestInstalls(): Boolean = context.packageManager.canRequestPackageInstalls()
@@ -247,11 +211,19 @@ class AppUpdateManager(private val context: Context) {
         val resolvedApkUrl = runCatching { URL(baseUrl, apkUrlValue) }
             .getOrElse { throw IOException("Update manifest has an invalid APK URL", it) }
         validatedUrl(resolvedApkUrl.toString())
-        return AppRelease(versionCode, versionName, resolvedApkUrl.toString(), sha256, apkSize)
+        val expiresAt = json.optLong("expiresAt", -1L).takeIf { it > 0L }
+        if (BuildConfig.PRIVATE_UPDATES_ONLY) {
+            val pairing = pairingStore.read() ?: throw IOException("Private update requires pairing")
+            val relay = validatedUrl(pairing.relayUrl)
+            if (!privateUpdateUrlAllowed(resolvedApkUrl, relay, pairing.pairId) || !resolvedApkUrl.path.endsWith("/apk/$sha256"))
+                throw IOException("Private APK URL is outside the paired update channel")
+            if (expiresAt == null || expiresAt <= System.currentTimeMillis()) throw IOException("Private update has expired")
+        }
+        return AppRelease(versionCode, versionName, resolvedApkUrl.toString(), sha256, apkSize, expiresAt)
     }
 
-    private fun openConnection(initialUrl: URL, accept: String): HttpURLConnection {
-        return openConnectionOrNull(initialUrl, accept, missingManifestIsNoUpdate = false)
+    private fun openConnection(initialUrl: URL, accept: String, rangeOffset: Long = 0): HttpURLConnection {
+        return openConnectionOrNull(initialUrl, accept, missingManifestIsNoUpdate = false, rangeOffset = rangeOffset)
             ?: error("Only update manifests may be absent")
     }
 
@@ -268,10 +240,14 @@ class AppUpdateManager(private val context: Context) {
         accept: String,
         missingManifestIsNoUpdate: Boolean,
         manifestCheck: ManifestCheckRun? = null,
+        rangeOffset: Long = 0,
     ): HttpURLConnection? {
         var current = initialUrl
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             validatedUrl(current.toString())
+            val pairing = if (BuildConfig.PRIVATE_UPDATES_ONLY) pairingStore.read() ?: throw IOException("Private update requires pairing") else null
+            if (pairing != null && !privateUpdateUrlAllowed(current, validatedUrl(pairing.relayUrl), pairing.pairId))
+                throw IOException("Private update redirect left the paired channel")
             val connection = (current.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = CONNECT_TIMEOUT_MS
@@ -279,6 +255,8 @@ class AppUpdateManager(private val context: Context) {
                 requestMethod = "GET"
                 setRequestProperty("Accept", accept)
                 setRequestProperty("User-Agent", "Agentic-Wear/${BuildConfig.VERSION_NAME}")
+                if (rangeOffset > 0) setRequestProperty("Range", "bytes=$rangeOffset-")
+                if (pairing != null) setRequestProperty("Authorization", "Bearer ${pairing.watchCredential}")
             }
             manifestCheck?.remember(connection)
             val status = connection.responseCode

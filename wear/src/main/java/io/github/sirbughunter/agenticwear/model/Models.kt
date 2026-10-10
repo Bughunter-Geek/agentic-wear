@@ -2,6 +2,9 @@ package io.github.sirbughunter.agenticwear.model
 
 enum class SessionStatus { ACTIVE, IDLE, NOT_LOADED, ERROR }
 
+// Two bounded native lists:20 pages of50 recent tasks and20 pages of50 pins.
+const val MAX_LOCAL_SESSION_SNAPSHOT = 2_000
+
 data class AgentSession(
     val id: String,
     val title: String,
@@ -10,6 +13,8 @@ data class AgentSession(
     val ownedByWear: Boolean,
     val canAcceptDirectInput: Boolean,
     val watchReady: Boolean = false,
+    val pinned: Boolean = false,
+    val source: String? = null,
 )
 
 /**
@@ -88,7 +93,14 @@ data class AgentAlert(
     val canControl: Boolean = false,
 )
 
-enum class TranscriptionEngine { BRIDGE_WHISPER, DEVICE_SPEECH }
+enum class TranscriptionEngine { BRIDGE_WHISPER, BRIDGE_PHONON, DEVICE_SPEECH;
+    val usesBridge: Boolean get() = this != DEVICE_SPEECH
+    val bridgeBackend: String? get() = when (this) {
+        BRIDGE_WHISPER -> "whisper"
+        BRIDGE_PHONON -> "phonon"
+        DEVICE_SPEECH -> null
+    }
+}
 
 enum class ApprovalMode { ALERT_ONLY, ALLOW_CONTROLS }
 
@@ -105,6 +117,10 @@ data class Transcript(
     val text: String,
     val threadId: String?,
     val revised: Boolean = false,
+    val rawText: String? = null,
+    val undoText: String? = null,
+    val editNotice: String? = null,
+    val editChoices: List<String> = emptyList(),
 )
 
 enum class ChatPhase { COMMENTARY, FINAL_ANSWER, UNKNOWN }
@@ -131,6 +147,7 @@ data class ChatMessage(
     val approvalId: String? = null,
     val canControl: Boolean = false,
     val resolved: Boolean = false,
+    val watchRequestId: String? = null,
 )
 
 object ChatDisplayPolicy {
@@ -163,12 +180,16 @@ sealed interface BridgePayload {
     val requestId: String
 
     data class SessionSync(override val requestId: String) : BridgePayload
+    data class PrepareDraft(override val requestId: String) : BridgePayload
     data class CreateTranscription(
         override val requestId: String,
         val audioBase64: String,
         val mimeType: String,
         val threadId: String?,
         val previousText: String?,
+        val backend: String? = null,
+        val finalIntent: Boolean = false,
+        val localEdit: Boolean = false,
     ) : BridgePayload
     data class SubmitTurn(
         override val requestId: String,

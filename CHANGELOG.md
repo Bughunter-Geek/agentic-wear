@@ -2,6 +2,14 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## Private live-voice UI revision2 — unreleased
+
+- Keeps round-screen labels and48dp actions in a safe scrolling viewport; compacts task-view selection and preserves its visible selection after changing scope.
+- Distinguishes record/review dictation from live conversation and keeps Phonon available.
+- Makes historical approvals read-only and invalidates live decisions on disconnect, resolution and repeated submission.
+- Adds10 reference-inspired cloud-disk colours and a bounded listening spring driven by actual active media, with pause settling and static permission/reduced-motion states.
+- Focused policies, offline native debug/lint,227dp/260dp interactive checks and silent synthetic motion checks pass. External re-review and physical-device acceptance remain pending; no deployment.
+
 ## 0.6.25-alpha — 2026-09-06
 
 - Keeps chat/history refreshes out of the bridge's ordered send path so a slow refresh cannot hold up prompt delivery.

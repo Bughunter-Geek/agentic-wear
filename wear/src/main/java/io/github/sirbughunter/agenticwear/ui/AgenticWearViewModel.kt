@@ -25,7 +25,12 @@ import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
+import io.github.sirbughunter.agenticwear.model.editedDraft
+import io.github.sirbughunter.agenticwear.model.undoDraft
+import io.github.sirbughunter.agenticwear.model.draftActionAllowed
 import io.github.sirbughunter.agenticwear.model.Transcript
+import io.github.sirbughunter.agenticwear.model.SubmittedTurn
+import io.github.sirbughunter.agenticwear.model.SubmissionPhase
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import io.github.sirbughunter.agenticwear.update.AppRelease
 import io.github.sirbughunter.agenticwear.update.AppUpdateManager
@@ -48,7 +53,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, REPLY, CHAT, ALERT, SETTINGS }
+enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, REPLY, CHAT, ALERT, SETTINGS, ACTIVITY }
 
 data class WearUiState(
     val screen: WearScreen = WearScreen.HOME,
@@ -58,7 +63,10 @@ data class WearUiState(
     val selectedThreadId: String? = null,
     val submitDraftAsNewSession: Boolean = false,
     val latestAlert: AgentAlert? = null,
+    val alertReadOnly: Boolean = false,
+    val localInventoryComplete: Boolean? = null,
     val transcript: Transcript? = null,
+    val canRetryTranscript: Boolean = false,
     val chat: ChatSnapshot? = null,
     val chatFeedback: Map<String, FeedbackRating> = emptyMap(),
     val feedbackPendingMessageId: String? = null,
@@ -69,6 +77,9 @@ data class WearUiState(
     val voiceLevel: Float = 0f,
     val error: String? = null,
     val sendNotice: String? = null,
+    val submittedTurns: List<SubmittedTurn> = emptyList(),
+    val sendingDraft: SubmittedTurn? = null,
+    val canCheckTurnConfirmation: Boolean = false,
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val collapseUpdates: Boolean = true,
@@ -81,30 +92,39 @@ data class WearUiState(
     val showErrorDetails: Boolean = false,
     val replyingFromChat: Boolean = false,
     val demo: Boolean = false,
+    val demoVoiceActive: Boolean = false,
 ) {
     val selectedSession: AgentSession?
         get() = sessions.firstOrNull { it.id == selectedThreadId } ?: sessions.firstOrNull()
 }
 
 class AgenticWearViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = AgenticWearRepository(application)
+    private val repository = AgenticWearRepository(application).apply { restoreUnconfirmedTurn() }
     private val preferences = AppPreferences(application)
     private val updateManager = AppUpdateManager(application)
     private val _state = MutableStateFlow(readState())
     val state: StateFlow<WearUiState> = _state.asStateFlow()
     private var deviceSpeech: DeviceSpeechController? = null
+    private var retryTranscriptionJob: Job? = null
+    private var retryTranscriptionRequestId: String? = null
     private var voiceAttemptGeneration = 0L
     private var recordingTimeoutJob: Job? = null
     private var transcriptionTimerJob: Job? = null
     private var chatStreamJob: Job? = null
     private var updateCheckJob: Job? = null
     private var updateCheckGeneration = 0L
-    private var lastUpdateCheckStartedAtElapsedRealtime = 0L
+    @Volatile private var lastUpdateCheckStartedAtElapsedRealtime: Long? = null
+    @Volatile private var lastUpdateCheckSucceededAtElapsedRealtime: Long? = null
+    @Volatile private var updateRetryJob: Job? = null
+    /** One quiet retry per return to the foreground; an offline watch must not poll every 10 s. */
+    @Volatile private var silentUpdateRetryAvailable = false
     @Volatile
     private var transcriptionStartedAtElapsedRealtime: Long? = null
     @Volatile
     private var frozenTranscriptionElapsedMillis: Long? = null
     private var downloadedUpdate: File? = null
+    private var updateForeground = false
+    private var autoInstallRequested = false
     private var awaitingInstallPermission = false
     private var foregroundStartedAtMillis = System.currentTimeMillis()
 
@@ -122,15 +142,29 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             VoiceSessionService.sessionState.collect(::applyVoiceSessionState)
         }
+        viewModelScope.launch {
+            io.github.sirbughunter.agenticwear.update.UpdateDownloadService.snapshot.collect { download ->
+                if (!_state.value.demo && download.update.stage != UpdateStage.IDLE) {
+                    downloadedUpdate = download.apk
+                    _state.update { it.copy(appUpdate = download.update) }
+                    if (download.update.stage == UpdateStage.READY && updateForeground && autoInstallRequested) {
+                        autoInstallRequested = false
+                        continueInstall()
+                    }
+                }
+            }
+        }
         if (updateManager.enabled) checkForUpdate(silent = true)
     }
 
     fun onForegrounded() {
+        updateForeground = true
         foregroundStartedAtMillis = System.currentTimeMillis()
         if (_state.value.demo) return
         if (repository.isPaired) refreshInbox()
-        if (updateManager.enabled &&
-            SystemClock.elapsedRealtime() - lastUpdateCheckStartedAtElapsedRealtime >= UPDATE_REFRESH_INTERVAL_MS
+        silentUpdateRetryAvailable = true
+        if (updateManager.enabled && io.github.sirbughunter.agenticwear.update.UpdateCheckPolicy.shouldCheckOnForeground(
+                SystemClock.elapsedRealtime(), lastUpdateCheckSucceededAtElapsedRealtime, lastUpdateCheckStartedAtElapsedRealtime)
         ) {
             checkForUpdate(silent = true)
         }
@@ -147,14 +181,16 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun openAlert(eventId: String?) {
+    fun openAlert(eventId: String?, readOnly: Boolean = false) {
         val alert = eventId?.let(preferences::alert) ?: preferences.latestAlert
-        _state.update { current -> current.copy(screen = WearScreen.ALERT, latestAlert = alert, error = null) }
+        _state.update { current -> current.copy(screen = WearScreen.ALERT, latestAlert = alert,
+            alertReadOnly = readOnly, error = null) }
     }
 
     fun pair(code: String, relayUrl: String) = launchTask {
         repository.pair(code, relayUrl)
         reload(WearScreen.HOME)
+        checkForUpdate(silent = true)
     }
 
     fun refreshInbox() = launchTask(showPending = false) {
@@ -230,8 +266,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun beginPushToTalk() {
         if (_state.value.recording || _state.value.pending) return
+        if (io.github.sirbughunter.agenticwear.live.LiveVoiceService.state.value.phase in setOf("creating", "connecting", "live", "reconnecting")) {
+            _state.update { it.copy(error = "End live voice before starting dictation. Your draft is retained.") }
+            return
+        }
         cancelTranscriptionTimerJob()
-        if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
+        repository.clearRetryRecording()
+        if (_state.value.transcriptionEngine.usesBridge) {
             runCatching {
                 VoiceSessionService.begin(
                     context = getApplication(),
@@ -291,9 +332,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         if (!_state.value.recording) return
         if (measureLatency) startTranscriptionTimer()
         _state.update { it.copy(recording = false, voiceLevel = 0f) }
-        if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
+        if (_state.value.transcriptionEngine.usesBridge) {
             _state.update { it.copy(pending = true, transcribing = true) }
-            VoiceSessionService.finish(getApplication())
+            VoiceSessionService.finish(getApplication(), transcriptionStartedAtElapsedRealtime ?: SystemClock.elapsedRealtime())
         } else {
             _state.update { it.copy(pending = true, transcribing = true) }
             deviceSpeech?.stop()
@@ -331,8 +372,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         voiceAttemptGeneration += 1
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
-        repository.cancelTranscription(voiceSession.transcriptionRequestId)
-        if (_state.value.transcriptionEngine == TranscriptionEngine.BRIDGE_WHISPER) {
+        repository.cancelTranscription(retryTranscriptionRequestId ?: voiceSession.transcriptionRequestId)
+        retryTranscriptionJob?.cancel()
+        retryTranscriptionJob = null
+        retryTranscriptionRequestId = null
+        if (_state.value.transcriptionEngine.usesBridge) {
             VoiceSessionService.cancel(getApplication())
         } else {
             deviceSpeech?.cancel()
@@ -357,25 +401,49 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun onActivityStopped() {
+        updateForeground = false
         if (shouldCancelRecordingWhenActivityStops(_state.value.transcriptionEngine)) cancelRecording()
     }
 
     fun updateTranscript(text: String) {
         val transcript = _state.value.transcript ?: return
-        val updated = transcript.copy(text = text.take(MAX_TRANSCRIPT_CHARS))
+        if (!draftActionAllowed(_state.value.pending, _state.value.recording, _state.value.transcribing)) return
+        val updated = transcript.editedDraft(text)
         preferences.transcript = updated
         _state.update { it.copy(transcript = updated) }
     }
 
+    fun undoTranscript() {
+        val transcript = _state.value.transcript ?: return
+        if (!draftActionAllowed(_state.value.pending, _state.value.recording, _state.value.transcribing)) return
+        if (transcript.undoText == null) return
+        val updated = transcript.undoDraft()
+        preferences.transcript = updated
+        _state.update { it.copy(transcript = updated) }
+    }
+
+    fun cancelPreparedEdit() {
+        val base = preferences.revisionBase ?: return
+        preferences.transcript = base
+        preferences.revisionBase = null
+        preferences.pending = false
+        _state.update { it.copy(transcript = base, screen = WearScreen.TRANSCRIPT, pending = false) }
+    }
+
+    fun restoreOriginal() { _state.value.transcript?.rawText?.let(::updateTranscript) }
+
     fun submitTranscript(followUpAction: FollowUpAction = FollowUpAction.DEFAULT) {
         val transcript = _state.value.transcript ?: return
         val current = _state.value
+        if (current.pending || current.recording || current.transcribing || transcript.editChoices.isNotEmpty() || transcript.text.isBlank()) return
         val draftText = transcript.text
         val targetThreadId = threadIdForDraftSubmission(current)
         if (targetThreadId != null) {
             preferences.selectedThreadId = targetThreadId
         }
-        _state.update { it.copy(screen = WearScreen.CHAT, pending = true, error = null) }
+        _state.update { it.copy(screen = WearScreen.CHAT, selectedThreadId = targetThreadId, pending = true, error = null, sendNotice = null,
+            sendingDraft = SubmittedTurn(transcript.requestId, targetThreadId, draftText, System.currentTimeMillis())) }
+        if (targetThreadId != null) startChatStream(targetThreadId)
         launchTask(showPending = false) {
             val threadId = repository.submitTurn(
                 threadId = targetThreadId,
@@ -383,6 +451,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 model = current.selectedModel,
                 effort = current.reasoningEffort,
                 followUpAction = followUpAction,
+                onPrepared = { _state.update { it.copy(submittedTurns = preferences.submittedTurns, sendingDraft = null) } },
             )
             preferences.selectedThreadId = threadId
             preferences.submitDraftAsNewSession = false
@@ -393,11 +462,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun reviseTranscript() {
-        val transcript = _state.value.transcript ?: return
-        if (_state.value.transcriptionEngine != TranscriptionEngine.BRIDGE_WHISPER) {
+    fun reviseTranscript(): Boolean {
+        if (!draftActionAllowed(_state.value.pending, _state.value.recording, _state.value.transcribing) || preferences.revisionBase != null) return false
+        val transcript = _state.value.transcript ?: return false
+        if (!_state.value.transcriptionEngine.usesBridge) {
             discardTranscript()
-            return
+            return true
         }
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
@@ -406,9 +476,15 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         preferences.pending = false
         preferences.lastError = null
         _state.update(::resetForNewTranscription)
+        return true
     }
 
     fun discardTranscript() {
+        retryTranscriptionJob?.cancel()
+        retryTranscriptionJob = null
+        retryTranscriptionRequestId = null
+        repository.cancelTranscription()
+        repository.clearRetryRecording()
         val returnToChat = _state.value.replyingFromChat
         val threadId = _state.value.transcript?.threadId
         stopVoiceMonitoring()
@@ -430,7 +506,70 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         if (returnToChat && threadId != null) startChatStream(threadId)
     }
 
+    /** Replay audio only; never opens the microphone or sends a Codex prompt. */
+    fun retryTranscript() {
+        val current = _state.value
+        val draft = current.transcript ?: return
+        if (!draftActionAllowed(current.pending, current.recording, current.transcribing) ||
+            !current.transcriptionEngine.usesBridge) return
+        if (!repository.canRetryTranscript(draft.requestId)) {
+            _state.update { it.copy(canRetryTranscript = false, error = "Record once to enable Retry. Recordings expire after 30 minutes or an app restart.") }
+            return
+        }
+        val requestId = UUID.randomUUID().toString()
+        retryTranscriptionRequestId = requestId
+        val startedAt = SystemClock.elapsedRealtime()
+        startTranscriptionTimer(startedAt)
+        preferences.revisionBase = draft
+        preferences.transcript = null
+        io.github.sirbughunter.agenticwear.voice.VoiceLatency.start(startedAt)
+        io.github.sirbughunter.agenticwear.voice.VoiceLatency.duration("retry_start", startedAt)
+        _state.update { it.copy(screen = WearScreen.HOME, transcript = null, pending = true, transcribing = true, error = null) }
+        retryTranscriptionJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.retryTranscript(draft, requestId, foregroundStartedAtMillis)
+                reload()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Throwable) {
+                // Even failures before upload preserve the editable review.
+                if (retryTranscriptionRequestId == requestId) {
+                    preferences.transcript = draft
+                    preferences.revisionBase = null
+                    preferences.pending = false
+                    preferences.lastError = error.message
+                    reload(WearScreen.TRANSCRIPT)
+                }
+            } finally {
+                if (retryTranscriptionRequestId == requestId) {
+                    retryTranscriptionRequestId = null
+                    retryTranscriptionJob = null
+                }
+            }
+        }
+    }
+
     fun retryChat() {
+        if (preferences.pendingTurnRequestId != null && preferences.pendingTurnEnvelope != null) {
+            _state.update { it.copy(pending = true, error = null) }
+            launchTask(showPending = false) {
+                val acceptedThread = repository.retryTurnConfirmation()
+                preferences.selectedThreadId = acceptedThread
+                reload(WearScreen.CHAT)
+                startChatStream(acceptedThread)
+                repository.watchChat(acceptedThread)
+                reload(WearScreen.CHAT)
+            }
+            return
+        }
+        val failed = _state.value.submittedTurns.lastOrNull { it.threadId == _state.value.selectedThreadId }?.takeIf { it.phase == SubmissionPhase.FAILED }
+        if (failed != null) {
+            val draft = Transcript(UUID.randomUUID().toString(), failed.text, failed.threadId)
+            preferences.transcript = draft
+            preferences.lastError = null
+            _state.update { prepareTextReply(it, draft) }
+            return
+        }
         val threadId = _state.value.selectedSession?.id
             ?: _state.value.chat?.threadId
             ?: preferences.selectedThreadId
@@ -466,8 +605,10 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         _state.update { prepareTextReply(it, draft) }
     }
 
-    fun respondToApproval(approve: Boolean) {
-        val approvalId = _state.value.latestAlert?.approvalId ?: return
+    fun respondToApproval(approve: Boolean, expectedApprovalId: String?) {
+        val current = _state.value
+        if (current.pending || !canRespondToAlert(current.latestAlert, current.approvalMode, current.alertReadOnly)) return
+        val approvalId = current.latestAlert?.approvalId?.takeIf { it == expectedApprovalId } ?: return
         launchTask {
             repository.respondToApproval(approvalId, approve)
             reload(WearScreen.HOME)
@@ -514,11 +655,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun onUpdateAction() {
         when (_state.value.appUpdate.stage) {
-            UpdateStage.IDLE, UpdateStage.CURRENT, UpdateStage.ERROR -> checkForUpdate(silent = false)
+            UpdateStage.IDLE, UpdateStage.CURRENT -> checkForUpdate(silent = false)
+            UpdateStage.ERROR -> _state.value.appUpdate.release?.let(::downloadUpdate) ?: checkForUpdate(silent = false)
             UpdateStage.AVAILABLE -> _state.value.appUpdate.release?.let(::downloadUpdate)
             UpdateStage.READY -> continueInstall()
             UpdateStage.CHECKING -> checkForUpdate(silent = false, force = true)
-            UpdateStage.DOWNLOADING -> Unit
+            UpdateStage.DOWNLOADING -> io.github.sirbughunter.agenticwear.update.UpdateDownloadService.cancel(getApplication())
         }
     }
 
@@ -582,7 +724,33 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 supportedReasoningEfforts = ReasoningEffortPolicy.FALLBACK_OPTIONS,
             ),
         )
-        val normalized = stateName.lowercase()
+        val voiceDemo = stateName.lowercase().endsWith("-voice")
+        val normalized = stateName.lowercase().removeSuffix("-voice")
+        if (normalized.startsWith("send-")) {
+            val phase = when (normalized) {
+                "send-queued" -> SubmissionPhase.QUEUED
+                "send-accepted" -> SubmissionPhase.ACCEPTED
+                "send-working" -> SubmissionPhase.RUNNING
+                "send-completed", "send-final" -> SubmissionPhase.COMPLETED
+                "send-uncertain", "send-confirming" -> SubmissionPhase.UNCERTAIN
+                "send-failed" -> SubmissionPhase.FAILED
+                else -> SubmissionPhase.SENDING
+            }
+            val sent = SubmittedTurn("demo-request", "demo-build", "This is just a test.", now, phase,
+                nativeTurnId = if (phase == SubmissionPhase.COMPLETED) "demo-turn" else null)
+            val messages = if (normalized == "send-final") listOf(
+                ChatMessage("demo-native-user", "demo-turn", ChatRole.USER, sent.text, io.github.sirbughunter.agenticwear.model.ChatPhase.UNKNOWN, watchRequestId = sent.requestId),
+                ChatMessage("demo-native-answer", "demo-turn", ChatRole.ASSISTANT, "Received your test message from the paired watch.", io.github.sirbughunter.agenticwear.model.ChatPhase.FINAL_ANSWER),
+            ) else emptyList()
+            _state.value = WearUiState(demo = true, screen = WearScreen.CHAT, isPaired = true, sessions = sessions,
+                selectedThreadId = "demo-build", submittedTurns = listOf(sent),
+                pending = normalized in setOf("send-sending", "send-confirming"),
+                canCheckTurnConfirmation = phase == SubmissionPhase.UNCERTAIN,
+                error = if (phase == SubmissionPhase.FAILED) "The request failed. Review your preserved message before sending again." else null,
+                chat = if (normalized == "send-sending") null else io.github.sirbughunter.agenticwear.model.ChatSnapshot(
+                    "demo-build", "Watch text test", SessionStatus.ACTIVE, emptyList(), now, messages = messages))
+            return
+        }
         val updatePermissionDemo = normalized == "update-permission"
         val homeUpdateDemo = normalized == "home-update"
         val homeUpdateDownloadingDemo = normalized == "home-update-downloading"
@@ -590,6 +758,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val homeErrorDemo = normalized == "home-error"
         val chatDemo = normalized in setOf("chat", "chat-idle", "chat-roles", "chat-error", "chat-permission", "sync-error")
         val alert = when (normalized) {
+            "home-update", "home-update-downloading", "home-update-ready" -> AgentAlert("qa-update-alert", AlertKind.COMPLETE, "demo-build", "Update layout QA", "Synthetic retained alert", now)
             "home-alert" -> AgentAlert("demo-home-alert", AlertKind.COMPLETE, "demo-build", sessions[0].title, "The latest Watch prompt completed successfully.", now)
             "approval" -> AgentAlert("demo-approval", AlertKind.PERMISSION, "demo-build", sessions[0].title, "Allow Gradle to access the network?", now, "demo-approval-id", true)
             "complete" -> AgentAlert("demo-complete", AlertKind.COMPLETE, "demo-build", sessions[0].title, "All checks passed. Release APK is ready for review.", now)
@@ -611,7 +780,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 "reply" -> WearScreen.REPLY
                 "chat", "chat-idle", "chat-roles", "chat-error", "chat-permission", "sync-error" -> WearScreen.CHAT
                 "approval", "complete", "error" -> WearScreen.ALERT
-                "settings", "update-permission" -> WearScreen.SETTINGS
+                "settings", "update-disabled", "update-idle", "update-current", "update-available", "update-permission", "update-checking", "update-downloading", "update-ready", "update-error" -> WearScreen.SETTINGS
+                "activity" -> WearScreen.ACTIVITY
                 else -> WearScreen.HOME
             },
             isPaired = normalized != "pair",
@@ -724,6 +894,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             reasoningEffort = if (normalized == "transcript") "high" else ReasoningEffortPolicy.DEFAULT,
             relayUrl = "https://relay.example.workers.dev",
             appUpdate = when {
+                normalized == "update-disabled" -> UpdateUiState(enabled = false)
+                normalized == "update-idle" -> UpdateUiState(enabled = true)
+                normalized == "update-current" -> UpdateUiState(enabled = true, stage = UpdateStage.CURRENT)
+                normalized == "update-available" -> UpdateUiState(enabled = true, stage = UpdateStage.AVAILABLE, release = AppRelease(70, "0.6.44-private", "https://example.com/agentic-wear.apk", "0".repeat(64), null))
+                normalized == "update-checking" -> UpdateUiState(enabled = true, stage = UpdateStage.CHECKING)
+                normalized == "update-error" -> UpdateUiState(enabled = true, stage = UpdateStage.ERROR, message = "Connection interrupted · tap to resume")
+                normalized == "update-downloading" -> UpdateUiState(enabled = true, stage = UpdateStage.DOWNLOADING, progress = 64, release = AppRelease(65, "0.6.38-live-voice-private", "https://example.com/agentic-wear.apk", "0".repeat(64), null))
+                normalized == "update-ready" -> UpdateUiState(enabled = true, stage = UpdateStage.READY, progress = 100, release = AppRelease(65, "0.6.38-live-voice-private", "https://example.com/agentic-wear.apk", "0".repeat(64), null))
                 updatePermissionDemo -> UpdateUiState(
                     enabled = true,
                     stage = UpdateStage.READY,
@@ -734,18 +912,18 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 homeUpdateDemo -> UpdateUiState(
                     enabled = true,
                     stage = UpdateStage.AVAILABLE,
-                    release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                    release = AppRelease(65, "0.6.38-live-voice-private", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
                 )
                 homeUpdateDownloadingDemo -> UpdateUiState(
                     enabled = true,
                     stage = UpdateStage.DOWNLOADING,
-                    release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                    release = AppRelease(65, "0.6.38-live-voice-private", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
                     progress = 64,
                 )
                 homeUpdateReadyDemo -> UpdateUiState(
                     enabled = true,
                     stage = UpdateStage.READY,
-                    release = AppRelease(32, "0.6.6", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
+                    release = AppRelease(65, "0.6.38-live-voice-private", "https://example.com/agentic-wear.apk", "0".repeat(64), null),
                     progress = 100,
                     message = "Ready to install",
                 )
@@ -763,6 +941,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 else -> null
             },
             demo = true,
+            demoVoiceActive = voiceDemo,
         )
     }
 
@@ -883,8 +1062,17 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    private fun scheduleSilentUpdateRetry() {
+        if (!silentUpdateRetryAvailable || updateRetryJob?.isActive == true) return
+        silentUpdateRetryAvailable = false
+        updateRetryJob = viewModelScope.launch {
+            delay(io.github.sirbughunter.agenticwear.update.UpdateCheckPolicy.SILENT_FAILURE_RETRY_MS)
+            if (updateForeground && updateCheckJob?.isActive != true) checkForUpdate(silent = true)
+        }
+    }
+
     private fun checkForUpdate(silent: Boolean, force: Boolean = false) {
-        if (!updateManager.enabled || _state.value.appUpdate.stage == UpdateStage.DOWNLOADING) return
+        if (!updateManager.enabled || _state.value.appUpdate.stage in setOf(UpdateStage.DOWNLOADING, UpdateStage.READY)) return
         if (updateCheckJob?.isActive == true) {
             if (!force) return
             updateCheckGeneration += 1
@@ -895,7 +1083,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val cached = updateManager.cachedRelease()
         if (!silent || cached == null) {
             _state.update { current ->
-                current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.CHECKING, progress = 0, message = null))
+                current.copy(appUpdate = current.appUpdate.copy(enabled = true, stage = UpdateStage.CHECKING, progress = 0, message = null))
             }
         } else {
             _state.update { current ->
@@ -907,6 +1095,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             runCatching(updateManager::checkForUpdate)
                 .onSuccess { release ->
                     if (generation != updateCheckGeneration) return@onSuccess
+                    lastUpdateCheckSucceededAtElapsedRealtime = SystemClock.elapsedRealtime()
                     _state.update { current ->
                         current.copy(
                             appUpdate = UpdateUiState(
@@ -920,6 +1109,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 }
                 .onFailure { error ->
                     if (generation != updateCheckGeneration) return@onFailure
+                    // A quiet check often fails just after the screen wakes, before Wi-Fi is back.
+                    // Retry once shortly instead of hiding a new release until the next foreground.
+                    if (silent) scheduleSilentUpdateRetry()
                     val verified = updateManager.cachedRelease()
                     _state.update { current ->
                         val update = when {
@@ -950,7 +1142,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 val snapshot = repository.watchChat(threadId)
                     ?: preferences.chatSnapshot?.takeIf { it.threadId == threadId }
                 if (snapshot == null) {
-                    showError("The bridge did not return this chat. Keep Codex running, then tap Retry.")
+                    showError(preferences.lastError ?: "The bridge did not return this chat. Keep Codex running, then tap Retry.")
                 } else {
                     reload(WearScreen.CHAT)
                     startChatStream(threadId)
@@ -1009,33 +1201,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun downloadUpdate(release: AppRelease) {
-        _state.update { current ->
-            current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.DOWNLOADING, progress = 0, message = null))
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                updateManager.download(release) { progress ->
-                    _state.update { current ->
-                        current.copy(appUpdate = current.appUpdate.copy(progress = progress))
-                    }
-                }
-            }.onSuccess { apk ->
-                downloadedUpdate = apk
-                _state.update { current ->
-                    current.copy(appUpdate = current.appUpdate.copy(stage = UpdateStage.READY, progress = 100, message = "Ready to install"))
-                }
-                viewModelScope.launch(Dispatchers.Main) { continueInstall() }
-            }.onFailure { error ->
-                _state.update { current ->
-                    current.copy(
-                        appUpdate = current.appUpdate.copy(
-                            stage = UpdateStage.ERROR,
-                            message = updateErrorMessage(error),
-                        ),
-                    )
-                }
-            }
-        }
+        autoInstallRequested = true
+        runCatching { io.github.sirbughunter.agenticwear.update.UpdateDownloadService.begin(getApplication(), release) }
+            .onFailure { error -> autoInstallRequested = false; _state.update { it.copy(appUpdate = it.appUpdate.copy(stage = UpdateStage.ERROR, message = updateErrorMessage(error))) } }
     }
 
     private fun continueInstall() {
@@ -1102,11 +1270,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         ) {
             return
         }
+        preferences.lastError = message
         voiceAttemptGeneration += 1
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
         VoiceSessionService.cancel(getApplication())
         deviceSpeech?.cancel()
+        cancelPreparedEdit()
         _state.update {
             it.copy(
                 recording = false,
@@ -1115,6 +1285,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 transcriptionElapsedMillis = null,
                 voiceLevel = 0f,
                 error = message,
+                sendingDraft = it.sendingDraft?.progress(SubmissionPhase.FAILED),
+                showErrorDetails = true,
             )
         }
     }
@@ -1158,9 +1330,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             else -> current.transcriptionElapsedMillis
         }
         _state.value = restored.copy(
-            appUpdate = current.appUpdate,
+            alertReadOnly = current.alertReadOnly && effectiveScreen == WearScreen.ALERT,
+            latestAlert = if (current.alertReadOnly && effectiveScreen == WearScreen.ALERT) current.latestAlert else restored.latestAlert,
+            appUpdate = current.appUpdate.copy(enabled = restored.appUpdate.enabled),
+            sendingDraft = current.sendingDraft,
             showInstallPermissionPrompt = current.showInstallPermissionPrompt,
             feedbackPendingMessageId = current.feedbackPendingMessageId,
+            showErrorDetails = restored.error != null && current.showErrorDetails,
             recording = current.recording && !transcriptReady,
             transcribing = current.transcribing && !transcriptReady && !transcriptionFailed,
             transcriptionElapsedMillis = elapsedMillis,
@@ -1173,6 +1349,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val transcript = preferences.transcript
         val destination = when {
             !paired -> WearScreen.PAIR
+            preferences.pendingTurnRequestId != null && preferences.submittedTurns.any { it.requestId == preferences.pendingTurnRequestId } -> screen ?: WearScreen.CHAT
             transcript != null -> WearScreen.TRANSCRIPT
             else -> screen ?: WearScreen.HOME
         }
@@ -1180,16 +1357,20 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             screen = destination,
             isPaired = paired,
             sessions = preferences.sessions,
+            localInventoryComplete = preferences.localInventoryComplete,
             models = preferences.models,
             selectedThreadId = preferences.selectedThreadId,
             submitDraftAsNewSession = preferences.submitDraftAsNewSession,
             latestAlert = preferences.latestAlert,
             transcript = transcript,
+            canRetryTranscript = transcript?.let { repository.canRetryTranscript(it.requestId) } == true,
             chat = preferences.chatSnapshot,
             chatFeedback = preferences.chatFeedback,
             pending = preferences.pending,
             error = preferences.lastError,
             sendNotice = preferences.lastSendNotice,
+            submittedTurns = preferences.submittedTurns,
+            canCheckTurnConfirmation = preferences.pendingTurnRequestId != null && preferences.pendingTurnEnvelope != null,
             transcriptionEngine = preferences.transcriptionEngine,
             approvalMode = preferences.approvalMode,
             collapseUpdates = preferences.collapseUpdates,
@@ -1203,6 +1384,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     override fun onCleared() {
+        if (retryTranscriptionRequestId != null) repository.cancelTranscription(retryTranscriptionRequestId)
+        retryTranscriptionJob?.cancel()
         stopVoiceMonitoring()
         cancelTranscriptionTimerJob()
         updateCheckGeneration += 1
@@ -1216,7 +1399,6 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     companion object {
         private const val TRANSCRIPTION_TIMER_INTERVAL_MS = 100L
-        private const val UPDATE_REFRESH_INTERVAL_MS = 15L * 60L * 1_000L
         private const val MAX_RECORDING_DURATION_MS = 4L * 60L * 1_000L
         private const val CHAT_POLL_INTERVAL_MS = 1_000L
         private const val CHAT_ACTIVE_REFRESH_TICKS = 2
@@ -1227,6 +1409,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 internal fun resetForNewTranscription(current: WearUiState): WearUiState = current.copy(
     screen = WearScreen.HOME,
     transcript = null,
+    canRetryTranscript = false,
     pending = false,
     recording = false,
     transcribing = false,

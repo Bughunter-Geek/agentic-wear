@@ -11,12 +11,18 @@ import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.Transcript
+import io.github.sirbughunter.agenticwear.model.SubmittedTurn
+import io.github.sirbughunter.agenticwear.model.SubmissionPhase
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import org.json.JSONArray
 import org.json.JSONObject
 
 class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("agentic_wear_state", Context.MODE_PRIVATE)
+
+    var liveVoiceColour: String
+        get() = prefs.getString("live_voice_colour", "Teal") ?: "Teal"
+        set(value) = prefs.edit { putString("live_voice_colour", value) }
 
     var relayUrl: String
         get() = prefs.getString(KEY_RELAY_URL, null).orEmpty().ifEmpty { BuildConfig.DEFAULT_RELAY_URL }
@@ -57,6 +63,12 @@ class AppPreferences(context: Context) {
         get() = PayloadCodec.sessionsFromJson(prefs.getString(KEY_SESSIONS, "[]").orEmpty())
         set(value) = prefs.edit { putString(KEY_SESSIONS, PayloadCodec.sessionsToJson(value)) }
 
+    var localInventoryComplete: Boolean?
+        get() = if (prefs.contains("local_inventory_complete")) prefs.getBoolean("local_inventory_complete", false) else null
+        set(value) = prefs.edit {
+            if (value == null) remove("local_inventory_complete") else putBoolean("local_inventory_complete", value)
+        }
+
     var models: List<ModelOption>
         get() = PayloadCodec.modelsFromJson(prefs.getString(KEY_MODELS, "[]").orEmpty())
         set(value) = prefs.edit { putString(KEY_MODELS, PayloadCodec.modelsToJson(value)) }
@@ -90,6 +102,36 @@ class AppPreferences(context: Context) {
     var chatSnapshot: ChatSnapshot?
         get() = prefs.getString(KEY_CHAT_SNAPSHOT, null)?.let(PayloadCodec::chatSnapshotFromJson)
         set(value) = prefs.edit { putString(KEY_CHAT_SNAPSHOT, value?.let(PayloadCodec::chatSnapshotToJson)) }
+
+    // Same private on-device storage as drafts/history; never logged or sent as telemetry.
+    val submittedTurns: List<SubmittedTurn>
+        get() = synchronized(submissionLock) { runCatching {
+            val data = JSONArray(prefs.getString("submitted_turns", "[]"))
+            (0 until data.length()).mapNotNull { index ->
+                val item = data.getJSONObject(index)
+                val id = item.optString("requestId").takeIf(::isSafeModel) ?: return@mapNotNull null
+                val text = item.optString("text").takeIf { it.isNotBlank() && it.length <= 12_000 } ?: return@mapNotNull null
+                SubmittedTurn(id, item.optString("threadId").takeIf(::isSafeModel), text,
+                    item.optLong("createdAt"), runCatching { SubmissionPhase.valueOf(item.getString("phase")) }.getOrDefault(SubmissionPhase.UNCERTAIN),
+                    item.optString("nativeTurnId").takeIf(::isSafeModel), item.optString("nativeMessageId").takeIf(::isSafeModel))
+            }.takeLast(16)
+        }.getOrDefault(emptyList()) }
+
+    fun changeSubmittedTurns(change: (List<SubmittedTurn>) -> List<SubmittedTurn>) = synchronized(submissionLock) {
+        val previous = submittedTurns
+        val updated = change(previous).takeLast(16)
+        if (updated == previous) return@synchronized
+        val data = JSONArray()
+        updated.forEach { item ->
+            data.put(JSONObject().put("requestId", item.requestId).put("threadId", item.threadId)
+                .put("text", item.text).put("createdAt", item.createdAtMillis).put("phase", item.phase.name)
+                .put("nativeTurnId", item.nativeTurnId).put("nativeMessageId", item.nativeMessageId))
+        }
+        check(prefs.edit().putString("submitted_turns", data.toString()).commit()) { "Could not preserve the submitted message safely." }
+    }
+
+    fun updateSubmittedTurn(requestId: String, change: (SubmittedTurn) -> SubmittedTurn) =
+        changeSubmittedTurns { items -> items.map { if (it.requestId == requestId) change(it) else it } }
 
     var chatFeedback: Map<String, FeedbackRating>
         get() = runCatching {
@@ -171,6 +213,10 @@ class AppPreferences(context: Context) {
         true
     }
 
+    var lastReadyChatRequestId: String?
+        get() = prefs.getString("last_ready_chat_request", null)
+        set(value) = prefs.edit { putString("last_ready_chat_request", value) }
+
     var pendingChatRequestId: String?
         get() = prefs.getString(KEY_PENDING_CHAT_REQUEST, null)
         set(value) = prefs.edit { putString(KEY_PENDING_CHAT_REQUEST, value) }
@@ -214,7 +260,7 @@ class AppPreferences(context: Context) {
     private inline fun <reified T : Enum<T>> enumValue(value: String?, fallback: T): T =
         value?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
 
-    private fun alertHistory(): List<AgentAlert> = PayloadCodec.alertsFromJson(
+    fun alertHistory(): List<AgentAlert> = PayloadCodec.alertsFromJson(
         prefs.getString(KEY_ALERTS, "[]").orEmpty(),
     )
 
@@ -232,6 +278,10 @@ class AppPreferences(context: Context) {
         .put("text", transcript.text)
         .put("threadId", transcript.threadId)
         .put("revised", transcript.revised)
+        .put("undoText", transcript.undoText)
+        .put("editNotice", transcript.editNotice)
+        .put("editChoices", JSONArray(transcript.editChoices))
+        .apply { transcript.rawText?.let { put("rawText", it) } }
         .toString()
 
     private fun decodeTranscript(encoded: String): Transcript? = runCatching {
@@ -241,10 +291,15 @@ class AppPreferences(context: Context) {
             text = json.getString("text"),
             threadId = json.optString("threadId").ifEmpty { null },
             revised = json.optBoolean("revised", false),
+            undoText = json.optString("undoText").takeIf { json.has("undoText") && !json.isNull("undoText") && it.isNotBlank() },
+            editNotice = json.optString("editNotice").takeIf { json.has("editNotice") && !json.isNull("editNotice") && it.isNotBlank() },
+            editChoices = (json.optJSONArray("editChoices") ?: JSONArray()).let { choices -> (0 until minOf(choices.length(), 5)).map { choices.optString(it) } },
+            rawText = if (json.has("rawText")) json.optString("rawText").takeIf { it.isNotBlank() } else null,
         )
     }.getOrNull()
 
     companion object {
+        private val submissionLock = Any()
         private const val KEY_RELAY_URL = "relay_url"
         private const val KEY_SELECTED_THREAD = "selected_thread"
         private const val KEY_SUBMIT_DRAFT_AS_NEW_SESSION = "submit_draft_as_new_session"
@@ -307,6 +362,7 @@ internal fun claimHandledEvent(
 
 internal fun storedTranscriptionEngine(value: String?): TranscriptionEngine = when (value) {
     null, "GPT_TRANSCRIBE", TranscriptionEngine.BRIDGE_WHISPER.name -> TranscriptionEngine.BRIDGE_WHISPER
+    TranscriptionEngine.BRIDGE_PHONON.name -> TranscriptionEngine.BRIDGE_PHONON
     TranscriptionEngine.DEVICE_SPEECH.name -> TranscriptionEngine.DEVICE_SPEECH
     else -> TranscriptionEngine.BRIDGE_WHISPER
 }
