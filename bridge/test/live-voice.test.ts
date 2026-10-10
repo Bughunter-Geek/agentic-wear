@@ -144,6 +144,35 @@ describe("Watch notification trace", () => {
   });
 });
 
+describe("Watch push diagnostics", () => {
+  const base = { version: 1, kind: "push.diagnostics", requestId: "d1" };
+  const push = { receivedAt: 1_787_900_001_000, sentTime: 1_787_900_000_900, priority: 1, originalPriority: 1,
+    envelopePresent: true, envelopeChars: 812, outcome: "processed", outcomeAt: 1_787_900_001_050 };
+
+  it("accepts valid metadata for every outcome and up to 20 pushes", () => {
+    expect(watchPayloadSchema.safeParse({ ...base, pushes: [] }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, pushes: [push] }).success).toBe(true);
+    for (const outcome of ["processed", "too_long", "bad_json", "bad_structure", "too_old_or_future", "no_pairing",
+      "already_handled", "decrypt_failed", "timeout", "error", "no_envelope"]) {
+      expect(watchPayloadSchema.safeParse({ ...base, pushes: [{ ...push, outcome }] }).success).toBe(true);
+    }
+    expect(watchPayloadSchema.safeParse({ ...base, pushes: Array.from({ length: 20 }, () => push) }).success).toBe(true);
+  });
+
+  it("rejects unknown outcomes, extra fields, out-of-range values and oversize batches", () => {
+    const bad = (extra: Record<string, unknown>) => watchPayloadSchema.safeParse({ ...base, pushes: [{ ...push, ...extra }] }).success;
+    expect(bad({ outcome: "mystery" })).toBe(false);
+    expect(bad({ messageId: "m1" })).toBe(false);
+    expect(bad({ priority: 3 })).toBe(false);
+    expect(bad({ originalPriority: -1 })).toBe(false);
+    expect(bad({ envelopeChars: 10_001 })).toBe(false);
+    expect(bad({ receivedAt: -1 })).toBe(false);
+    expect(bad({ envelopePresent: "yes" })).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, pushes: Array.from({ length: 21 }, () => push) }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, pushes: [push], extra: 1 }).success).toBe(false);
+  });
+});
+
 describe("Watch relay failure log", () => {
   const base = { version: 1, kind: "relay.failures", requestId: "r1" };
   const failure = { op: "fetchInbox", status: 503, errorClass: "RelayException", at: 1_787_900_001_000 };

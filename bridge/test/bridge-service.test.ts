@@ -737,6 +737,31 @@ describe("Watch terminal and notification diagnostics", () => {
   });
 });
 
+describe("watch push diagnostics log", () => {
+  it("logs per-push metadata and sends nothing back", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, { send });
+    const payload = {
+      version: 1 as const,
+      kind: "push.diagnostics" as const,
+      requestId: "push-diag-1",
+      pushes: [{ receivedAt: 1_787_900_001_000, sentTime: 1_787_900_000_900, priority: 2, originalPriority: 1,
+        envelopePresent: true, envelopeChars: 812, outcome: "timeout" as const, outcomeAt: 1_787_900_006_000 }],
+    };
+    const before = Date.now();
+    await (service as unknown as { handleWatchPayload: (payload: unknown) => Promise<void> }).handleWatchPayload(payload);
+    expect(log).toHaveBeenCalledTimes(1);
+    const entry = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(entry).toMatchObject({ level: "info", message: "watch.push.diagnostics", pushes: payload.pushes });
+    expect(entry.receivedAt).toBeGreaterThanOrEqual(before);
+    expect(Object.keys(entry).sort()).toEqual(["level", "message", "pushes", "receivedAt"]);
+    expect(send).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
+});
+
 describe("new local draft protocol versus legacy watch", () => {
  it("retains raw recognition and never invokes Codex for new local editing", async () => {
   const send=vi.fn().mockResolvedValue(undefined);

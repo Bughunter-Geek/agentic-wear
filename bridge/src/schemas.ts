@@ -69,6 +69,21 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
       at: z.number().int().nonnegative(),
     }).strict()).max(20),
   }).strict(),
+  // Metadata-only per-push diagnostics from the Watch: FCM priorities, envelope presence/size and the outcome of
+  // processing the pushed envelope. Never message text, titles, ciphertext or ids.
+  z.object({ version: z.literal(1), kind: z.literal("push.diagnostics"), requestId: safeId,
+    pushes: z.array(z.object({
+      receivedAt: z.number().int().nonnegative(),
+      sentTime: z.number().int().nonnegative(),
+      priority: z.number().int().min(0).max(2),
+      originalPriority: z.number().int().min(0).max(2),
+      envelopePresent: z.boolean(),
+      envelopeChars: z.number().int().min(0).max(10_000),
+      outcome: z.enum(["processed", "too_long", "bad_json", "bad_structure", "too_old_or_future", "no_pairing",
+        "already_handled", "decrypt_failed", "timeout", "error", "no_envelope"]),
+      outcomeAt: z.number().int().nonnegative(),
+    }).strict()).max(20),
+  }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("session.sync"), requestId: safeId }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("draft.prepare"), requestId: safeId }).strict(),
   z.object({

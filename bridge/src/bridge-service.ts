@@ -354,6 +354,11 @@ export class BridgeService {
           console.log(JSON.stringify({ level: "info", message: "watch.relay.failures", receivedAt: Date.now(),
             failures: payload.failures }));
           return;
+        case "push.diagnostics":
+          // Watch-side per-push metadata (priorities, envelope presence/size, outcome, epoch ms). No text.
+          console.log(JSON.stringify({ level: "info", message: "watch.push.diagnostics", receivedAt: Date.now(),
+            pushes: payload.pushes }));
+          return;
         case "session.sync":
           // Foreground watch refresh is an earlier, explicit user-use signal than
           // recording. Warm only the configured Phonon route; never block the
