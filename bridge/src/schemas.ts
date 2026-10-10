@@ -51,6 +51,8 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     fetchCompletedAt: z.number().int().nonnegative(),
     // 1-based attempt of the push-triggered inbox fetch that succeeded. Absent on older Watch builds.
     fetchAttempt: z.number().int().min(1).max(10).optional(),
+    // "push" when the envelope arrived inside the push and was notified without a fetch; absent on older builds.
+    deliveredVia: z.enum(["push", "fetch"]).optional(),
     alerts: z.array(z.object({
       eventId: z.string().max(300),
       decision: z.enum(["posted", "duplicate", "suppressed_notify_off", "suppressed_before_foreground"]),

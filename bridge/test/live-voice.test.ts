@@ -132,6 +132,16 @@ describe("Watch notification trace", () => {
       expect(watchPayloadSchema.safeParse({ ...base, fetchAttempt, alerts: [alert] }).success).toBe(false);
     }
   });
+
+  it("accepts deliveredVia push or fetch, tolerates absence and rejects other values", () => {
+    for (const deliveredVia of ["push", "fetch"]) {
+      expect(watchPayloadSchema.safeParse({ ...base, deliveredVia, alerts: [alert] }).success).toBe(true);
+    }
+    expect(watchPayloadSchema.safeParse({ ...base, alerts: [alert] }).success).toBe(true);
+    for (const deliveredVia of ["sms", "", "PUSH", 1, null]) {
+      expect(watchPayloadSchema.safeParse({ ...base, deliveredVia, alerts: [alert] }).success).toBe(false);
+    }
+  });
 });
 
 describe("Watch relay failure log", () => {

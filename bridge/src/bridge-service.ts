@@ -346,7 +346,8 @@ export class BridgeService {
           // The Watch sends no message text; only ids, decision names and epoch milliseconds.
           console.log(JSON.stringify({ level: "info", message: "watch.notify.trace", receivedAt: Date.now(),
             pushReceivedAt: payload.pushReceivedAt, fetchStartedAt: payload.fetchStartedAt,
-            fetchCompletedAt: payload.fetchCompletedAt, fetchAttempt: payload.fetchAttempt, alerts: payload.alerts }));
+            fetchCompletedAt: payload.fetchCompletedAt, fetchAttempt: payload.fetchAttempt,
+            deliveredVia: payload.deliveredVia, alerts: payload.alerts }));
           return;
         case "relay.failures":
           // Watch-side relay request failures (operation, HTTP status, exception class, epoch ms). No text.

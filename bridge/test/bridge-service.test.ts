@@ -697,13 +697,14 @@ describe("Watch terminal and notification diagnostics", () => {
       fetchStartedAt: 1_787_900_003_050,
       fetchCompletedAt: 1_787_900_003_400,
       fetchAttempt: 3,
+      deliveredVia: "push" as const,
       alerts: [],
     };
 
     await (service as unknown as { handleWatchPayload: (payload: unknown) => Promise<void> }).handleWatchPayload(payload);
 
     const entry = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
-    expect(entry).toMatchObject({ message: "watch.notify.trace", fetchAttempt: 3 });
+    expect(entry).toMatchObject({ message: "watch.notify.trace", fetchAttempt: 3, deliveredVia: "push" });
     expect(send).not.toHaveBeenCalled();
     log.mockRestore();
   });
