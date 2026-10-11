@@ -18,6 +18,7 @@ import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.ChatMessage
+import io.github.sirbughunter.agenticwear.model.ChatPhase
 import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.PendingQuestionReply
@@ -31,6 +32,9 @@ import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.CloudModelInfo
 import io.github.sirbughunter.agenticwear.voice.ReplySpeaker
+import io.github.sirbughunter.agenticwear.voice.BargeInDetector
+import io.github.sirbughunter.agenticwear.voice.BargeInMonitor
+import io.github.sirbughunter.agenticwear.voice.LOOP_WAIT_TIMEOUT_MS
 import io.github.sirbughunter.agenticwear.voice.EndpointDecision
 import io.github.sirbughunter.agenticwear.voice.LOOP_START_TIMEOUT_MS
 import io.github.sirbughunter.agenticwear.voice.SpeechEndpointDetector
@@ -187,11 +191,15 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             _state.collect { s ->
                 if (s.voiceLoop == VoiceLoopPhase.WAITING) {
-                    val submission = s.submittedTurns.firstOrNull { it.requestId == loopTranscriptRequestId }
+                    // The turn submitTranscript created has its own request id: the newest one not present at send time.
+                    val submission = s.submittedTurns.filter { it.requestId !in loopSeenSubmissions }.maxByOrNull { it.createdAtMillis }
+                    val fallback = s.chat?.messages?.lastOrNull {
+                        it.role == ChatRole.ASSISTANT && it.phase == ChatPhase.FINAL_ANSWER && it.id !in loopSeenAnswers
+                    }?.takeIf { it.text.isNotBlank() }?.text
                     when {
                         submission != null && (submission.phase == SubmissionPhase.FAILED || submission.phase == SubmissionPhase.UNCERTAIN) ->
                             dispatchVoiceLoop(VoiceLoopEvent.Fail("The message wasn't delivered. Voice conversation stopped."))
-                        else -> finalReplyFor(submission, s.chat)?.let { reply ->
+                        else -> (finalReplyFor(submission, s.chat) ?: fallback)?.let { reply ->
                             dispatchVoiceLoop(VoiceLoopEvent.Reply(reply, quiet = !speechAllowedNow()))
                         }
                     }
@@ -358,28 +366,40 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             loopJob?.cancel()
             loopJob = null
         }
+        if (step.phase != VoiceLoopPhase.WAITING) { waitJob?.cancel(); waitJob = null }
+        if (step.phase != VoiceLoopPhase.SPEAKING) stopBargeInMonitor()
+        if (step.phase == VoiceLoopPhase.WAITING && before != VoiceLoopPhase.WAITING) {
+            waitJob = viewModelScope.launch { delay(LOOP_WAIT_TIMEOUT_MS); dispatchVoiceLoop(VoiceLoopEvent.ReplyTimeout) }
+        }
         _state.update { it.copy(voiceLoop = step.phase) }
-        if (step.phase != before || step.effect is VoiceLoopEffect.Fail) {
+        if (step.phase != before || step.effect != VoiceLoopEffect.None) {
             sendLoopTrace(step.phase, loopTraceReason(before, event))
         }
         when (val effect = step.effect) {
             VoiceLoopEffect.None -> Unit
             VoiceLoopEffect.Listen -> {
                 _state.update { it.copy(speakingMessageId = null, error = null) }
+                speaker?.stop()
                 beginPushToTalk(fromLoop = true)
                 loopJob?.cancel()
                 loopJob = viewModelScope.launch { runLoopListening() }
             }
             VoiceLoopEffect.FinishListening -> finishPushToTalk(measureLatency = true)
             is VoiceLoopEffect.Submit -> {
+                loopSeenSubmissions = _state.value.submittedTurns.map { it.requestId }.toSet()
+                loopSeenAnswers = _state.value.chat?.messages
+                    ?.filter { it.role == ChatRole.ASSISTANT && it.phase == ChatPhase.FINAL_ANSWER }?.map { it.id }?.toSet().orEmpty()
                 submitTranscript()
                 dispatchVoiceLoop(VoiceLoopEvent.Submitted)
             }
-            is VoiceLoopEffect.Speak -> speaker().speak(
+            is VoiceLoopEffect.Speak -> {
+                startBargeInMonitor()
+                speaker().speak(
                 speechPlainText(effect.text),
                 done = { dispatchVoiceLoop(VoiceLoopEvent.SpeechDone) },
                 failed = { dispatchVoiceLoop(VoiceLoopEvent.Fail("Couldn't read the reply aloud. Voice conversation stopped.")) },
-            )
+                )
+            }
             VoiceLoopEffect.StopAll -> stopVoiceLoopWork()
             is VoiceLoopEffect.Fail -> {
                 stopVoiceLoopWork()
@@ -389,6 +409,32 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private var loopJob: Job? = null
+    private var waitJob: Job? = null
+    private var bargeJob: Job? = null
+    private var bargeMonitor: BargeInMonitor? = null
+    private var loopSeenSubmissions: Set<String> = emptySet()
+    private var loopSeenAnswers: Set<String> = emptySet()
+
+    /** While the reply is spoken, watch the mic; the user talking over it stops speech and starts a new turn. */
+    private fun startBargeInMonitor() {
+        stopBargeInMonitor()
+        val monitor = BargeInMonitor().also { bargeMonitor = it }
+        val detector = BargeInDetector()
+        bargeJob = viewModelScope.launch(Dispatchers.IO) {
+            monitor.run { level ->
+                if (detector.update(level, SystemClock.elapsedRealtime())) {
+                    monitor.stop()
+                    viewModelScope.launch { if (bargeMonitor === monitor) dispatchVoiceLoop(VoiceLoopEvent.BargeIn) }
+                }
+            }
+        }
+    }
+
+    private fun stopBargeInMonitor() {
+        bargeMonitor?.stop()
+        bargeMonitor = null
+        bargeJob = null
+    }
 
     private fun loopTraceReason(before: VoiceLoopPhase, event: VoiceLoopEvent): String? = when (event) {
         VoiceLoopEvent.Start -> "start"
@@ -397,7 +443,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         is VoiceLoopEvent.EndOfSpeech -> if (event.maxLength) "max_length" else "end_of_speech"
         is VoiceLoopEvent.Heard -> "heard"
         VoiceLoopEvent.Submitted -> "submitted"
-        is VoiceLoopEvent.Reply -> "reply"
+        is VoiceLoopEvent.Reply -> "reply_matched"
+        VoiceLoopEvent.BargeIn -> "barge_in"
+        VoiceLoopEvent.ReplyTimeout -> "reply_timeout"
         VoiceLoopEvent.SpeechDone -> "speech_done"
         VoiceLoopEvent.Stop -> "stopped"
         is VoiceLoopEvent.Fail -> if (before == VoiceLoopPhase.STARTING) "start_failed" else "failed"
@@ -434,6 +482,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun stopVoiceLoopWork() {
+        stopBargeInMonitor()
         speaker?.stop()
         if (_state.value.recording || _state.value.transcribing) cancelVoiceRequest(returnHome = false)
         loopTranscriptRequestId = null

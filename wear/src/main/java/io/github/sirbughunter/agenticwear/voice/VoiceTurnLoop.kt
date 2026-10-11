@@ -22,6 +22,9 @@ sealed interface VoiceLoopEvent {
     /** [quiet] is true under Do Not Disturb: the text stays in the chat, nothing is spoken. */
     data class Reply(val text: String, val quiet: Boolean) : VoiceLoopEvent
     data object SpeechDone : VoiceLoopEvent
+    /** The user started talking over the spoken reply. */
+    data object BargeIn : VoiceLoopEvent
+    data object ReplyTimeout : VoiceLoopEvent
     data object Stop : VoiceLoopEvent
     /** [message] null means the error is already shown. */
     data class Fail(val message: String?) : VoiceLoopEvent
@@ -43,8 +46,15 @@ data class VoiceLoopStep(val phase: VoiceLoopPhase, val effect: VoiceLoopEffect)
 const val LOOP_START_TIMEOUT_MS = 1_500L
 /** voiceLevel is sqrt-scaled (see voiceActivityLevel), so 0.2 is roughly 4% of the amplitude range above the noise gate. */
 const val LOOP_SPEECH_LEVEL = 0.2f
-const val LOOP_MIN_SPEECH_MS = 300L
-const val LOOP_SILENCE_END_MS = 1_200L
+/** Hysteresis: once speaking, a level above this still counts as speech (not silence). */
+const val LOOP_CONTINUE_LEVEL = 0.1f
+const val LOOP_MIN_SPEECH_MS = 500L
+const val LOOP_SILENCE_END_MS = 2_000L
+/** Silence is ignored this long after listening starts. */
+const val LOOP_IGNORE_SILENCE_MS = 1_500L
+const val LOOP_BARGE_IN_MS = 300L
+const val LOOP_WAIT_TIMEOUT_MS = 120_000L
+const val LOOP_REPLY_TIMEOUT_MESSAGE = "No reply yet. Voice conversation stopped."
 const val LOOP_MAX_TURN_MS = 60_000L
 const val LOOP_START_FAILED_MESSAGE = "The microphone didn't start. Try again."
 
@@ -60,14 +70,13 @@ class SpeechEndpointDetector(private val startMs: Long) {
         val dt = (nowMs - lastMs).coerceAtLeast(0L)
         lastMs = nowMs
         if (nowMs - startMs >= LOOP_MAX_TURN_MS) return EndpointDecision.MAX_LENGTH
-        if (level >= LOOP_SPEECH_LEVEL) {
-            loudMs += dt
-            quietSinceMs = null
-        } else if (quietSinceMs == null) {
-            quietSinceMs = nowMs
-        }
+        if (level >= LOOP_SPEECH_LEVEL) loudMs += dt
+        val speaking = loudMs >= LOOP_MIN_SPEECH_MS
+        val quiet = level < (if (speaking) LOOP_CONTINUE_LEVEL else LOOP_SPEECH_LEVEL)
+        if (!quiet) quietSinceMs = null
+        else if (quietSinceMs == null) quietSinceMs = maxOf(nowMs, startMs + LOOP_IGNORE_SILENCE_MS)
         val quietSince = quietSinceMs
-        if (loudMs >= LOOP_MIN_SPEECH_MS && quietSince != null && nowMs - quietSince >= LOOP_SILENCE_END_MS) {
+        if (speaking && quietSince != null && nowMs - quietSince >= LOOP_SILENCE_END_MS) {
             return EndpointDecision.END_OF_SPEECH
         }
         return EndpointDecision.CONTINUE
@@ -81,6 +90,9 @@ fun reduceVoiceLoop(phase: VoiceLoopPhase, event: VoiceLoopEvent): VoiceLoopStep
     }
     if (event is VoiceLoopEvent.StartTimeout) {
         return if (phase == VoiceLoopPhase.STARTING) VoiceLoopStep(VoiceLoopPhase.IDLE, VoiceLoopEffect.Fail(LOOP_START_FAILED_MESSAGE)) else stay
+    }
+    if (event is VoiceLoopEvent.ReplyTimeout) {
+        return if (phase == VoiceLoopPhase.WAITING) VoiceLoopStep(VoiceLoopPhase.IDLE, VoiceLoopEffect.Fail(LOOP_REPLY_TIMEOUT_MESSAGE)) else stay
     }
     if (event is VoiceLoopEvent.Fail) {
         return if (phase == VoiceLoopPhase.IDLE) stay else VoiceLoopStep(VoiceLoopPhase.IDLE, VoiceLoopEffect.Fail(event.message))
@@ -101,7 +113,8 @@ fun reduceVoiceLoop(phase: VoiceLoopPhase, event: VoiceLoopEvent): VoiceLoopStep
             event is VoiceLoopEvent.Reply -> VoiceLoopStep(VoiceLoopPhase.SPEAKING, VoiceLoopEffect.Speak(event.text))
             else -> stay
         }
-        VoiceLoopPhase.SPEAKING -> if (event is VoiceLoopEvent.SpeechDone) VoiceLoopStep(VoiceLoopPhase.STARTING, VoiceLoopEffect.Listen) else stay
+        VoiceLoopPhase.SPEAKING ->
+            if (event is VoiceLoopEvent.SpeechDone || event is VoiceLoopEvent.BargeIn) VoiceLoopStep(VoiceLoopPhase.STARTING, VoiceLoopEffect.Listen) else stay
     }
 }
 

@@ -113,26 +113,55 @@ class VoiceTurnLoopTest {
     }
 
     @Test
-    fun `detector ends after speech then silence`() {
+    fun `detector ends after speech then two seconds of silence`() {
         val d = SpeechEndpointDetector(0)
         var t = 0L
-        var last = EndpointDecision.CONTINUE
-        while (t < 400) { t += 100; last = d.update(0.6f, t); assertEquals(EndpointDecision.CONTINUE, last) }
+        while (t < 1_000) { t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.6f, t)) }
         var ended = -1L
-        while (t < 3_000 && ended < 0) { t += 100; if (d.update(0.02f, t) == EndpointDecision.END_OF_SPEECH) ended = t }
-        assertEquals(500L + LOOP_SILENCE_END_MS, ended)
+        while (t < 6_000 && ended < 0) { t += 100; if (d.update(0.02f, t) == EndpointDecision.END_OF_SPEECH) ended = t }
+        assertEquals(LOOP_IGNORE_SILENCE_MS + LOOP_SILENCE_END_MS, ended)
     }
 
     @Test
-    fun `detector never ends on silence without speech or on a short blip`() {
+    fun `a mid-sentence pause shorter than the silence window does not end the turn`() {
         val d = SpeechEndpointDetector(0)
         var t = 0L
+        while (t < 800) { t += 100; d.update(0.6f, t) }
+        while (t < 800 + 1_800) { t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.02f, t)) }
+        t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.6f, t))
+    }
+
+    @Test
+    fun `hysteresis keeps a soft tail counted as speech`() {
+        val d = SpeechEndpointDetector(0)
+        var t = 0L
+        while (t < 800) { t += 100; d.update(0.6f, t) }
+        while (t < 6_000) { t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.15f, t)) }
+    }
+
+    @Test
+    fun `silence in the first 1_5 seconds is ignored and short speech never counts`() {
+        val d = SpeechEndpointDetector(0)
+        var t = 0L
+        d.update(0.6f, 100); d.update(0.6f, 200); d.update(0.6f, 300); t = 300
         while (t < 10_000) { t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.0f, t)) }
-        val blip = SpeechEndpointDetector(0)
-        t = 0
-        blip.update(0.6f, 100)
-        t = 100
-        while (t < 5_000) { t += 100; assertEquals(EndpointDecision.CONTINUE, blip.update(0.0f, t)) }
+    }
+
+    @Test
+    fun `barge in needs 300 ms of continuous loud audio`() {
+        val b = BargeInDetector()
+        assertEquals(false, b.update(0.5f, 0)); assertEquals(false, b.update(0.5f, 200))
+        assertEquals(false, b.update(0.0f, 250))
+        assertEquals(false, b.update(0.5f, 300)); assertEquals(false, b.update(0.5f, 500))
+        assertEquals(true, b.update(0.5f, 600))
+    }
+
+    @Test
+    fun `barge in during speaking restarts listening and reply timeout only applies while waiting`() {
+        assertEquals(VoiceLoopStep(VoiceLoopPhase.STARTING, VoiceLoopEffect.Listen), reduceVoiceLoop(VoiceLoopPhase.SPEAKING, VoiceLoopEvent.BargeIn))
+        assertEquals(VoiceLoopPhase.WAITING, reduceVoiceLoop(VoiceLoopPhase.WAITING, VoiceLoopEvent.BargeIn).phase)
+        assertEquals(VoiceLoopStep(VoiceLoopPhase.IDLE, VoiceLoopEffect.Fail(LOOP_REPLY_TIMEOUT_MESSAGE)), reduceVoiceLoop(VoiceLoopPhase.WAITING, VoiceLoopEvent.ReplyTimeout))
+        assertEquals(VoiceLoopPhase.SPEAKING, reduceVoiceLoop(VoiceLoopPhase.SPEAKING, VoiceLoopEvent.ReplyTimeout).phase)
     }
 
     @Test
