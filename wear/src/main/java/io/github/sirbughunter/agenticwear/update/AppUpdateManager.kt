@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.net.Network
 import android.os.Build
 import androidx.core.content.FileProvider
 import io.github.sirbughunter.agenticwear.BuildConfig
@@ -165,14 +166,16 @@ class AppUpdateManager(private val context: Context) {
         val deadline = android.os.SystemClock.elapsedRealtime() + 10 * 60_000L
         val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
         val stem = "agentic-wear-${release.versionCode}-${release.sha256.take(16)}"
+        val updateNetwork = UpdateNetwork(context)
+        val network = runCatching { updateNetwork.acquire() }.getOrNull()
         return try {
             verifiedUpdateDownload(File(updatesDir, "$stem.partial.apk"), File(updatesDir, "$stem.apk"), release, MAX_APK_BYTES,
-                open = { offset -> openConnection(validatedUrl(release.apkUrl), APK_MIME_TYPE, offset).also { downloadConnection = it } },
+                open = { offset -> openConnection(validatedUrl(release.apkUrl), APK_MIME_TYPE, offset, network).also { downloadConnection = it } },
                 checkActive = {
                     if (downloadCancelled) throw UpdateDownloadCancelled(discardPartialDownload)
                     if (android.os.SystemClock.elapsedRealtime() >= deadline) throw UpdateDownloadCancelled(false)
                 }, onProgress = onProgress, verifyPackage = { verifyPackage(it, release) })
-        } finally { downloadConnection = null; if (discardPartialDownload) File(updatesDir, "$stem.partial.apk").delete() }
+        } finally { downloadConnection = null; updateNetwork.release(); if (discardPartialDownload) File(updatesDir, "$stem.partial.apk").delete() }
     }
 
     fun canRequestInstalls(): Boolean = context.packageManager.canRequestPackageInstalls()
@@ -222,8 +225,8 @@ class AppUpdateManager(private val context: Context) {
         return AppRelease(versionCode, versionName, resolvedApkUrl.toString(), sha256, apkSize, expiresAt)
     }
 
-    private fun openConnection(initialUrl: URL, accept: String, rangeOffset: Long = 0): HttpURLConnection {
-        return openConnectionOrNull(initialUrl, accept, missingManifestIsNoUpdate = false, rangeOffset = rangeOffset)
+    private fun openConnection(initialUrl: URL, accept: String, rangeOffset: Long = 0, network: Network? = null): HttpURLConnection {
+        return openConnectionOrNull(initialUrl, accept, missingManifestIsNoUpdate = false, rangeOffset = rangeOffset, network = network)
             ?: error("Only update manifests may be absent")
     }
 
@@ -241,6 +244,7 @@ class AppUpdateManager(private val context: Context) {
         missingManifestIsNoUpdate: Boolean,
         manifestCheck: ManifestCheckRun? = null,
         rangeOffset: Long = 0,
+        network: Network? = null,
     ): HttpURLConnection? {
         var current = initialUrl
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
@@ -248,7 +252,7 @@ class AppUpdateManager(private val context: Context) {
             val pairing = if (BuildConfig.PRIVATE_UPDATES_ONLY) pairingStore.read() ?: throw IOException("Private update requires pairing") else null
             if (pairing != null && !privateUpdateUrlAllowed(current, validatedUrl(pairing.relayUrl), pairing.pairId))
                 throw IOException("Private update redirect left the paired channel")
-            val connection = (current.openConnection() as HttpURLConnection).apply {
+            val connection = ((network?.openConnection(current) ?: current.openConnection()) as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
