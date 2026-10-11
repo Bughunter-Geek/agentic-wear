@@ -1,4 +1,4 @@
-import { privateUpdateSchema, privateApkDigest, PRIVATE_CHUNK_BYTES, type PrivateUpdate } from "./private-update";
+import { privateUpdateSchema, privateApkDigest, PRIVATE_CHUNK_BYTES, PRIVATE_CHUNKS_PER_PUT, type PrivateUpdate } from "./private-update";
 import { DurableObject } from "cloudflare:workers";
 import { bridgeControlSchema, wireEnvelopeSchema, type WireEnvelope } from "./schemas";
 import { secureEqual, sha256Hex } from "./crypto";
@@ -66,10 +66,14 @@ export class PairRelay extends DurableObject<Env> {
       const lastCode = await tx.get<number>("private-update:last-code") ?? 0;
       if (manifest.versionCode <= lastCode) throw new PairRelayError("Private version must increase", 409);
       if (previous) await tx.delete(Array.from({ length: Math.ceil(previous.apkSize / PRIVATE_CHUNK_BYTES) }, (_, i) => `private-update:chunk:${i}`));
-      const entries: Record<string, ArrayBuffer> = {};
-      for (let offset = 0, i = 0; offset < bytes.byteLength; offset += PRIVATE_CHUNK_BYTES, i++)
-        entries[`private-update:chunk:${i}`] = bytes.slice(offset, offset + PRIVATE_CHUNK_BYTES);
-      await tx.put(entries);
+      // Same transaction (all-or-nothing), but each put carries at most PRIVATE_CHUNKS_PER_PUT chunks.
+      const total = Math.ceil(bytes.byteLength / PRIVATE_CHUNK_BYTES);
+      for (let first = 0; first < total; first += PRIVATE_CHUNKS_PER_PUT) {
+        const entries: Record<string, ArrayBuffer> = {};
+        for (let i = first; i < Math.min(total, first + PRIVATE_CHUNKS_PER_PUT); i++)
+          entries[`private-update:chunk:${i}`] = bytes.slice(i * PRIVATE_CHUNK_BYTES, (i + 1) * PRIVATE_CHUNK_BYTES);
+        await tx.put(entries);
+      }
       await tx.put("private-update:manifest", manifest);
       await tx.put("private-update:last-code", manifest.versionCode);
     });

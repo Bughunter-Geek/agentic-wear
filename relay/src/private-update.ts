@@ -1,5 +1,6 @@
 import { z } from "zod";
-export const MAX_PRIVATE_APK_BYTES = 8 * 1024 * 1024;
+export const MAX_PRIVATE_APK_BYTES = 16 * 1024 * 1024; // keep in sync with bridge/src/publish-private-update.ts
+export const PRIVATE_CHUNKS_PER_PUT = 4; // bounds each storage put to 4 MiB
 export const PRIVATE_CHUNK_BYTES = 1024 * 1024;
 export const privateUpdateSchema = z.object({
   versionCode: z.number().int().positive(), versionName: z.string().min(1).max(100).regex(/^[A-Za-z0-9._-]+$/u),

@@ -17,7 +17,8 @@ async function main(): Promise<void> {
   const headers: Record<string, string> = {}; let body: Buffer | undefined;
   if (args[0] !== "--revoke") {
     const path = resolve(args[0]!);
-    if ((await stat(path)).size > 8 * 1024 * 1024) throw new Error("APK exceeds private limit");
+    // Keep in sync with relay MAX_PRIVATE_APK_BYTES (16 MiB).
+    if ((await stat(path)).size > 16 * 1024 * 1024) throw new Error("APK exceeds private limit");
     body = await readFile(path); const digest = createHash("sha256").update(body).digest("hex");
     const release = z.object({ versionCode: z.number().int().positive(), versionName: z.string().max(40), sha256: z.string(), apkSize: z.number().int() }).parse(JSON.parse(await readFile(join(dirname(path), "update.json"), "utf8")) as unknown);
     if (digest !== release.sha256 || body.byteLength !== release.apkSize) throw new Error("Manifest integrity mismatch");
