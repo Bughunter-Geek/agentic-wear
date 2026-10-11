@@ -172,11 +172,11 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(
     }
 }
 
-private val HEADING = Regex("^\\s*(#{1,6})\\s+(.+)$")
-private val UNORDERED_LIST = Regex("^\\s*[-+*]\\s+(.+)$")
-private val ORDERED_LIST = Regex("^\\s*(\\d+)[.)]\\s+(.+)$")
-private val BLOCK_QUOTE = Regex("^\\s*>\\s?(.*)$")
-private val HORIZONTAL_RULE = Regex("^\\s*(?:-{3,}|_{3,}|\\*{3,})\\s*$")
+internal val HEADING = Regex("^\\s*(#{1,6})\\s+(.+)$")
+internal val UNORDERED_LIST = Regex("^\\s*[-+*]\\s+(.+)$")
+internal val ORDERED_LIST = Regex("^\\s*(\\d+)[.)]\\s+(.+)$")
+internal val BLOCK_QUOTE = Regex("^\\s*>\\s?(.*)$")
+internal val HORIZONTAL_RULE = Regex("^\\s*(?:-{3,}|_{3,}|\\*{3,})\\s*$")
 private val INLINE_TOKEN = Regex(
     """\\.|!\[([^]]*)]\([^)]*\)|\[([^]]+)]\([^)]*\)|\*\*.+?\*\*|__.+?__|~~.+?~~|`[^`]+`|\*[^*\n]+\*|_[^_\n]+_""",
 )

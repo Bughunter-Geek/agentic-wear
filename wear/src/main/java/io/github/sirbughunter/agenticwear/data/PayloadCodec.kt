@@ -6,6 +6,8 @@ import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatParagraph
 import io.github.sirbughunter.agenticwear.model.ChatPhase
+import io.github.sirbughunter.agenticwear.model.ChatQuestion
+import io.github.sirbughunter.agenticwear.model.MAX_QUESTION_OPTIONS
 import io.github.sirbughunter.agenticwear.model.ChatMessage
 import io.github.sirbughunter.agenticwear.model.ChatMessageKind
 import io.github.sirbughunter.agenticwear.model.ChatRole
@@ -51,6 +53,16 @@ object PayloadCodec {
             .put("effort", ReasoningEffortPolicy.normalize(payload.effort))
             .apply { payload.model?.takeIf(::isSafeModelValue)?.let { put("model", it) } }
             .apply { payload.followUpAction.wireOverride()?.let { put("followUpAction", it) } }
+            .toString()
+        is BridgePayload.AnswerQuestion -> JSONObject()
+            .put("version", 1)
+            .put("kind", "question.answer")
+            .put("requestId", payload.requestId)
+            .put("threadId", payload.threadId)
+            .put("questionItemId", payload.questionItemId)
+            .put("questionIndex", payload.questionIndex.coerceIn(0, MAX_QUESTION_INDEX))
+            .put("answer", payload.answer.trim().take(MAX_TRANSCRIPT_CHARS))
+            .apply { payload.question?.trim()?.takeIf(String::isNotEmpty)?.let { put("question", it.take(MAX_QUESTION_FALLBACK_CHARS)) } }
             .toString()
         is BridgePayload.ApprovalResponse -> JSONObject()
             .put("version", 1)
@@ -236,18 +248,23 @@ object PayloadCodec {
             "terminal.completed" -> AlertKind.COMPLETE
             "terminal.failed", "terminal.interrupted", "terminal.blocked" -> AlertKind.ERROR
             "approval.request" -> AlertKind.PERMISSION
+            "question.request" -> AlertKind.QUESTION
             else -> return null
         }
         val eventId = json.optString("eventId").takeIf(::isSafeId) ?: return null
         val threadId = json.optString("threadId").takeIf(::isSafeId) ?: return null
         val title = clean(json.optString("title"), 100).ifEmpty { "Agent session" }
-        val detail = fullAlertDetail(json.optString("detail")).ifEmpty {
+        val detail = alertDetailFor(kind, json.optString("detail")).ifEmpty {
             when (kind) {
                 AlertKind.COMPLETE -> "The agent finished its work."
                 AlertKind.PERMISSION -> "The agent needs your decision."
                 AlertKind.ERROR -> "The agent stopped before completing its work."
+                AlertKind.QUESTION -> "The agent has a question for you."
             }
         }
+        val options = if (kind == AlertKind.QUESTION) {
+            decodeQuestionOptions(json.optJSONArray("options"), MAX_QUESTION_OPTIONS, MAX_QUESTION_OPTION_CHARS)
+        } else emptyList()
         return AgentAlert(
             eventId = eventId,
             kind = kind,
@@ -257,7 +274,44 @@ object PayloadCodec {
             occurredAtMillis = json.optLong("occurredAt", System.currentTimeMillis()),
             approvalId = json.optString("approvalId").takeIf(::isSafeId),
             canControl = json.optBoolean("canControl", false),
+            options = options,
+            questionItemId = if (kind == AlertKind.QUESTION) json.optString("questionItemId").takeIf(::isSafeId) else null,
+            questionIndex = json.optInt("questionIndex", 0).coerceIn(0, MAX_QUESTION_INDEX),
         )
+    }
+
+    /** True when a `terminal.completed` payload says its final answer already raised a question alert. */
+    fun hasQuestion(json: JSONObject): Boolean =
+        json.optString("kind") == "terminal.completed" && json.optBoolean("hasQuestion", false)
+
+    private fun decodeQuestionOptions(array: JSONArray?, maxOptions: Int, maxChars: Int): List<String> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val value = array.optString(index, "").trim()
+                if (value.isEmpty() || contains(value)) continue
+                add(value.take(maxChars))
+                if (size >= maxOptions) break
+            }
+        }
+    }
+
+    private fun decodeChatQuestions(array: JSONArray?): List<ChatQuestion> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until minOf(array.length(), MAX_CHAT_QUESTIONS)) {
+                val item = array.optJSONObject(index) ?: continue
+                val title = item.optString("title").trim().take(MAX_QUESTION_TITLE_CHARS)
+                if (title.isEmpty()) continue
+                add(ChatQuestion(title, decodeQuestionOptions(item.optJSONArray("options"), MAX_CHAT_QUESTION_OPTIONS, MAX_CHAT_OPTION_CHARS)))
+            }
+        }
+    }
+
+    private fun chatQuestionsToJson(questions: List<ChatQuestion>): JSONArray = JSONArray().apply {
+        questions.take(MAX_CHAT_QUESTIONS).forEach { q ->
+            put(JSONObject().put("title", q.title).put("options", JSONArray(q.options)))
+        }
     }
 
     fun decodeRequestError(
@@ -388,7 +442,12 @@ object PayloadCodec {
                             .put("approvalId", message.approvalId)
                             .put("canControl", message.canControl)
                             .put("resolved", message.resolved)
-                            .put("watchRequestId", message.watchRequestId),
+                            .put("watchRequestId", message.watchRequestId)
+                            .apply {
+                                if (message.questions.isNotEmpty()) put("questions", chatQuestionsToJson(message.questions))
+                                message.questionItemId?.let { put("questionItemId", it) }
+                                if (message.answered) put("answered", true)
+                            },
                     )
                 }
             },
@@ -523,6 +582,11 @@ object PayloadCodec {
         .put("occurredAt", alert.occurredAtMillis)
         .put("approvalId", alert.approvalId)
         .put("canControl", alert.canControl)
+        .apply {
+            if (alert.options.isNotEmpty()) put("options", JSONArray(alert.options))
+            alert.questionItemId?.let { put("questionItemId", it) }
+            if (alert.questionIndex != 0) put("questionIndex", alert.questionIndex)
+        }
         .toString()
 
     fun alertsToJson(alerts: List<AgentAlert>): String = JSONArray().apply {
@@ -545,10 +609,13 @@ object PayloadCodec {
             kind = AlertKind.valueOf(item.getString("kind")),
             threadId = item.getString("threadId"),
             title = clean(item.getString("title"), 100),
-            detail = fullAlertDetail(item.getString("detail")),
+            detail = alertDetailFor(AlertKind.valueOf(item.getString("kind")), item.getString("detail")),
             occurredAtMillis = item.getLong("occurredAt"),
             approvalId = item.optString("approvalId").takeIf(::isSafeId),
             canControl = item.optBoolean("canControl"),
+            options = decodeQuestionOptions(item.optJSONArray("options"), MAX_QUESTION_OPTIONS, MAX_QUESTION_OPTION_CHARS),
+            questionItemId = item.optString("questionItemId").takeIf(::isSafeId),
+            questionIndex = item.optInt("questionIndex", 0).coerceIn(0, MAX_QUESTION_INDEX),
         )
     }.getOrNull()
 
@@ -585,6 +652,9 @@ object PayloadCodec {
                     canControl = item.optBoolean("canControl", false),
                     resolved = item.optBoolean("resolved", false),
                     watchRequestId = item.optString("watchRequestId").takeIf(::isSafeId),
+                    questions = if (role == ChatRole.ASSISTANT) decodeChatQuestions(item.optJSONArray("questions")) else emptyList(),
+                    questionItemId = item.optString("questionItemId").takeIf(::isSafeId),
+                    answered = item.optBoolean("answered", false),
                 ),
             )
         }
@@ -613,6 +683,9 @@ object PayloadCodec {
                     canControl = item.optBoolean("canControl", false),
                     resolved = item.optBoolean("resolved", false),
                     watchRequestId = item.optString("watchRequestId").takeIf(::isSafeId),
+                    questions = if (role == ChatRole.ASSISTANT) decodeChatQuestions(item.optJSONArray("questions")) else emptyList(),
+                    questionItemId = item.optString("questionItemId").takeIf(::isSafeId),
+                    answered = item.optBoolean("answered", false),
                 ),
             )
         }
@@ -639,17 +712,36 @@ object PayloadCodec {
     private const val MAX_ERROR_CLASS_CHARS = 80
     private const val MAX_CHAT_MESSAGES = 12
     private const val MAX_CHAT_MESSAGE_CHARS = 6_000
+    private const val MAX_QUESTION_INDEX = 9
+    private const val MAX_QUESTION_FALLBACK_CHARS = 1_000
+    private const val MAX_QUESTION_OPTION_CHARS = 40
+    private const val MAX_CHAT_QUESTIONS = 3
+    private const val MAX_CHAT_QUESTION_OPTIONS = 6
+    private const val MAX_QUESTION_TITLE_CHARS = 600
+    private const val MAX_CHAT_OPTION_CHARS = 120
 }
 
 internal fun FollowUpAction.wireOverride(): String? =
     wireValue.takeUnless { this == FollowUpAction.DEFAULT }
+
+/** Replies and questions keep their line breaks so the notification can render markdown blocks. */
+internal fun alertDetailFor(kind: AlertKind, value: String): String =
+    if (kind == AlertKind.COMPLETE || kind == AlertKind.QUESTION) multilineAlertDetail(value) else fullAlertDetail(value)
+
+internal fun multilineAlertDetail(value: String): String = value
+    .replace("\r\n", "\n")
+    .replace('\r', '\n')
+    .lines()
+    .joinToString("\n") { it.replace(Regex("[ \\t]+"), " ").trim() }
+    .replace(Regex("\n{3,}"), "\n\n")
+    .trim()
 
 internal fun fullAlertDetail(value: String): String = value.trim().replace(Regex("\\s+"), " ")
 
 internal fun acceptsAlertEnvelope(kind: String, turnScope: String): Boolean = when (kind) {
     "terminal.completed", "terminal.failed", "terminal.interrupted", "terminal.blocked" ->
         turnScope == "topLevel"
-    "approval.request" -> true
+    "approval.request", "question.request" -> true
     else -> false
 }
 

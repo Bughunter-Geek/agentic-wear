@@ -220,6 +220,7 @@ private fun AgentAlert?.look(readOnly: Boolean, decisionNeeded: Boolean): AlertL
     AlertKind.COMPLETE -> AlertLook("Done", Aw.ReadyText, Aw.Ready.copy(alpha = .14f), Icons.Rounded.Check)
     AlertKind.PERMISSION -> AlertLook(if (decisionNeeded && !readOnly) "Decision needed" else "Permission requested", Aw.Attention, Aw.Attention.copy(alpha = .14f), Icons.Rounded.Security)
     AlertKind.ERROR -> AlertLook("Stopped", Aw.ErrorText, Aw.Error.copy(alpha = .14f), Icons.Rounded.ErrorOutline)
+    AlertKind.QUESTION -> AlertLook("Question", Aw.Attention, Aw.Attention.copy(alpha = .14f), Icons.Rounded.Security)
     null -> AlertLook("Nothing yet", Aw.TextSecondary, Aw.SurfaceRaised, Icons.Rounded.NotificationsNone)
 }
 

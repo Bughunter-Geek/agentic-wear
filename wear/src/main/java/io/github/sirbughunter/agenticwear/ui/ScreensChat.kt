@@ -60,6 +60,8 @@ import io.github.sirbughunter.agenticwear.model.ChatMessageKind
 import io.github.sirbughunter.agenticwear.model.ChatPhase
 import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.MAX_QUESTION_OPTIONS
+import io.github.sirbughunter.agenticwear.model.isAnsweredLocally
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.SubmissionPhase
 import io.github.sirbughunter.agenticwear.model.currentSubmission
@@ -76,6 +78,8 @@ internal fun ChatScreen(
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
     onPermissionResponse: (ChatMessage, Boolean) -> Unit,
     palette: OrbPalette,
+    onAnswerQuestion: (ChatMessage, String) -> Unit = { _, _ -> },
+    onReplyToQuestion: (ChatMessage) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -193,6 +197,9 @@ internal fun ChatScreen(
                         permissionPending = state.pending,
                         onRateMessage = onRateMessage,
                         onPermissionResponse = onPermissionResponse,
+                        questionsOpen = message.needsAnswer && !message.isAnsweredLocally(state.answeredQuestionItems) && !state.pending,
+                        onAnswerQuestion = onAnswerQuestion,
+                        onReplyToQuestion = onReplyToQuestion,
                         modifier = Modifier.padding(bottom = if (sameCluster) 4.dp else 11.dp),
                     )
                 }
@@ -295,13 +302,16 @@ private fun ChatMessageItem(
     permissionPending: Boolean,
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
     onPermissionResponse: (ChatMessage, Boolean) -> Unit,
+    questionsOpen: Boolean,
+    onAnswerQuestion: (ChatMessage, String) -> Unit,
+    onReplyToQuestion: (ChatMessage) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     when {
         message.kind == ChatMessageKind.PERMISSION -> PermissionCard(message, approvalMode, permissionPending, onPermissionResponse, modifier)
         message.role == ChatRole.USER -> UserBubble(message, modifier)
         message.phase == ChatPhase.COMMENTARY -> UpdateRow(message, collapseUpdates, modifier)
-        else -> AnswerBlock(message, feedback, feedbackPending, feedbackEnabled, onRateMessage, modifier)
+        else -> AnswerBlock(message, feedback, feedbackPending, feedbackEnabled, onRateMessage, questionsOpen, onAnswerQuestion, onReplyToQuestion, modifier)
     }
 }
 
@@ -375,11 +385,15 @@ private fun AnswerBlock(
     feedbackPending: Boolean,
     feedbackEnabled: Boolean,
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
+    questionsOpen: Boolean,
+    onAnswerQuestion: (ChatMessage, String) -> Unit,
+    onReplyToQuestion: (ChatMessage) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier.fillMaxWidth().padding(horizontal = 2.dp)) {
         MarkdownMessageText(message.text, color = Color3.AnswerText, accent = Aw.Text, codeBackground = Aw.SurfaceRaised,
             fontSize = 12.5.sp, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth())
+        if (questionsOpen) QuestionChoices(message, onAnswerQuestion, onReplyToQuestion)
         Row(
             Modifier.offset(x = (-8).dp).semantics { if (feedbackPending) stateDescription = "Sending feedback" },
             verticalAlignment = Alignment.CenterVertically,
@@ -388,6 +402,52 @@ private fun AnswerBlock(
             FeedbackButton(FeedbackRating.DISLIKED, feedback == FeedbackRating.DISLIKED, feedbackPending, feedbackEnabled) { onRateMessage(message, FeedbackRating.DISLIKED) }
             if (feedbackPending) ShimmerText("Sending", fontSize = 10.sp)
         }
+    }
+}
+
+/** Question title, one full-width chip per option (max 4) and a Reply chip for a free-text answer. */
+@Composable
+private fun QuestionChoices(
+    message: ChatMessage,
+    onAnswer: (ChatMessage, String) -> Unit,
+    onReply: (ChatMessage) -> Unit,
+) {
+    val question = message.questions.firstOrNull() ?: return
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        MarkdownMessageText(question.title, color = Aw.Text, accent = Aw.Text, codeBackground = Aw.SurfaceRaised,
+            fontSize = 12.5.sp, lineHeight = 17.sp, modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp))
+        question.options.take(MAX_QUESTION_OPTIONS).forEach { option ->
+            QuestionChip(option, primary = false) { onAnswer(message, option) }
+        }
+        QuestionChip("Reply", primary = question.options.isEmpty()) { onReply(message) }
+    }
+}
+
+@Composable
+private fun QuestionChip(label: String, primary: Boolean, onClick: () -> Unit) {
+    val haptics = LocalHapticFeedback.current
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 40.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (primary) Aw.Text else Aw.SurfaceHigh)
+            .clickable(role = Role.Button) {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                onClick()
+            }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = if (primary) Aw.OnPrimary else Aw.Text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

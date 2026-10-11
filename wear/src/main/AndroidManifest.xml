@@ -49,6 +49,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Not exported: only our own notification PendingIntents may send a question answer. -->
+        <activity
+            android:name=".QuestionActionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name=".notification.AgenticWearMessagingService"
             android:exported="false">

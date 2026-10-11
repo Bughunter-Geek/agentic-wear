@@ -226,5 +226,7 @@ dependencies {
     implementation("androidx.concurrent:concurrent-futures:1.3.0")
 
     testImplementation("junit:junit:4.13.2")
+    // Test-only: the Android stub jar throws for org.json, which PayloadCodec uses. Not shipped in the APK.
+    testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }

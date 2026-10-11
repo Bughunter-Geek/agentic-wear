@@ -202,6 +202,8 @@ fun AgenticWearApp(
                     onRateMessage = viewModel::rateChatMessage,
                     onPermissionResponse = viewModel::respondToChatPermission,
                     palette = orbPalette,
+                    onAnswerQuestion = viewModel::answerQuestion,
+                    onReplyToQuestion = viewModel::replyToQuestionFromChat,
                 )
                 WearScreen.ALERT -> AlertScreen(
                     alert = state.latestAlert,
@@ -452,6 +454,7 @@ private fun HomeScreen(
                 io.github.sirbughunter.agenticwear.model.AlertKind.COMPLETE -> Aw.Ready
                 io.github.sirbughunter.agenticwear.model.AlertKind.PERMISSION -> Aw.Attention
                 io.github.sirbughunter.agenticwear.model.AlertKind.ERROR -> Aw.Error
+                io.github.sirbughunter.agenticwear.model.AlertKind.QUESTION -> Aw.Attention
             },
         )
 

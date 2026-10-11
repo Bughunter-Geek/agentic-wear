@@ -20,6 +20,12 @@ import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.ChatMessage
 import io.github.sirbughunter.agenticwear.model.ChatRole
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
+import io.github.sirbughunter.agenticwear.model.PendingQuestionReply
+import io.github.sirbughunter.agenticwear.model.QuestionAnswer
+import io.github.sirbughunter.agenticwear.model.optimisticQuestionReplyText
+import io.github.sirbughunter.agenticwear.model.pendingQuestionReply
+import io.github.sirbughunter.agenticwear.model.questionEventId
+import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
@@ -92,6 +98,10 @@ data class WearUiState(
     val showSendModeOverlay: Boolean = false,
     val showErrorDetails: Boolean = false,
     val replyingFromChat: Boolean = false,
+    /** Question item ids already answered from this watch; hides their buttons until a snapshot confirms. */
+    val answeredQuestionItems: Set<String> = emptySet(),
+    /** Set while the user composes a free-text answer to an agent question through the reply input. */
+    val pendingQuestionReply: PendingQuestionReply? = null,
     val demo: Boolean = false,
     val demoVoiceActive: Boolean = false,
 ) {
@@ -442,6 +452,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val transcript = _state.value.transcript ?: return
         val current = _state.value
         if (current.pending || current.recording || current.transcribing || transcript.editChoices.isNotEmpty() || transcript.text.isBlank()) return
+        val question = current.pendingQuestionReply?.takeIf { it.threadId == transcript.threadId }
+            ?.let { QuestionAnswer(it.threadId, it.questionItemId, it.questionIndex, it.question, transcript.text.trim()) }
+        if (question != null) {
+            submitQuestionAnswer(question, transcript.requestId)
+            return
+        }
         val draftText = transcript.text
         val targetThreadId = threadIdForDraftSubmission(current)
         if (targetThreadId != null) {
@@ -461,6 +477,67 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             )
             preferences.selectedThreadId = threadId
             preferences.submitDraftAsNewSession = false
+            reload(WearScreen.CHAT)
+            startChatStream(threadId)
+            repository.watchChat(threadId)
+            reload(WearScreen.CHAT)
+        }
+    }
+
+    /** Tap on an answer button in the chat: sends `question.answer` via the normal send path. */
+    fun answerQuestion(message: ChatMessage, answer: String) {
+        val threadId = _state.value.chat?.threadId ?: _state.value.selectedThreadId ?: return
+        val reply = message.pendingQuestionReply(threadId) ?: return
+        val text = answer.trim().takeIf { it.isNotEmpty() } ?: return
+        submitQuestionAnswer(QuestionAnswer(reply.threadId, reply.questionItemId, reply.questionIndex, reply.question, text), UUID.randomUUID().toString())
+    }
+
+    /** "Reply" on a question (button or notification): free-text answer through the usual reply input. */
+    fun replyToQuestion(reply: PendingQuestionReply) {
+        val needsChat = _state.value.chat?.threadId != reply.threadId
+        preferences.selectedThreadId = reply.threadId
+        _state.update { it.copy(screen = WearScreen.REPLY, selectedThreadId = reply.threadId, pendingQuestionReply = reply, error = null) }
+        if (needsChat) {
+            // Load the chat behind the reply input so Back lands on real content.
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { repository.watchChat(reply.threadId) }
+                reload()
+            }
+        }
+    }
+
+    fun replyToQuestionFromChat(message: ChatMessage) {
+        val threadId = _state.value.chat?.threadId ?: _state.value.selectedThreadId ?: return
+        message.pendingQuestionReply(threadId)?.let(::replyToQuestion)
+    }
+
+    private fun submitQuestionAnswer(question: QuestionAnswer, requestId: String) {
+        val threadId = question.threadId
+        val optimisticText = optimisticQuestionReplyText(question.question, question.answer)
+        AgentNotifier.cancel(getApplication(), questionEventId(threadId, question.questionItemId))
+        stopChatStream(sendUnwatch = false)
+        _state.update {
+            it.copy(
+                screen = WearScreen.CHAT, selectedThreadId = threadId, pending = true, error = null, sendNotice = null,
+                answeredQuestionItems = it.answeredQuestionItems + question.questionItemId,
+                pendingQuestionReply = null, transcript = null, replyingFromChat = false,
+                sendingDraft = SubmittedTurn(requestId, threadId, optimisticText, System.currentTimeMillis()),
+            )
+        }
+        preferences.transcript = null
+        preferences.revisionBase = null
+        startChatStream(threadId)
+        launchTask(showPending = false) {
+            try {
+                repository.submitQuestionAnswer(question) {
+                    _state.update { it.copy(submittedTurns = preferences.submittedTurns, sendingDraft = null) }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Throwable) {
+                _state.update { it.copy(answeredQuestionItems = it.answeredQuestionItems - question.questionItemId) }
+                throw error
+            }
             reload(WearScreen.CHAT)
             startChatStream(threadId)
             repository.watchChat(threadId)
@@ -507,6 +584,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             resetForNewTranscription(current).copy(
                 screen = if (returnToChat) WearScreen.CHAT else WearScreen.HOME,
                 replyingFromChat = false,
+                pendingQuestionReply = null,
             )
         }
         if (returnToChat && threadId != null) startChatStream(threadId)
@@ -584,11 +662,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun replyFromChat() {
-        _state.update { it.copy(screen = WearScreen.REPLY, error = null) }
+        _state.update { it.copy(screen = WearScreen.REPLY, error = null, pendingQuestionReply = null) }
     }
 
     fun cancelReplyFromChat() {
-        _state.update { it.copy(screen = WearScreen.CHAT, error = null) }
+        _state.update { it.copy(screen = WearScreen.CHAT, error = null, pendingQuestionReply = null) }
     }
 
     fun replyWithVoiceFromChat() {
@@ -1341,6 +1419,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             latestAlert = if (current.alertReadOnly && effectiveScreen == WearScreen.ALERT) current.latestAlert else restored.latestAlert,
             appUpdate = current.appUpdate.copy(enabled = restored.appUpdate.enabled),
             sendingDraft = current.sendingDraft,
+            answeredQuestionItems = current.answeredQuestionItems,
+            pendingQuestionReply = current.pendingQuestionReply,
             showInstallPermissionPrompt = current.showInstallPermissionPrompt,
             feedbackPendingMessageId = current.feedbackPendingMessageId,
             showErrorDetails = restored.error != null && current.showErrorDetails,

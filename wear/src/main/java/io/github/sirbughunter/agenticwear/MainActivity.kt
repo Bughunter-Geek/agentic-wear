@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.wear.compose.foundation.LocalAmbientModeManager
 import androidx.wear.compose.foundation.rememberAmbientModeManager
+import io.github.sirbughunter.agenticwear.model.PendingQuestionReply
 import io.github.sirbughunter.agenticwear.ui.AgenticWearApp
 import io.github.sirbughunter.agenticwear.live.LiveVoiceActivity
 import io.github.sirbughunter.agenticwear.ui.AgenticWearTheme
@@ -149,6 +150,7 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra(EXTRA_PAIRING_CODE)?.let { value ->
             extractPairingCode(value)?.let { pairingCodePrefill = it }
         }
+        if (handleQuestionIntent(intent)) return
         if (intent?.hasExtra(EXTRA_THREAD_ID) == true) {
             intent.getStringExtra(EXTRA_THREAD_ID)?.let { threadId ->
                 viewModel.openSession(threadId)
@@ -158,7 +160,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Only the "Reply" action lands here, and it sends nothing. MainActivity is exported, so it never
+     * sends an answer from intent extras; option answers go through [QuestionActionActivity].
+     */
+    private fun handleQuestionIntent(intent: Intent?): Boolean {
+        val source = intent ?: return false
+        val reply = parseQuestionReplyIntent(
+            source.getStringExtra(EXTRA_THREAD_ID),
+            source.getStringExtra(EXTRA_QUESTION_ITEM_ID),
+            source.getBooleanExtra(EXTRA_QUESTION_REPLY, false),
+            source.getIntExtra(EXTRA_QUESTION_INDEX, 0),
+            source.getStringExtra(EXTRA_QUESTION_TEXT).orEmpty(),
+        ) ?: return false
+        // Consume once: the intent is replayed when the activity is recreated.
+        listOf(EXTRA_QUESTION_REPLY, EXTRA_QUESTION_ITEM_ID, EXTRA_QUESTION_INDEX, EXTRA_QUESTION_TEXT, EXTRA_QUESTION_ANSWER)
+            .forEach(source::removeExtra)
+        viewModel.replyToQuestion(reply)
+        return true
+    }
+
     companion object {
+        const val EXTRA_QUESTION_ITEM_ID = "io.github.sirbughunter.agenticwear.QUESTION_ITEM_ID"
+        const val EXTRA_QUESTION_INDEX = "io.github.sirbughunter.agenticwear.QUESTION_INDEX"
+        const val EXTRA_QUESTION_ANSWER = "io.github.sirbughunter.agenticwear.QUESTION_ANSWER"
+        const val EXTRA_QUESTION_TEXT = "io.github.sirbughunter.agenticwear.QUESTION_TEXT"
+        const val EXTRA_QUESTION_REPLY = "io.github.sirbughunter.agenticwear.QUESTION_REPLY"
         const val EXTRA_DEMO_STATE = "io.github.sirbughunter.agenticwear.DEMO_STATE"
         const val EXTRA_ALERT_EVENT_ID = "io.github.sirbughunter.agenticwear.ALERT_EVENT_ID"
         const val EXTRA_ALERT_READ_ONLY = "io.github.sirbughunter.agenticwear.ALERT_READ_ONLY"
@@ -176,3 +203,15 @@ internal fun keepScreenOnForVoiceSession(
 ): Boolean = recording || (
     transcribing && (transcriptionElapsedMillis ?: 0L) < TRANSCRIBING_SCREEN_AWAKE_LIMIT_MS
 )
+
+/** Pure: opens the reply input only for an explicit reply request; any answer extra is ignored. */
+internal fun parseQuestionReplyIntent(
+    threadId: String?,
+    itemId: String?,
+    reply: Boolean,
+    index: Int,
+    question: String,
+): PendingQuestionReply? {
+    if (!reply || threadId.isNullOrBlank() || itemId.isNullOrBlank()) return null
+    return PendingQuestionReply(threadId, itemId, index.coerceIn(0, 9), question.take(1_000))
+}

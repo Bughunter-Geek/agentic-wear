@@ -80,7 +80,7 @@ object ReasoningEffortPolicy {
     private const val MAX_OPTIONS = 8
 }
 
-enum class AlertKind { COMPLETE, PERMISSION, ERROR }
+enum class AlertKind { COMPLETE, PERMISSION, ERROR, QUESTION }
 
 data class AgentAlert(
     val eventId: String,
@@ -91,7 +91,13 @@ data class AgentAlert(
     val occurredAtMillis: Long,
     val approvalId: String? = null,
     val canControl: Boolean = false,
+    /** QUESTION alerts only: answer choices (at most [MAX_QUESTION_OPTIONS]), the agent message item id and question index. */
+    val options: List<String> = emptyList(),
+    val questionItemId: String? = null,
+    val questionIndex: Int = 0,
 )
+
+const val MAX_QUESTION_OPTIONS = 4
 
 enum class TranscriptionEngine { BRIDGE_WHISPER, BRIDGE_PHONON, DEVICE_SPEECH;
     val usesBridge: Boolean get() = this != DEVICE_SPEECH
@@ -137,6 +143,11 @@ data class ChatParagraph(
     val phase: ChatPhase,
 )
 
+data class ChatQuestion(
+    val title: String,
+    val options: List<String> = emptyList(),
+)
+
 data class ChatMessage(
     val id: String,
     val turnId: String,
@@ -148,7 +159,16 @@ data class ChatMessage(
     val canControl: Boolean = false,
     val resolved: Boolean = false,
     val watchRequestId: String? = null,
-)
+    /** Assistant messages only: questions the agent asked (bridge build 85+). */
+    val questions: List<ChatQuestion> = emptyList(),
+    val questionItemId: String? = null,
+    val answered: Boolean = false,
+) {
+    /** Unanswered assistant message that still waits for the user's answer. */
+    val needsAnswer: Boolean
+        get() = role == ChatRole.ASSISTANT && kind == ChatMessageKind.MESSAGE &&
+            questions.isNotEmpty() && !questionItemId.isNullOrBlank() && !answered
+}
 
 object ChatDisplayPolicy {
     fun startsCollapsed(message: ChatMessage, collapseUpdates: Boolean): Boolean =
@@ -198,6 +218,15 @@ sealed interface BridgePayload {
         val model: String? = null,
         val effort: String = ReasoningEffortPolicy.DEFAULT,
         val followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
+    ) : BridgePayload
+    /** Answers an agent question; the bridge wraps it into the normal user-message path. */
+    data class AnswerQuestion(
+        override val requestId: String,
+        val threadId: String,
+        val questionItemId: String,
+        val questionIndex: Int,
+        val answer: String,
+        val question: String? = null,
     ) : BridgePayload
     data class ApprovalResponse(
         override val requestId: String,

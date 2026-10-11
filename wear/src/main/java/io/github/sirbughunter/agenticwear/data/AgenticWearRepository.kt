@@ -5,6 +5,10 @@ import android.content.Intent
 import android.util.Base64
 import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.BridgePayload
+import io.github.sirbughunter.agenticwear.model.QuestionAnswer
+import io.github.sirbughunter.agenticwear.model.QuestionAnswerGuard
+import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
+import io.github.sirbughunter.agenticwear.model.optimisticQuestionReplyText
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
 import io.github.sirbughunter.agenticwear.model.withEditBase
@@ -213,13 +217,21 @@ class AgenticWearRepository(private val context: Context) {
         effort: String,
         followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
         onPrepared: () -> Unit = {},
+        questionAnswer: QuestionAnswer? = null,
     ): String {
         require(text.isNotBlank()) { "Transcript is empty" }
         clearRetryRecording()
         // An unacknowledged POST may already be executing. Checking again must
         // retain its identity and must not dispatch a duplicate prompt.
         val pairing = pairingStore.read() ?: error("Pair Agentic Wear first")
-        fun payload(id: String) = BridgePayload.SubmitTurn(id, threadId, text.trim(), model, effort, followUpAction)
+        fun payload(id: String): BridgePayload = if (questionAnswer != null) {
+            BridgePayload.AnswerQuestion(
+                id, questionAnswer.threadId, questionAnswer.questionItemId, questionAnswer.questionIndex,
+                questionAnswer.answer, questionAnswer.question,
+            )
+        } else {
+            BridgePayload.SubmitTurn(id, threadId, text.trim(), model, effort, followUpAction)
+        }
         val fingerprint = java.security.MessageDigest.getInstance("SHA-256")
             .digest(PayloadCodec.encode(payload("")).toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
@@ -241,6 +253,27 @@ class AgenticWearRepository(private val context: Context) {
         }
         onPrepared()
         return awaitTurnConfirmation(requestId) { relay.sendToBridge(pairing, envelope) }
+    }
+
+    /**
+     * Answers an agent question through exactly the turn.submit delivery path (same receipts, retries
+     * and optimistic echo). The echo uses the bridge's display format so the next snapshot replaces it.
+     */
+    suspend fun submitQuestionAnswer(answer: QuestionAnswer, onPrepared: () -> Unit = {}): String {
+        if (!QuestionAnswerGuard.claim(answer.questionItemId)) return answer.threadId
+        try {
+            return submitTurn(
+                threadId = answer.threadId,
+                text = optimisticQuestionReplyText(answer.question, answer.answer),
+                model = null,
+                effort = ReasoningEffortPolicy.DEFAULT,
+                onPrepared = onPrepared,
+                questionAnswer = answer,
+            )
+        } catch (error: Throwable) {
+            QuestionAnswerGuard.release(answer.questionItemId)
+            throw error
+        }
     }
 
     /** Reuse the original encrypted request; a status retry never creates another prompt. */
@@ -721,7 +754,9 @@ class AgenticWearRepository(private val context: Context) {
                 }
             }
             "terminal.completed", "terminal.failed", "terminal.interrupted", "terminal.blocked",
-            "approval.request" -> PayloadCodec.decodeAlert(payload)?.let { alert ->
+            "approval.request", "question.request" -> PayloadCodec.decodeAlert(payload)?.let { alert ->
+                // The question alert already told the user; a separate "finished" alert would duplicate it.
+                val alertNotify = notify && !PayloadCodec.hasQuestion(payload)
                 preferences.latestAlert = alert
                 if (preferences.pendingTurnRequestId == null) preferences.pending = false
                 if (payload.optString("kind") in setOf("terminal.completed", "terminal.failed", "terminal.interrupted")) {
@@ -731,11 +766,11 @@ class AgenticWearRepository(private val context: Context) {
                     }
                 }
                 val firstDelivery = preferences.markEventHandled(alert.eventId)
-                presentAlert(context, alert, firstDelivery, shouldPostAlertNotification(notify, alert.occurredAtMillis, notifyAfterMillis))
+                presentAlert(context, alert, firstDelivery, shouldPostAlertNotification(alertNotify, alert.occurredAtMillis, notifyAfterMillis))
                 if (trace != null && payload.optString("kind").startsWith("terminal.")) {
                     trace.alertDecided(
                         alert.eventId,
-                        alertDecision(firstDelivery, notify, alert.occurredAtMillis, notifyAfterMillis),
+                        alertDecision(firstDelivery, alertNotify, alert.occurredAtMillis, notifyAfterMillis),
                         System.currentTimeMillis(),
                     )
                 }
