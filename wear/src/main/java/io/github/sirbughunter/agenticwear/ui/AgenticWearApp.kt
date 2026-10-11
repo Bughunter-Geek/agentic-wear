@@ -61,6 +61,10 @@ import io.github.sirbughunter.agenticwear.live.LiveVoiceActivity
 import io.github.sirbughunter.agenticwear.live.LiveVoiceColour
 import io.github.sirbughunter.agenticwear.live.LiveVoiceService
 import io.github.sirbughunter.agenticwear.live.LiveVoiceState
+import io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import io.github.sirbughunter.agenticwear.voice.voiceLoopLabel
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import io.github.sirbughunter.agenticwear.update.UpdateStage
@@ -106,6 +110,14 @@ fun AgenticWearApp(
     val live by LiveVoiceService.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context) }
+    // Dot and cloud chats have no live call: the voice entry runs the turn-based voice loop instead.
+    val startVoice: () -> Unit = {
+        val src = state.selectedSession?.source
+        if (src == "dot" || src == "cloud") {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED) viewModel.startVoiceLoop() else onPushToTalk()
+        } else context.openLiveCall(autoConnect = !live.callActive())
+    }
     val orbPalette = remember(state.screen) { LiveVoiceColour.fromLabel(preferences.liveVoiceColour).orbPalette() }
 
     // A small UI back stack so Back returns to the list a chat or alert came from.
@@ -143,7 +155,7 @@ fun AgenticWearApp(
                     state = state,
                     live = live,
                     palette = orbPalette,
-                    onTalk = { context.openLiveCall(autoConnect = !live.callActive()) },
+                    onTalk = startVoice,
                     onDictate = onPushToTalk,
                     onOpenTarget = { if (state.selectedSession == null) viewModel.navigate(WearScreen.SESSIONS) else viewModel.openSelectedChat() },
                     onChats = { viewModel.navigate(WearScreen.SESSIONS) },
@@ -189,7 +201,7 @@ fun AgenticWearApp(
                     title = state.chat?.title ?: state.selectedSession?.title.orEmpty(),
                     onTalk = {
                         viewModel.cancelReplyFromChat()
-                        context.openLiveCall(autoConnect = !live.callActive())
+                        startVoice()
                     },
                     onDictate = {
                         viewModel.replyWithVoiceFromChat()
@@ -202,6 +214,7 @@ fun AgenticWearApp(
                     onReply = viewModel::replyFromChat,
                     onRetry = viewModel::retryChat,
                     onDismissSubmission = viewModel::dismissSubmission,
+                    onReadAloud = viewModel::readAloud,
                     onRateMessage = viewModel::rateChatMessage,
                     onPermissionResponse = viewModel::respondToChatPermission,
                     palette = orbPalette,
@@ -274,7 +287,7 @@ fun AgenticWearApp(
         }
 
         AnimatedVisibility(
-            visible = voiceActive,
+            visible = voiceActive && state.voiceLoop == VoiceLoopPhase.IDLE,
             enter = fadeIn(tween(220)) + scaleIn(tween(320, easing = AwEase), initialScale = 1.04f),
             exit = fadeOut(tween(180)) + scaleOut(tween(180), targetScale = 1.02f),
         ) {
@@ -297,6 +310,21 @@ fun AgenticWearApp(
         }
 
         AnimatedVisibility(
+            visible = state.voiceLoop != VoiceLoopPhase.IDLE,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(180)),
+        ) {
+            VoiceLoopScreen(
+                phase = state.voiceLoop,
+                title = state.selectedSession?.title.orEmpty(),
+                level = state.voiceLevel,
+                palette = orbPalette,
+                onFinishListening = viewModel::endPushToTalk,
+                onStop = viewModel::stopVoiceLoop,
+            )
+        }
+
+        AnimatedVisibility(
             visible = state.showInstallPermissionPrompt,
             enter = fadeIn(tween(200)) + scaleIn(tween(260, easing = AwEase), initialScale = 1.04f),
             exit = fadeOut(tween(160)),
@@ -308,6 +336,61 @@ fun AgenticWearApp(
         }
 
         if (state.screen != WearScreen.PAIR) LiveCallPill(live = live, onClick = { context.openLiveCall(autoConnect = false) })
+    }
+}
+
+/** Turn-based voice conversation (Dot and cloud chats): orb, state label and a clear Stop. */
+@Composable
+private fun VoiceLoopScreen(
+    phase: VoiceLoopPhase,
+    title: String,
+    level: Float,
+    palette: OrbPalette,
+    onFinishListening: () -> Unit,
+    onStop: () -> Unit,
+) {
+    BackHandler(onBack = onStop)
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(view) {
+        val previous = view.keepScreenOn
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = previous }
+    }
+    Box(Modifier.fillMaxSize().background(Aw.Bg)) {
+        Column(
+            Modifier.fillMaxSize().padding(top = 26.dp, bottom = 60.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(title, style = AwType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 24.dp))
+            Spacer(Modifier.height(8.dp))
+            Box(
+                Modifier.size(104.dp).clip(CircleShape)
+                    .clickable(enabled = phase == VoiceLoopPhase.LISTENING, role = Role.Button, onClick = onFinishListening)
+                    .semantics { contentDescription = if (phase == VoiceLoopPhase.LISTENING) "Finish speaking" else voiceLoopLabel(phase) },
+            ) {
+                CloudOrb(
+                    palette = palette,
+                    mode = when (phase) {
+                        VoiceLoopPhase.LISTENING -> OrbMode.Listening
+                        VoiceLoopPhase.SPEAKING -> OrbMode.Speaking
+                        VoiceLoopPhase.IDLE -> OrbMode.Idle
+                        else -> OrbMode.Thinking
+                    },
+                    userLevel = if (phase == VoiceLoopPhase.LISTENING) level else 0f,
+                    agentLevel = 0f,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                voiceLoopLabel(phase),
+                style = AwType.Label,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            if (phase == VoiceLoopPhase.LISTENING) Text("Tap the orb when done", style = AwType.Micro)
+        }
+        AwEdgeButton("Stop", onClick = onStop, primary = false)
     }
 }
 

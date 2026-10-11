@@ -30,6 +30,13 @@ import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.CloudModelInfo
+import io.github.sirbughunter.agenticwear.voice.ReplySpeaker
+import io.github.sirbughunter.agenticwear.voice.VoiceLoopEffect
+import io.github.sirbughunter.agenticwear.voice.VoiceLoopEvent
+import io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase
+import io.github.sirbughunter.agenticwear.voice.finalReplyFor
+import io.github.sirbughunter.agenticwear.voice.reduceVoiceLoop
+import io.github.sirbughunter.agenticwear.voice.speechPlainText
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.editedDraft
@@ -95,6 +102,8 @@ data class WearUiState(
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val collapseUpdates: Boolean = true,
     val popSoundEnabled: Boolean = true,
+    val voiceLoop: io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase = io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase.IDLE,
+    val speakingMessageId: String? = null,
     val selectedModel: String? = null,
     val reasoningEffort: String = ReasoningEffortPolicy.DEFAULT,
     /** In-memory cloud chat choices (null = unchanged); only valid for [cloudChoiceThreadId]. */
@@ -161,6 +170,30 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         )
         viewModelScope.launch {
             VoiceSessionService.sessionState.collect(::applyVoiceSessionState)
+        }
+        viewModelScope.launch {
+            _state.map { it.transcript }.distinctUntilChanged().collect { t ->
+                if (t != null && _state.value.voiceLoop == VoiceLoopPhase.LISTENING) {
+                    if (t.editChoices.isNotEmpty()) dispatchVoiceLoop(VoiceLoopEvent.Fail("Couldn't understand clearly. Tap the orb to try again."))
+                    else { loopTranscriptRequestId = t.requestId; dispatchVoiceLoop(VoiceLoopEvent.Heard(t.text)) }
+                }
+            }
+        }
+        viewModelScope.launch {
+            _state.collect { s ->
+                if (s.voiceLoop == VoiceLoopPhase.WAITING) {
+                    val submission = s.submittedTurns.firstOrNull { it.requestId == loopTranscriptRequestId }
+                    when {
+                        submission != null && (submission.phase == SubmissionPhase.FAILED || submission.phase == SubmissionPhase.UNCERTAIN) ->
+                            dispatchVoiceLoop(VoiceLoopEvent.Fail("The message wasn't delivered. Voice conversation stopped."))
+                        else -> finalReplyFor(submission, s.chat)?.let { reply ->
+                            dispatchVoiceLoop(VoiceLoopEvent.Reply(reply, quiet = !speechAllowedNow()))
+                        }
+                    }
+                } else if (s.voiceLoop != VoiceLoopPhase.IDLE && s.error != null) {
+                    dispatchVoiceLoop(VoiceLoopEvent.Fail(null))
+                }
+            }
         }
         // New in-app errors play the error tone once; an error restored from storage at start stays silent.
         val restoredError = _state.value.error
@@ -289,6 +322,77 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         _state.update { current ->
             current.copy(selectedModel = selected, reasoningEffort = defaultEffort)
         }
+    }
+
+    private var speaker: ReplySpeaker? = null
+    private var loopTranscriptRequestId: String? = null
+
+    private fun speaker(): ReplySpeaker = speaker ?: ReplySpeaker(getApplication()).also { speaker = it }
+
+    private fun speechAllowedNow(): Boolean {
+        val nm = getApplication<Application>().getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+        return io.github.sirbughunter.agenticwear.notification.shouldPlayPop(
+            true, nm?.currentInterruptionFilter ?: android.app.NotificationManager.INTERRUPTION_FILTER_UNKNOWN)
+    }
+
+    /** Dot and cloud chats have no live call; the voice button runs a listen, send, wait, speak loop instead. */
+    fun startVoiceLoop() {
+        val session = _state.value.selectedSession ?: return
+        if (session.source != "dot" && session.source != "cloud") return
+        dispatchVoiceLoop(VoiceLoopEvent.Start)
+    }
+
+    fun stopVoiceLoop() = dispatchVoiceLoop(VoiceLoopEvent.Stop)
+
+    @Synchronized
+    private fun dispatchVoiceLoop(event: VoiceLoopEvent) {
+        val step = reduceVoiceLoop(_state.value.voiceLoop, event)
+        if (step.phase == _state.value.voiceLoop && step.effect == VoiceLoopEffect.None) return
+        _state.update { it.copy(voiceLoop = step.phase) }
+        when (val effect = step.effect) {
+            VoiceLoopEffect.None -> Unit
+            VoiceLoopEffect.Listen -> {
+                _state.update { it.copy(speakingMessageId = null, error = null) }
+                beginPushToTalk()
+            }
+            is VoiceLoopEffect.Submit -> {
+                submitTranscript()
+                dispatchVoiceLoop(VoiceLoopEvent.Submitted)
+            }
+            is VoiceLoopEffect.Speak -> speaker().speak(
+                speechPlainText(effect.text),
+                done = { dispatchVoiceLoop(VoiceLoopEvent.SpeechDone) },
+                failed = { dispatchVoiceLoop(VoiceLoopEvent.Fail("Couldn't read the reply aloud. Voice conversation stopped.")) },
+            )
+            VoiceLoopEffect.StopAll -> stopVoiceLoopWork()
+            is VoiceLoopEffect.Fail -> {
+                stopVoiceLoopWork()
+                effect.message?.let(::showError)
+            }
+        }
+    }
+
+    private fun stopVoiceLoopWork() {
+        speaker?.stop()
+        if (_state.value.recording || _state.value.transcribing) cancelVoiceRequest(returnHome = false)
+        loopTranscriptRequestId = null
+    }
+
+    /** One-shot read aloud of an assistant message; tapping the same message again stops it. */
+    fun readAloud(messageId: String, text: String) {
+        if (_state.value.voiceLoop != VoiceLoopPhase.IDLE) return
+        if (_state.value.speakingMessageId == messageId) {
+            speaker?.stop()
+            _state.update { it.copy(speakingMessageId = null) }
+            return
+        }
+        if (!speechAllowedNow()) return
+        _state.update { it.copy(speakingMessageId = messageId) }
+        speaker().speak(
+            speechPlainText(text),
+            done = { _state.update { s -> if (s.speakingMessageId == messageId) s.copy(speakingMessageId = null) else s } },
+            failed = { _state.update { s -> s.copy(speakingMessageId = null) }; showError("Couldn't read this aloud") },
+        )
     }
 
     fun setCloudModel(threadId: String?, model: String) =
@@ -444,6 +548,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     fun onActivityStopped() {
         updateForeground = false
+        stopVoiceLoop()
+        speaker?.stop()
+        _state.update { it.copy(speakingMessageId = null) }
         if (shouldCancelRecordingWhenActivityStops(_state.value.transcriptionEngine)) cancelRecording()
     }
 
@@ -1534,6 +1641,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         updateCheckJob?.cancel()
         updateManager.cancelActiveChecks()
         deviceSpeech?.destroy()
+        speaker?.shutdown()
         stopChatStream()
         getApplication<Application>().unregisterReceiver(stateReceiver)
         super.onCleared()

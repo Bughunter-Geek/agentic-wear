@@ -29,6 +29,8 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.ThumbDown
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.runtime.*
@@ -77,6 +79,7 @@ internal fun ChatScreen(
     onReply: () -> Unit,
     onRetry: () -> Unit,
     onDismissSubmission: (String) -> Unit = {},
+    onReadAloud: (String, String) -> Unit = { _, _ -> },
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
     onPermissionResponse: (ChatMessage, Boolean) -> Unit,
     palette: OrbPalette,
@@ -213,6 +216,8 @@ internal fun ChatScreen(
                         permissionPending = state.pending,
                         onRateMessage = onRateMessage,
                         onPermissionResponse = onPermissionResponse,
+                        speakingMessageId = state.speakingMessageId,
+                        onReadAloud = { onReadAloud(it.id, it.text) },
                         questionsOpen = message.needsAnswer && !message.isAnsweredLocally(state.answeredQuestionItems) && !state.pending,
                         onAnswerQuestion = onAnswerQuestion,
                         onReplyToQuestion = onReplyToQuestion,
@@ -345,6 +350,8 @@ private fun ChatMessageItem(
     permissionPending: Boolean,
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
     onPermissionResponse: (ChatMessage, Boolean) -> Unit,
+    speakingMessageId: String?,
+    onReadAloud: (ChatMessage) -> Unit,
     questionsOpen: Boolean,
     onAnswerQuestion: (ChatMessage, String) -> Unit,
     onReplyToQuestion: (ChatMessage) -> Unit,
@@ -354,7 +361,7 @@ private fun ChatMessageItem(
         message.kind == ChatMessageKind.PERMISSION -> PermissionCard(message, approvalMode, permissionPending, onPermissionResponse, modifier)
         message.role == ChatRole.USER -> UserBubble(message, modifier)
         message.phase == ChatPhase.COMMENTARY -> UpdateRow(message, collapseUpdates, modifier)
-        else -> AnswerBlock(message, feedback, feedbackPending, feedbackEnabled, onRateMessage, questionsOpen, onAnswerQuestion, onReplyToQuestion, modifier)
+        else -> AnswerBlock(message, feedback, feedbackPending, feedbackEnabled, onRateMessage, speakingMessageId, onReadAloud, questionsOpen, onAnswerQuestion, onReplyToQuestion, modifier)
     }
 }
 
@@ -428,6 +435,8 @@ private fun AnswerBlock(
     feedbackPending: Boolean,
     feedbackEnabled: Boolean,
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
+    speakingMessageId: String?,
+    onReadAloud: (ChatMessage) -> Unit,
     questionsOpen: Boolean,
     onAnswerQuestion: (ChatMessage, String) -> Unit,
     onReplyToQuestion: (ChatMessage) -> Unit,
@@ -444,6 +453,7 @@ private fun AnswerBlock(
             FeedbackButton(FeedbackRating.LIKED, feedback == FeedbackRating.LIKED, feedbackPending, feedbackEnabled) { onRateMessage(message, FeedbackRating.LIKED) }
             FeedbackButton(FeedbackRating.DISLIKED, feedback == FeedbackRating.DISLIKED, feedbackPending, feedbackEnabled) { onRateMessage(message, FeedbackRating.DISLIKED) }
             if (feedbackPending) ShimmerText("Sending", fontSize = 10.sp)
+            ReadAloudButton(speaking = speakingMessageId == message.id, enabled = message.text.isNotBlank()) { onReadAloud(message) }
         }
     }
 }
@@ -496,6 +506,25 @@ private fun QuestionChip(label: String, primary: Boolean, onClick: () -> Unit) {
 
 private object Color3 {
     val AnswerText = androidx.compose.ui.graphics.Color(0xFFECECEC)
+}
+
+@Composable
+private fun ReadAloudButton(speaking: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val haptics = LocalHapticFeedback.current
+    Box(
+        Modifier
+            .size(48.dp)
+            .clickable(enabled = enabled, role = Role.Button, interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn); onClick()
+            }
+            .semantics { contentDescription = if (speaking) "Stop reading aloud" else "Read aloud"; stateDescription = if (speaking) "Speaking" else "Not speaking" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(30.dp).clip(CircleShape).background(if (speaking) Aw.SurfaceRaised else androidx.compose.ui.graphics.Color.Transparent), contentAlignment = Alignment.Center) {
+            Icon(if (speaking) Icons.Rounded.Stop else Icons.Rounded.VolumeUp, contentDescription = null,
+                tint = if (speaking) Aw.Text else Aw.TextTertiary, modifier = Modifier.size(16.dp))
+        }
+    }
 }
 
 @Composable
