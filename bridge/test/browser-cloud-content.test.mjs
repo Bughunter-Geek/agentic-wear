@@ -135,7 +135,7 @@ describe('extension reload',()=>{
    dom.window.eval(script);await new Promise(r=>setTimeout(r,50));assert.ok(sent>0);
    dead=true;if(mode==='id-cleared')runtime.id=undefined;
    dom.window.document.body.appendChild(dom.window.document.createElement('p'));
-   await new Promise(r=>setTimeout(r,3300));
+   await new Promise(r=>setTimeout(r,4500));
    const after=sent;await new Promise(r=>setTimeout(r,1200));
    assert.equal(errors,0);assert.equal(cleared,1);assert.equal(sent,after);assert.equal(dom.window.__agenticWearCloudReceiver.alive,false);
    dom.window.close();

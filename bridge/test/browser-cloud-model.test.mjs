@@ -23,7 +23,7 @@ function harness({realButton=false,longButton=false,hidden=false,focused=true,in
  d.execCommand=(_n,_u,t)=>{d.querySelector('.ProseMirror').textContent=t;return true;};
  const button=d.getElementById('mb');
  const paint=()=>{
-  if(realButton){button.innerHTML=`<span><span><span><span><span><span class="sr-only"><span>${LABELS.map(l=>`<span>${l}</span>`).join('')}</span></span><span><span>${state.model}</span><span>${LABELS[state.effort]}</span></span></span></span></span></span><svg></svg>`;return;}
+  if(realButton){const H='style="opacity:0"';button.innerHTML=`<span><span><span><span><span><span ${H}><span ${H}>Select effort</span></span><span><span><span><span><span>${state.model}</span></span></span></span></span><span><span class="sr-only">${LABELS[state.effort]}</span><span><span><span>${['None',...LABELS,'Persistent'].map(l=>`<span ${H}>${l}</span>`).join('')}</span></span></span></span></span></span></span></span><svg ${H}><use></use></svg>`;return;}
   if(longButton){button.textContent=`${state.model} ${'Very long label '.repeat(8)}`;return;}
   button.textContent=buttonStuck?`${MODELS[0]} ${LABELS[2]}`:`${state.model} ${LABELS[state.effort]}`;};paint();
  const menu=()=>d.querySelector('[role=menu]');

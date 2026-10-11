@@ -93,9 +93,25 @@
     const key=label.toLowerCase(),i=efforts.findIndex(l=>l&&l.toLowerCase()===key);
     return i>=0?i:(aliases.has(key)?aliases.get(key):null);
   };
-  // The real button holds a visually hidden list of every effort label plus a visible
-  // span with two leaves: model name, current effort label. Read the visible pair.
+  // Hidden = aria-hidden, display:none, visibility:hidden or opacity 0 on the element or any ancestor up to the button.
+  function hiddenWithin(el,root){
+    for(let n=el;n&&n!==root.parentElement;n=n.parentElement){
+      if(n.getAttribute&&n.getAttribute('aria-hidden')==='true')return true;
+      const style=window.getComputedStyle(n);
+      if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)return true;
+    }
+    return false;
+  }
+  // Real button: the model name is the first visible leaf; the current effort label is a
+  // leaf with an sr-only class; the global effort names are hidden leaves. Older shape:
+  // a visible element with exactly two leaf children (model, effort).
   function visiblePair(button){
+    const leaves=[...button.querySelectorAll('*')].filter(e=>!e.children.length&&norm(e.textContent));
+    const srLeaf=leaves.find(e=>e.matches('[class*=sr-only]')&&!hiddenWithin(e,button)&&!e.parentElement.closest('[class*=sr-only]'));
+    if(srLeaf){
+      const modelLeaf=leaves.find(e=>e!==srLeaf&&!e.closest('[class*=sr-only]')&&!hiddenWithin(e,button));
+      if(modelLeaf)return {model:norm(modelLeaf.textContent),label:norm(srLeaf.textContent)};
+    }
     for(const el of button.querySelectorAll('*')){
       if(el.children.length!==2||el.closest('[class*=sr-only]'))continue;
       const [a,b]=el.children;
