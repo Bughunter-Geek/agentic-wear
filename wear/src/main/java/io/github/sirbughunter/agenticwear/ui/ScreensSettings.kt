@@ -110,7 +110,7 @@ internal fun SettingsScreen(
 
             AwSectionLabel("Chat")
             AwToggleRow("Collapse updates", "Answers always stay open", state.collapseUpdates, onCollapseUpdates)
-            AwToggleRow("Pop sound in app", "Plays through media volume while the app is open", state.popSoundEnabled, onPopSound)
+            AwToggleRow("Sounds in app", "Reply pop and error tone through media volume while the app is open", state.popSoundEnabled, onPopSound)
 
             AwSectionLabel("Your dot")
             AwRowCard(onClick = {}, enabled = false) {

@@ -59,6 +59,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, REPLY, CHAT, ALERT, SETTINGS, ACTIVITY }
 
@@ -159,6 +161,17 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         )
         viewModelScope.launch {
             VoiceSessionService.sessionState.collect(::applyVoiceSessionState)
+        }
+        // New in-app errors play the error tone once; an error restored from storage at start stays silent.
+        val restoredError = _state.value.error
+        viewModelScope.launch {
+            _state.map { it.error }.distinctUntilChanged().collect { error ->
+                if (error != null && error != restoredError && !_state.value.demo &&
+                    io.github.sirbughunter.agenticwear.notification.AppForeground.isForeground) {
+                    io.github.sirbughunter.agenticwear.notification.MessagePop.playErrorOnce(
+                        application, preferences.popSoundEnabled, error)
+                }
+            }
         }
         viewModelScope.launch {
             io.github.sirbughunter.agenticwear.update.UpdateDownloadService.snapshot.collect { download ->

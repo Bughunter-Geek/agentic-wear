@@ -27,7 +27,9 @@ import io.github.sirbughunter.agenticwear.notification.DELIVERED_VIA_PUSH
 import io.github.sirbughunter.agenticwear.notification.PendingNotifyTraces
 import io.github.sirbughunter.agenticwear.notification.AlertPresentation
 import io.github.sirbughunter.agenticwear.notification.AppForeground
+import io.github.sirbughunter.agenticwear.notification.AppSound
 import io.github.sirbughunter.agenticwear.notification.MessagePop
+import io.github.sirbughunter.agenticwear.notification.alertSound
 import io.github.sirbughunter.agenticwear.notification.alertDecision
 import io.github.sirbughunter.agenticwear.notification.alertPresentation
 import io.github.sirbughunter.agenticwear.notification.shouldPostAlertNotification
@@ -1071,9 +1073,11 @@ internal fun isAcknowledgedChatRead(requestId: String, snapshotRequestId: String
     snapshotRequestId == requestId || acknowledgedRequestId == requestId
 
 private fun presentAlert(context: Context, alert: AgentAlert, firstDelivery: Boolean, shouldNotify: Boolean) {
-    when (alertPresentation(firstDelivery, shouldNotify, AppForeground.isForeground)) {
-        AlertPresentation.NOTIFY -> AgentNotifier.post(context, alert)
-        AlertPresentation.POP -> MessagePop.play(context, AppPreferences(context).popSoundEnabled)
-        AlertPresentation.NONE -> Unit
+    val presentation = alertPresentation(firstDelivery, shouldNotify, AppForeground.isForeground)
+    if (presentation == AlertPresentation.NOTIFY) AgentNotifier.post(context, alert)
+    when (alertSound(presentation, alert.kind)) {
+        AppSound.ERROR -> MessagePop.playErrorOnce(context, AppPreferences(context).popSoundEnabled, alert.eventId, alert.detail)
+        AppSound.POP -> MessagePop.play(context, AppPreferences(context).popSoundEnabled)
+        null -> Unit
     }
 }
