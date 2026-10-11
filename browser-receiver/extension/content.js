@@ -60,12 +60,165 @@
     }).slice(-20);
   }
   function blocked(){return location.href!==TARGET || (isDot&&!dotIdentity()) || [...document.querySelectorAll('button')].some(e=>/^(Log in|Sign in)$/.test(label(e))) || document.body.innerText.includes('Couldn’t load messages');}
+  // ---- Model / reasoning selection (Codex cloud pages only; Dot never uses any of this) ----
+  // Radix menu structure observed on the real page; see the build 89 contract.
+  const MODEL_NAME=/^[A-Za-z0-9_.:/ -]{1,128}$/;
+  let models=[],efforts=[],maxEffort=null,learnStarted=false,learning=null;
+  const aliases=new Map();
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const norm=s=>(s||'').replace(/\s+/g,' ').trim();
+  const text=e=>norm(e.innerText||e.textContent);
+  function modelButton(){
+    if(isDot)return null;
+    const all=[...document.querySelectorAll('main button[aria-haspopup=menu]')];
+    if(all.length<=1)return all[0]||null;
+    for(let el=editor();el&&el!==document.body;el=el.parentElement){
+      const near=[...el.querySelectorAll('button[aria-haspopup=menu]')];
+      if(near.length===1)return near[0];if(near.length>1)break;
+    }
+    return all.find(b=>/^(Loading model|GPT|Daybreak)/i.test(text(b)))||null;
+  }
+  function parseModelText(value){
+    const known=[...models].sort((a,b)=>b.length-a.length).find(m=>value===m||value.startsWith(m+' '));
+    if(known)return {model:known,label:value.slice(known.length).trim()};
+    const i=value.lastIndexOf(' ');
+    return i<0?{model:value,label:''}:{model:value.slice(0,i),label:value.slice(i+1)};
+  }
+  const effortIndexOf=label=>{
+    if(!label)return null;
+    const key=label.toLowerCase(),i=efforts.findIndex(l=>l&&l.toLowerCase()===key);
+    return i>=0?i:(aliases.has(key)?aliases.get(key):null);
+  };
+  function readCurrent(){
+    const button=modelButton();if(!button)return null;
+    const value=text(button);if(!value||/^Loading model/i.test(value))return null;
+    const parsed=parseModelText(value);
+    if(!MODEL_NAME.test(parsed.model))return null;
+    return {model:parsed.model,label:parsed.label,index:effortIndexOf(parsed.label)};
+  }
+  const openMenuEl=()=>document.querySelector('[role=menu][data-state=open]');
+  const radioName=r=>r.getAttribute('aria-label')||text(r);
+  function readMenu(menu){
+    const slider=menu.querySelector('[role=slider]');
+    const sliderState=slider?{min:Number(slider.getAttribute('aria-valuemin')),max:Number(slider.getAttribute('aria-valuemax')),now:Number(slider.getAttribute('aria-valuenow'))}:null;
+    const radios=[...menu.querySelectorAll('[role=menuitemradio]')];
+    const selected=radios.find(r=>r.getAttribute('aria-checked')==='true'||r.dataset.modelSelected==='true');
+    const statusEl=menu.querySelector('span[role=status]');
+    const m=statusEl&&/^(.*),\s*(\d+)\s+of\s+(\d+)\.?$/.exec(text(statusEl));
+    const status=m?{...parseModelText(m[1]),pos:Number(m[2]),total:Number(m[3])}:null;
+    return {slider:sliderState,radios,model:selected?radioName(selected):(status?status.model:null),status};
+  }
+  // Remember everything an open menu shows. Read-only: never changes a setting.
+  function learnFromMenu(menu){
+    const state=readMenu(menu);
+    for(const r of state.radios){const name=radioName(r);if(MODEL_NAME.test(name)&&!/^Default/i.test(name)&&!models.includes(name))models.push(name);}
+    if(state.model&&MODEL_NAME.test(state.model)&&!/^Default/i.test(state.model)&&!models.includes(state.model))models.push(state.model);
+    models=models.slice(-24);
+    if(state.slider&&Number.isFinite(state.slider.max)&&state.slider.max>=0&&state.slider.max<=9)maxEffort=state.slider.max;
+    if(state.status&&state.status.label&&state.status.pos>=1&&state.status.pos<=10)efforts[state.status.pos-1]=state.status.label;
+    const current=readCurrent();
+    if(current&&current.label&&state.slider&&Number.isFinite(state.slider.now))aliases.set(current.label.toLowerCase(),state.slider.now);
+    return state;
+  }
+  async function openMenu(){
+    if(openMenuEl())return true;
+    const button=modelButton();if(!button)return false;
+    const fire=(type,Ctor)=>button.dispatchEvent(new (window[Ctor]||MouseEvent)(type,{bubbles:true,cancelable:true,button:0,ctrlKey:false,pointerType:'mouse'}));
+    for(const attempt of [()=>fire('pointerdown','PointerEvent'),()=>button.click(),()=>{button.focus();button.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));}]){
+      attempt();
+      for(let i=0;i<8;i++){await wait(60);if(openMenuEl())return true;}
+    }
+    return false;
+  }
+  async function closeMenu(){
+    for(let attempt=0;attempt<3&&openMenuEl();attempt++){
+      (document.activeElement||document.body).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+      for(let i=0;i<5&&openMenuEl();i++)await wait(60);
+    }
+    return !openMenuEl();
+  }
+  // One read-only pass while the tab is hidden: learn the model list, effort range and label.
+  function learn(){
+    learnStarted=true;
+    learning=(async()=>{
+      try{
+        if(!await openMenu())return;
+        let menu=openMenuEl();
+        if(menu&&!menu.querySelector('[role=menuitemradio]')){
+          const toggle=menu.querySelector('[data-model-picker-view-toggle=true]');
+          if(toggle){toggle.click();await wait(150);menu=openMenuEl()||menu;}
+        }
+        if(menu)learnFromMenu(menu);
+      }catch{}finally{await closeMenu();learning=null;scheduled=false;lastSent=0;schedule();}
+    })();
+  }
+  async function applySettings(want){
+    const fail=async()=>{await closeMenu();return false;};
+    try{
+      if(!await openMenu())return fail();
+      let menu=openMenuEl();let state=learnFromMenu(menu);
+      if(want.model!==undefined&&state.model!==want.model){
+        let radio=state.radios.find(r=>radioName(r)===want.model);
+        if(!radio){
+          const toggle=menu.querySelector('[data-model-picker-view-toggle=true]');
+          if(toggle){toggle.click();await wait(150);menu=openMenuEl()||menu;radio=readMenu(menu).radios.find(r=>radioName(r)===want.model);}
+        }
+        if(!radio)return fail();
+        radio.click();await wait(200);
+        if(!openMenuEl()&&!await openMenu())return fail();
+        menu=openMenuEl();state=learnFromMenu(menu);
+        if(state.model!==want.model)return fail();
+      }
+      if(want.effortIndex!==undefined){
+        const slider=menu.querySelector('[role=slider]');
+        if(!slider||!state.slider||want.effortIndex<state.slider.min||want.effortIndex>state.slider.max)return fail();
+        const now=()=>Number(slider.getAttribute('aria-valuenow'));
+        const press=async(key,times)=>{slider.focus();for(let i=0;i<times;i++){slider.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));await wait(20);}await wait(60);};
+        if(now()!==want.effortIndex){
+          const delta=want.effortIndex-now();
+          await press(delta>0?'ArrowRight':'ArrowLeft',Math.abs(delta));
+          if(now()!==want.effortIndex){await press('Home',1);await press('ArrowRight',want.effortIndex);}
+        }
+        if(now()!==want.effortIndex)return fail();
+        state=learnFromMenu(menu);
+      }
+      const finalSlider=state.slider?state.slider.now:null;
+      const statusLabel=state.status?state.status.label:'';
+      if(!await closeMenu())return false;
+      await wait(250);
+      // Verify through the composer button, the thing the page will send with.
+      const current=readCurrent();
+      if(!current)return false;
+      if(want.model!==undefined&&current.model!==want.model)return false;
+      if(want.effortIndex!==undefined){
+        if(finalSlider!==want.effortIndex)return false;
+        const known=current.label?aliases.get(current.label.toLowerCase()):undefined;
+        if(known!==undefined&&known!==want.effortIndex)return false;
+        if(known===undefined&&current.label){
+          if(statusLabel&&current.label.toLowerCase()!==statusLabel.toLowerCase()&&effortIndexOf(current.label)!==null)return false;
+          aliases.set(current.label.toLowerCase(),want.effortIndex);
+        }
+      }
+      return true;
+    }catch{return fail();}
+  }
+  function modelFields(){
+    if(isDot)return {};
+    const current=readCurrent();
+    return {
+      ...(current?{model:current.model,effort:{label:current.label||'Unknown',...(current.index!==null?{index:current.index}:{}),...(maxEffort!==null?{max:maxEffort}:{})}}:{}),
+      ...(models.length?{models:[...models]}:{}),
+      ...(maxEffort!==null?{efforts:Array.from({length:maxEffort+1},(_,i)=>efforts[i]||'')}:{}),
+    };
+  }
   function inspect(){
     scheduled=false;if(!chrome.runtime?.id){handle.stop();return;}
     if(location.href!==TARGET)return;
+    if(!isDot&&!learnStarted&&!sending&&document.visibilityState==='hidden'&&!blocked()&&modelButton()&&readCurrent())learn();
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
-      ...(isDot?{identity:NAMESPACE}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!stopped()&&!!composer&&!clean(composer),turns:unavailable?[]:readTurns()};
+      ...(isDot?{identity:NAMESPACE}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
     const encoded=JSON.stringify(model),now=Date.now();
     if(encoded===last&&now-lastSent<3000)return;
     last=encoded;lastSent=now;
@@ -86,6 +239,7 @@
   async function send(command){
     const result=(outcome,message,messageId,nativeTurnId)=>({requestId:command.requestId,threadId:command.threadId,outcome,message,...(messageId?{messageId}:{}),...(nativeTurnId?{nativeTurnId}:{})});
     if(command.url!==TARGET||command.documentId!==documentId||Date.now()>=command.expiresAt||blocked())return result('rejected','The browser chat changed or is unavailable.');
+    if(learning)await learning;
     if(sending||stopped())return result('rejected','The chat is busy. Wait for the current response.');
     const composer=editor();
     if(!composer||clean(composer))return result('rejected','The desktop composer has a draft or is unavailable. Your Watch draft is kept.');
@@ -93,6 +247,16 @@
     const oldIds=new Set(userMessages().map(m=>m.id));
     sending=true;let clicked=false;
     try{
+      const want={};
+      if(!isDot){
+        if(typeof command.model==='string'&&command.model)want.model=command.model;
+        if(Number.isInteger(command.effortIndex)&&command.effortIndex>=0&&command.effortIndex<=9)want.effortIndex=command.effortIndex;
+      }
+      if(want.model!==undefined||want.effortIndex!==undefined){
+        const current=readCurrent();
+        const needs=!current||(want.model!==undefined&&current.model!==want.model)||(want.effortIndex!==undefined&&current.index!==want.effortIndex);
+        if(needs&&!await applySettings(want))return result('rejected',"Couldn't switch the cloud chat's model; nothing was sent. Your draft is kept.");
+      }
       composer.focus({preventScroll:true});
       const selection=window.getSelection(),range=document.createRange();range.selectNodeContents(composer);selection.removeAllRanges();selection.addRange(range);
       if(!document.execCommand('insertText',false,command.text))return result('rejected','The browser editor did not accept text.');

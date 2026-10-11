@@ -556,7 +556,12 @@ export class BridgeService {
   /** Shared by turn.submit and question.answer: one dispatch path, one receipt/idempotency key. */
   private async submitTurn(payload: Extract<WatchPayload, { kind: "turn.submit" }>): Promise<void> {
           if(payload.threadId && this.desktopCloud?.owns(payload.threadId)) {
-            const browserResult=await this.desktopCloud.submitText(payload.threadId,payload.requestId,payload.text);
+            const model=payload.model??undefined,effortIndex=payload.cloudEffortIndex;
+            const options=model!==undefined||effortIndex!==undefined?this.desktopCloud.cloudOptions(payload.threadId):null;
+            if(model!==undefined&&!(options?.models??[]).includes(model))throw new Error("That model is not offered by this cloud chat. Nothing was sent.");
+            if(effortIndex!==undefined&&effortIndex>=(options?.efforts.length??0))throw new Error("That reasoning level is not offered by this cloud chat. Nothing was sent.");
+            const browserResult=await this.desktopCloud.submitText(payload.threadId,payload.requestId,payload.text,false,
+              {...(model!==undefined?{model}:{}),...(effortIndex!==undefined?{effortIndex}:{})});
             this.watchedThreadId=payload.threadId;
             this.watchAcceptedAt=Date.now(); this.watchExpiresAt=this.watchAcceptedAt+CHAT_WATCH_TTL_MS;
             await this.send({version:1,kind:"turn.accepted",requestId:payload.requestId,threadId:payload.threadId,

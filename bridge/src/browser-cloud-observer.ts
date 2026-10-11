@@ -7,12 +7,28 @@ const turnId = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.:-]+$/u);
 export const browserObservationSchema = z.object({
   version:z.literal(1), kind:z.literal("observation"), url:z.string().max(300), documentId:z.string().uuid(),
   observedAt:z.number().int().nonnegative(), extractionMs:z.number().nonnegative().max(10000),
-  identity:z.string().max(128).optional(), title:z.string().max(200).optional(), inputReady:z.boolean().optional(),
+  identity:z.string().max(128).optional(), title:z.string().max(200).optional(),
+  model:z.string().min(1).max(128).optional(),
+  effort:z.object({label:z.string().min(1).max(64),index:z.number().int().min(0).max(9).optional(),max:z.number().int().min(0).max(9).optional()}).strict().optional(),
+  models:z.array(z.string().min(1).max(128)).max(24).optional(), efforts:z.array(z.string().max(64)).max(10).optional(),
+  inputReady:z.boolean().optional(),
   visibility:z.enum(["visible","hidden"]),blocked:z.boolean(),
   turns:z.array(z.object({id:turnId,reply:z.string().max(4000),role:z.enum(["user","assistant"]).optional(), prompts:z.array(z.object({id:turnId,text:z.string().max(4000)}).strict()).max(10).optional(),completed:z.boolean(),
     evidence:z.literal("response-actions-without-stop").nullable()}).strict()).max(20),
 }).strict();
 export type BrowserObservation=z.infer<typeof browserObservationSchema>;
+const modelName=/^[A-Za-z0-9_.:/ -]{1,128}$/u;
+/** Model/effort the page reports for a Codex cloud chat (never Dot). Unknown effort labels become "Level n". */
+export function cloudModelFields(value:Pick<BrowserObservation,"model"|"effort"|"models"|"efforts">):Pick<CloudSnapshot,"cloudModel"|"cloudModels"|"cloudEffort"|"cloudEfforts">{
+  const models=(value.models??[]).filter(m=>modelName.test(m)&&!/^Default/iu.test(m));
+  const cloudModel=value.model&&modelName.test(value.model)?value.model:undefined;
+  if(cloudModel&&!models.includes(cloudModel))models.push(cloudModel);
+  const efforts=value.efforts?.map((label,i)=>label.trim()||`Level ${i+1}`);
+  const index=value.effort?.index;
+  const effort=value.effort&&index!==undefined?{index,label:value.effort.label}:undefined;
+  return {...(cloudModel?{cloudModel}:{}),...(models.length?{cloudModels:models.slice(0,24)}:{}),
+    ...(effort?{cloudEffort:effort}:{}),...(efforts?.length?{cloudEfforts:efforts}:{})};
+}
 export class BrowserCloudObserver {
   private documentId="";
   private requests=new Map<string,string>();
@@ -65,6 +81,7 @@ export class BrowserCloudObserver {
     // timestamps are never represented as native/server completion timestamps.
     this.snapshot({threadId:this.target.threadId,title:this.target.title,status:this.pending.size?"active":"idle",
       inputReady:Boolean(this.target.sendEnabled && value.inputReady),
+      ...(this.target.dotNamespace?{}:cloudModelFields(value)),
       messages:value.turns.flatMap(t=>[
         ...(t.prompts??[]).map(p=>({id:`user:${p.id}`,turnId:t.id,...(this.requests.has(p.id)?{watchRequestId:this.requests.get(p.id)!}:{}),role:"user" as const,kind:"message" as const,text:p.text,
           phase:"unknown" as const,approvalId:null,canControl:false as const,resolved:true as const})),

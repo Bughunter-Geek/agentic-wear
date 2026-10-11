@@ -34,6 +34,11 @@ async function removeStaleSocket(path: string): Promise<void> {
   if (current?.ino === stat.ino && current.isSocket()) await unlink(path);
 }
 
+function cloudFields(snapshot: CloudSnapshot | undefined): Pick<SessionView, "cloudModel" | "cloudModels" | "cloudEffort" | "cloudEfforts"> {
+  if (!snapshot) return {};
+  return { ...(snapshot.cloudModel ? { cloudModel: snapshot.cloudModel } : {}), ...(snapshot.cloudModels?.length ? { cloudModels: snapshot.cloudModels } : {}),
+    ...(snapshot.cloudEffort ? { cloudEffort: snapshot.cloudEffort } : {}), ...(snapshot.cloudEfforts?.length ? { cloudEfforts: snapshot.cloudEfforts } : {}) };
+}
 export class DesktopCloudReceiver {
   private config: DesktopCloudConfig | null = null;
   private server: Server | null = null;
@@ -46,7 +51,12 @@ export class DesktopCloudReceiver {
   private socketInode: number | null = null;
   private closed = false;
   private sends = new Map<string, {threadId:string; resolve:(value:CloudSendResult)=>void; timer:NodeJS.Timeout}>();
-  async submitText(threadId:string, requestId:string, text:string, checkOnly=false):Promise<CloudSendResult> {
+  /** Options a browser cloud chat reports right now (empty for Dot or before the first snapshot). */
+  cloudOptions(threadId:string):{models:string[];efforts:string[]}|null {
+    const s=this.snapshots.get(threadId)?.snapshot;
+    return s ? {models:s.cloudModels??[], efforts:s.cloudEfforts??[]} : null;
+  }
+  async submitText(threadId:string, requestId:string, text:string, checkOnly=false, selection:{model?:string;effortIndex?:number}={}):Promise<CloudSendResult> {
     const target=this.config?.targets.find(t=>t.threadId===threadId);
     const cached=this.snapshots.get(threadId);
     const sendEnabled=target ? target.sendEnabled : this.isDynamic(threadId);
@@ -58,7 +68,8 @@ export class DesktopCloudReceiver {
     const result=await new Promise<CloudSendResult>(resolve=>{
       const timer=setTimeout(()=>{this.sends.delete(requestId);resolve({requestId,threadId,outcome:"uncertain",message:"Browser send timed out; check the chat before retrying."});},18_000);
       this.sends.set(requestId,{threadId,resolve,timer});
-      socket.write(`${JSON.stringify({version:1,kind:"send",requestId,threadId,text,checkOnly,expiresAt:Date.now()+15000})}\n`);
+      socket.write(`${JSON.stringify({version:1,kind:"send",requestId,threadId,text,checkOnly,expiresAt:Date.now()+15000,
+        ...(selection.model!==undefined?{model:selection.model}:{}),...(selection.effortIndex!==undefined?{effortIndex:selection.effortIndex}:{})})}\n`);
     });
     this.log("send_result",{threadId,requestId,outcome:result.outcome,receivedAt:Date.now()});
     if(result.outcome!=="accepted") throw new Error(result.outcome==="uncertain" ? `Browser send timed out or was uncertain. ${result.message}` : result.message);
@@ -116,6 +127,7 @@ export class DesktopCloudReceiver {
       return { id: target.threadId, title: target.title, updatedAt: cached?.observedAt ?? 0,
         status: this.active && cached ? cached.snapshot.status : "notLoaded",
         source: target.dotNamespace ? "dot" as const : "cloud" as const,
+        ...(target.dotNamespace ? {} : cloudFields(cached?.snapshot)),
         ownedByWear: false, canAcceptDirectInput: ready, watchReady: ready };
     });
     // A dynamic chat is listed only while its tab keeps reporting (fresh snapshot).
@@ -125,7 +137,7 @@ export class DesktopCloudReceiver {
         const cached = this.snapshots.get(id)!;
         const ready = Boolean(cached.snapshot.inputReady);
         return { id, title: cached.snapshot.title.trim() || seen.title, updatedAt: cached.observedAt, status: cached.snapshot.status,
-          source: "cloud" as const, ownedByWear: false, canAcceptDirectInput: ready, watchReady: ready };
+          source: "cloud" as const, ...cloudFields(cached.snapshot), ownedByWear: false, canAcceptDirectInput: ready, watchReady: ready };
       });
     return [...targets, ...dynamic];
   }
@@ -136,7 +148,8 @@ export class DesktopCloudReceiver {
     const title = target?.title ?? dynamic?.title ?? DEFAULT_CLOUD_CHAT_TITLE;
     const cached = this.snapshots.get(threadId)?.snapshot;
     const snapshot = cached ?? { threadId, title, status: "notLoaded" as const, messages: [] };
-    return { ...snapshot, status: this.active ? snapshot.status : "notLoaded",
+    const { cloudModel: _m, cloudModels: _ms, cloudEffort: _e, cloudEfforts: _es, ...rest } = snapshot;
+    return { ...rest, ...(target?.dotNamespace ? {} : cloudFields(snapshot)), status: this.active ? snapshot.status : "notLoaded",
       paragraphs: snapshot.messages.filter((message) => message.role === "assistant")
         .map(({ id, text, phase }) => ({ id, text, phase })) };
   }

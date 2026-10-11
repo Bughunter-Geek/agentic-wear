@@ -61,9 +61,13 @@ export async function writePrivateJson(path: string, value: unknown): Promise<vo
   try { await rename(temporary, path); }
   finally { await unlink(temporary).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; }); }
 }
+const cloudModelField = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:/ -]+$/u);
 export const cloudSnapshotSchema = z.object({
   threadId: id, title: z.string().max(200), status: z.enum(["active", "idle", "error", "notLoaded"]),
   inputReady: z.boolean().optional(),
+  cloudModel: cloudModelField.optional(), cloudModels: z.array(cloudModelField).max(24).optional(),
+  cloudEffort: z.object({ index: z.number().int().min(0).max(9), label: z.string().min(1).max(64) }).strict().optional(),
+  cloudEfforts: z.array(z.string().min(1).max(64)).max(10).optional(),
   messages: z.array(z.object({ id, turnId: id, watchRequestId:id.optional(), role: z.enum(["user", "assistant"]),
     kind: z.literal("message"), text: z.string().max(4_000),
     phase: z.enum(["commentary", "final_answer", "unknown"]), approvalId: z.null(),
@@ -82,7 +86,8 @@ export function cloudEventId(threadId: string, turnId: string, kind: string): st
   return `desktop-cloud:${createHash("sha256").update(JSON.stringify([threadId, turnId, kind])).digest("hex")}`;
 }
 export const cloudSendSchema = z.object({version:z.literal(1), kind:z.literal("send"),
-  requestId:id, threadId:id, text:z.string().trim().min(1).max(4000), expiresAt:time, checkOnly:z.boolean().optional()}).strict();
+  requestId:id, threadId:id, text:z.string().trim().min(1).max(4000), expiresAt:time, checkOnly:z.boolean().optional(),
+  model:cloudModelField.optional(), effortIndex:z.number().int().min(0).max(9).optional()}).strict();
 export type CloudSend = z.infer<typeof cloudSendSchema>;
 export const cloudSendResultSchema = z.object({requestId:id, threadId:id,
   outcome:z.enum(["accepted","rejected","uncertain"]), messageId:id.optional(), nativeTurnId:id.optional(),

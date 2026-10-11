@@ -36,6 +36,11 @@ export type SessionView = {
   attention?: "question" | "approval";
   /** Browser-route chats only; absent for Mac chats. */
   source?: "cloud" | "dot";
+  /** Browser-route Codex cloud chats: current model/effort and the options the page offers. */
+  cloudModel?: string;
+  cloudModels?: string[];
+  cloudEffort?: { index: number; label: string };
+  cloudEfforts?: string[];
   ownedByWear: boolean;
   canAcceptDirectInput: boolean;
   watchReady: boolean;
@@ -155,6 +160,10 @@ export type ChatSnapshot = {
   title: string;
   status: SessionView["status"];
   messages: ChatMessage[];
+  cloudModel?: string;
+  cloudModels?: string[];
+  cloudEffort?: { index: number; label: string };
+  cloudEfforts?: string[];
   /** Kept temporarily so pre-0.4.7 watches still receive assistant text. */
   paragraphs: ChatParagraph[];
 };

@@ -6,6 +6,8 @@ import {
 } from "./limits.js";
 
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
+// Browser-route cloud model names are display names ("GPT-6.1 Sol"), so spaces are allowed there.
+const cloudModelName = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_.:/ -]+$/u);
 const safeModel = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_.:/-]+$/u);
 export const reasoningEffort = z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9_.:-]+$/u);
 export const followUpActionSchema = z.enum(["default", "queue", "steer"]);
@@ -105,8 +107,10 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     requestId: safeId,
     threadId: safeId.nullable(),
     text: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS),
-    model: safeModel.nullable().optional(),
+    model: z.union([safeModel, cloudModelName]).nullable().optional(),
     effort: reasoningEffort.default("medium"),
+    /** Browser-route cloud chats only: position on the page's reasoning slider. */
+    cloudEffortIndex: z.number().int().min(0).max(9).optional(),
     followUpAction: followUpActionSchema.default("default"),
     fastMode: z.boolean().optional(),
   }).strict(),
