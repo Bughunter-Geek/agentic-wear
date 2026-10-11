@@ -671,7 +671,15 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     /** Removes only the local echo of a failed/uncertain send; never sends anything. */
     fun dismissSubmission(requestId: String) {
         preferences.dismissSubmittedTurn(requestId)
-        _state.update { it.copy(submittedTurns = preferences.submittedTurns) }
+        _state.update {
+            it.copy(
+                submittedTurns = preferences.submittedTurns,
+                canCheckTurnConfirmation = preferences.pendingTurnRequestId != null && preferences.pendingTurnEnvelope != null,
+                pendingTurnThreadId = if (preferences.pendingTurnRequestId == null) null else it.pendingTurnThreadId,
+                pending = preferences.pending,
+                error = preferences.lastError,
+            )
+        }
     }
 
     fun retryChat() {

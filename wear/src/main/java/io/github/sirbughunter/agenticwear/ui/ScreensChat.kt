@@ -235,7 +235,13 @@ internal fun ChatScreen(
                         })
                         Text(label, style = AwType.Caption, modifier = Modifier.weight(1f, fill = false))
                         if (submission != null && (submission.phase == SubmissionPhase.FAILED || submission.phase == SubmissionPhase.UNCERTAIN)) {
-                            AwPillButton("Dismiss", { onDismissSubmission(submission.requestId) }, height = 28.dp)
+                            // 48 dp touch target around the 28 dp visual pill.
+                            Box(
+                                Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { onDismissSubmission(submission.requestId) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                AwPillButton("Dismiss", { onDismissSubmission(submission.requestId) }, height = 28.dp)
+                            }
                         }
                     }
                 }

@@ -130,3 +130,9 @@ fun pruneSubmittedTurns(items: List<SubmittedTurn>, nowMillis: Long): List<Submi
 /** Local dismissal only; nothing is sent. */
 fun dismissSubmittedTurn(items: List<SubmittedTurn>, requestId: String): List<SubmittedTurn> =
     items.filterNot { it.requestId == requestId }
+
+data class DismissResult(val items: List<SubmittedTurn>, val clearPendingDelivery: Boolean)
+
+/** Dismissing also abandons the unconfirmed delivery tracked for the same request; other chats are untouched. */
+fun dismissStuckSend(items: List<SubmittedTurn>, pendingRequestId: String?, requestId: String): DismissResult =
+    DismissResult(dismissSubmittedTurn(items, requestId), pendingRequestId != null && pendingRequestId == requestId)

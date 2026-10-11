@@ -75,3 +75,19 @@ class SubmissionPruningTest {
         assertEquals(listOf("a", "watch-local-alone"), submittedChatMessages(snapshot(real("a")), list.filter { it.threadId == "o" }.map { it.copy(threadId = "t") }).map { it.id })
     }
 }
+
+class DismissStuckSendTest {
+    private fun turn(id: String, thread: String) = SubmittedTurn(id, thread, "t", 1L, SubmissionPhase.UNCERTAIN)
+
+    @Test
+    fun `dismiss removes the item and abandons its matching pending delivery only`() {
+        val items = listOf(turn("a", "t1"), turn("b", "t2"))
+        val hit = dismissStuckSend(items, "a", "a")
+        assertEquals(listOf("b"), hit.items.map { it.requestId })
+        assertTrue(hit.clearPendingDelivery)
+        val other = dismissStuckSend(items, "b", "a")
+        assertEquals(listOf("b"), other.items.map { it.requestId })
+        assertEquals(false, other.clearPendingDelivery)
+        assertEquals(false, dismissStuckSend(items, null, "a").clearPendingDelivery)
+    }
+}

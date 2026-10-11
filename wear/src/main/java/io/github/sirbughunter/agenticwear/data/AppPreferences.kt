@@ -142,8 +142,18 @@ class AppPreferences(context: Context) {
         check(prefs.edit().putString("submitted_turns", data.toString()).commit()) { "Could not preserve the submitted message safely." }
     }
 
-    fun dismissSubmittedTurn(requestId: String) =
-        changeSubmittedTurns { items -> io.github.sirbughunter.agenticwear.model.dismissSubmittedTurn(items, requestId) }
+    /** Local only: removes the echo and abandons its pending delivery so "Check status" cannot return. Sends nothing. */
+    fun dismissSubmittedTurn(requestId: String) {
+        val pendingId = pendingTurnRequestId
+        val result = io.github.sirbughunter.agenticwear.model.dismissStuckSend(submittedTurns, pendingId, requestId)
+        if (result.clearPendingDelivery) {
+            pendingTurnRequestId = null // also drops the stored envelope and fingerprint
+            pending = false
+            lastError = null
+            lastAcceptedTurnRequestId = null
+        }
+        changeSubmittedTurns { io.github.sirbughunter.agenticwear.model.dismissSubmittedTurn(it, requestId) }
+    }
 
     fun updateSubmittedTurn(requestId: String, change: (SubmittedTurn) -> SubmittedTurn) =
         changeSubmittedTurns { items -> items.map { if (it.requestId == requestId) change(it) else it } }
