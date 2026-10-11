@@ -1,4 +1,4 @@
-import {readFileSync,writeFileSync,renameSync} from 'node:fs';
+import {readFileSync,writeFileSync,renameSync,appendFileSync,statSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -10,6 +10,18 @@ const extensionId=[...createHash('sha256').update(Buffer.from(manifest.key,'base
 if(process.argv[2]!==`chrome-extension://${extensionId}/`)process.exit(2);
 const config=await readDesktopCloudConfig(desktopCloudConfigPath());if(!config?.enabled)process.exit(2);
 const logPath=join(homedir(),'.agentic-wear','browser-receiver-status.json'),receiptPath=join(homedir(),'.agentic-wear','browser-send-receipts.json');
+const hostLogPath=join(homedir(),'.agentic-wear','desktop-cloud-host.log'),loggedFailures=new Set();
+// One line per distinct failure; codes and schema paths only, never field values or message text.
+function hostLog(kind,detail){
+ const key=kind+':'+detail;if(loggedFailures.has(key)||loggedFailures.size>200)return;loggedFailures.add(key);
+ try{
+  let size=0;try{size=statSync(hostLogPath).size;}catch{}
+  if(size>200*1024)writeFileSync(hostLogPath,'',{mode:0o600});
+  appendFileSync(hostLogPath,JSON.stringify({at:Date.now(),pid:process.pid,kind,detail})+'\n',{mode:0o600});
+ }catch{}
+}
+const issueSummary=error=>(error?.issues??[]).slice(0,6).map(i=>`${(i.path??[]).filter(p=>typeof p==='number'||/^[A-Za-z]{1,32}$/.test(String(p))).join('.')}:${i.code}`).join(',')||'unknown';
+const OPTIONAL_MODEL_FIELDS=['model','effort','models','efforts'];
 const stored=await readPrivateJson(receiptPath);
 const receipts=new Map(stored?.pairBinding===config.pairBinding?stored.entries:[]),waiting=new Map(),pages=new Map();
 let persistChain=Promise.resolve();
@@ -53,18 +65,37 @@ const heartbeat=setInterval(()=>reply({kind:'observe'}),10000);heartbeat.unref()
 process.stdin.on('data',b=>{
  input=Buffer.concat([input,b]);
  while(input.length>=4){const n=input.readUInt32LE(0);if(n>240000)process.exit(3);if(input.length<n+4)return;
-  try{const raw=JSON.parse(input.subarray(4,4+n));input=input.subarray(4+n);
-   if(raw.kind==='send-result'){
-    const result=cloudSendResultSchema.parse(raw.result),pending=waiting.get(result.requestId);
+  let raw;
+  try{raw=JSON.parse(input.subarray(4,4+n));}catch{hostLog('frame','invalid_json');status({status:'invalid_frame'});transport.reset();process.exit(4);}
+  input=input.subarray(4+n);
+  try{
+   if(raw?.kind==='send-result'){
+    const parsed=cloudSendResultSchema.safeParse(raw.result);
+    if(!parsed.success){hostLog('send-result',issueSummary(parsed.error));continue;}
+    const result=parsed.data,pending=waiting.get(result.requestId);
     if(pending&&pending.threadId===result.threadId){clearTimeout(pending.timer);waiting.delete(result.requestId);pending.resolve(result);}continue;
    }
-   const d=browserObservationSchema.parse(raw),observer=observers.resolve(d);
+   // A bad observation is never fatal: drop optional model fields and retry, else ignore it.
+   let parsed=browserObservationSchema.safeParse(raw);
+   if(!parsed.success){
+    hostLog('observation',issueSummary(parsed.error));
+    if(raw&&typeof raw==='object'){
+     const stripped={...raw};for(const key of OPTIONAL_MODEL_FIELDS)delete stripped[key];
+     parsed=browserObservationSchema.safeParse(stripped);
+     if(!parsed.success)hostLog('observation-stripped',issueSummary(parsed.error));
+    }
+    if(!parsed.success){status({status:'ignored_observation'});reply({status:'ignored'});continue;}
+   }
+   const d=parsed.data,observer=observers.resolve(d);
    if(!observer){status({status:'ignored_observation'});reply({status:'ignored'});continue;}
    for(const [requestId,receipt] of receipts){if(receipt.result.outcome==='accepted'&&receipt.result.messageId)observer.linkRequest(receipt.result.messageId,requestId);}
-   const result=observer.accept(d);pages.set(d.url,d);
+   let result;
+   try{result=observer.accept(d);}
+   catch(error){hostLog('accept',String(error?.message??'error').slice(0,80));status({status:'ignored_observation'});reply({status:'ignored'});continue;}
+   pages.set(d.url,d);
    status({status:d.blocked?'blocked':'ready',...result,observedAt:d.observedAt,visibility:d.visibility,extractionMs:d.extractionMs,
     pages:[...pages].map(([url,p])=>({url,documentId:p.documentId,blocked:p.blocked,inputReady:p.inputReady,observedAt:p.observedAt,messages:p.turns.length,userMessages:p.turns.reduce((n,t)=>n+(t.role==='user'?1:(t.prompts?.length||0)),0),lastTurnId:p.turns.at(-1)?.id})),rssBytes:process.memoryUsage().rss});reply({status:d.blocked?'blocked':'ready'});
-  }catch{status({status:'invalid_observation'});transport.reset();process.exit(4);}
+  }catch(error){hostLog('handler',String(error?.message??'error').slice(0,80));status({status:'ignored_observation'});}
  }
 });
 process.stdin.on('end',()=>{transport.close();process.exit(0);});

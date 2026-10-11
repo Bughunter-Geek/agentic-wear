@@ -8,7 +8,7 @@ const dotUrl='https://chatgpt.com/dots/home',ns='fa24ed5a57dc8199b97f68f7d0098d1
 const MODELS=['GPT-6.1 Sol','GPT-6 Astra','GPT-6 Sol','Daybreak Blue'],LABELS=['Minimal','Low','Medium','High','Max'];
 const tick=ms=>new Promise(r=>setTimeout(r,ms));
 // A fake Radix-like model menu built from the structure observed on the real page.
-function harness({hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
+function harness({realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
  const state={model,effort,opens:0,clicks:0,sliderKeys:[]};
  const composerHtml=dot?'<div class="ProseMirror" contenteditable="true" aria-label="Message"></div>':'<div class="ProseMirror" contenteditable="true" data-codex-composer="true"></div>';
  const dotRow=(id,role,text)=>`<article class="message-row ${role==='user'?'self':''}" data-message-id="${ns}~${ns}~CalpicoMessage~Sentinel_${id}"><div class="message-body">${text}<div class="message-inline-actions"><button data-action="reply">Reply</button></div></div></article>`;
@@ -22,7 +22,10 @@ function harness({hidden=false,focused=true,interact=false,dot=false,stuck=false
  w.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();},onMessage:{addListener:x=>{listener=x;},removeListener(){}}}};
  d.execCommand=(_n,_u,t)=>{d.querySelector('.ProseMirror').textContent=t;return true;};
  const button=d.getElementById('mb');
- const paint=()=>{button.textContent=buttonStuck?`${MODELS[0]} ${LABELS[2]}`:`${state.model} ${LABELS[state.effort]}`;};paint();
+ const paint=()=>{
+  if(realButton){button.innerHTML=`<span><span><span><span><span><span class="sr-only"><span>${LABELS.map(l=>`<span>${l}</span>`).join('')}</span></span><span><span>${state.model}</span><span>${LABELS[state.effort]}</span></span></span></span></span></span><svg></svg>`;return;}
+  if(longButton){button.textContent=`${state.model} ${'Very long label '.repeat(8)}`;return;}
+  button.textContent=buttonStuck?`${MODELS[0]} ${LABELS[2]}`:`${state.model} ${LABELS[state.effort]}`;};paint();
  const menu=()=>d.querySelector('[role=menu]');
  const close=()=>{menu()?.remove();};
  const open=()=>{
@@ -134,6 +137,16 @@ describe('cloud model and reasoning selection',()=>{
    assert.equal((await h.send({model:'GPT-9 Nope'})).outcome,'rejected');
    assert.equal((await h.send({effortIndex:7,requestId:'x'})).outcome,'rejected');
    assert.equal(h.state.clicks,0);assert.equal(h.state.model,'GPT-6.1 Sol');assert.equal(h.state.effort,2);
+  }finally{h.stop();}
+ });
+ it('reads the real nested button structure (hidden label list + visible model/effort pair)',async()=>{
+  const h=harness({realButton:true});try{await tick(150);
+   assert.equal(h.last().model,'GPT-6.1 Sol');assert.equal(h.last().effort.label,'Medium');
+  }finally{h.stop();}
+ });
+ it('never emits a model that is long or multi-line when the structure is not recognised',async()=>{
+  const h=harness({longButton:true});try{await tick(150);
+   assert.equal('model' in h.last(),false);
   }finally{h.stop();}
  });
  it('Dot never reports, learns or applies a model selection',async()=>{

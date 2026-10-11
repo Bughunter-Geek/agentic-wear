@@ -62,7 +62,7 @@
   function blocked(){return location.href!==TARGET || (isDot&&!dotIdentity()) || [...document.querySelectorAll('button')].some(e=>/^(Log in|Sign in)$/.test(label(e))) || document.body.innerText.includes('Couldn’t load messages');}
   // ---- Model / reasoning selection (Codex cloud pages only; Dot never uses any of this) ----
   // Radix menu structure observed on the real page; see the build 89 contract.
-  const MODEL_NAME=/^[A-Za-z0-9_.:/ -]{1,128}$/;
+  const MODEL_NAME=/^[A-Za-z0-9_.:/ -]{1,64}$/;
   let models=[],efforts=[],maxEffort=null,lastLearnAt=0,lastInteraction=0,selfDriving=false,learning=null;
   const LEARN_REFRESH_MS=30*60*1000,LEARN_QUIET_MS=10000;
   // Real user activity in the page (our own synthetic events are ignored via selfDriving).
@@ -93,12 +93,27 @@
     const key=label.toLowerCase(),i=efforts.findIndex(l=>l&&l.toLowerCase()===key);
     return i>=0?i:(aliases.has(key)?aliases.get(key):null);
   };
+  // The real button holds a visually hidden list of every effort label plus a visible
+  // span with two leaves: model name, current effort label. Read the visible pair.
+  function visiblePair(button){
+    for(const el of button.querySelectorAll('*')){
+      if(el.children.length!==2||el.closest('[class*=sr-only]'))continue;
+      const [a,b]=el.children;
+      if(a.children.length||b.children.length)continue;
+      const model=norm(a.textContent),label=norm(b.textContent);
+      if(model&&label)return {model,label};
+    }
+    return null;
+  }
   function readCurrent(){
     const button=modelButton();if(!button)return null;
     const value=text(button);if(!value||/^Loading model/i.test(value))return null;
-    const parsed=parseModelText(value);
+    const pair=visiblePair(button);
+    if(pair&&/^Loading/i.test(pair.model))return null;
+    const parsed=pair||parseModelText(value);
     if(!MODEL_NAME.test(parsed.model))return null;
-    return {model:parsed.model,label:parsed.label,index:effortIndexOf(parsed.label)};
+    const label=parsed.label.slice(0,64);
+    return {model:parsed.model,label,index:effortIndexOf(label)};
   }
   const openMenuEl=()=>document.querySelector('[role=menu][data-state=open]');
   const radioName=r=>r.getAttribute('aria-label')||text(r);
