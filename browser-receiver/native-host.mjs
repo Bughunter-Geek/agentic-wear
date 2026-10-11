@@ -38,15 +38,20 @@ function reply(x){const b=Buffer.from(JSON.stringify(x)),h=Buffer.alloc(4);h.wri
 async function send(command){
  const target=config.targets.find(t=>t.threadId===command.threadId),url=target?.url??`https://chatgpt.com/local/${command.threadId}`,page=pages.get(url);
  const base={requestId:command.requestId,threadId:command.threadId};
- const hash=createHash('sha256').update(JSON.stringify([command.threadId,command.text])).digest('hex'),old=receipts.get(command.requestId);
+ const hash=createHash('sha256').update(JSON.stringify([command.threadId,command.text])).digest('hex');let old=receipts.get(command.requestId);
  if(old){
   if(old.hash!==hash)return {...base,outcome:'rejected',message:'Request identity was reused with different content.'};
-  if(old.result.outcome==='uncertain' && old.baseline && page && !page.blocked && Date.now()-page.observedAt<60000){
+  if(old.result.outcome==='uncertain' && old.baseline && page && !page.blocked){
    const messages=page.turns.flatMap(t=>t.role==='user'?[{id:t.id,turnId:t.id,text:t.reply}]:(t.prompts||[]).map(p=>({...p,turnId:t.id})));
-   const found=messages.find(m=>!old.baseline.includes(m.id)&&createHash('sha256').update(JSON.stringify([command.threadId,m.text])).digest('hex')===hash);
+   const found=Date.now()-page.observedAt<60000?messages.find(m=>!old.baseline.includes(m.id)&&createHash('sha256').update(JSON.stringify([command.threadId,m.text])).digest('hex')===hash):undefined;
    if(found){old.result={...old.result,...base,outcome:'accepted',messageId:found.id,nativeTurnId:found.turnId,message:'Previously submitted message found in browser history.'};await persist();}
+   // A send still uncertain after the 120 s grace, with a fresh page that does not contain it, was not delivered.
+   else if(Date.now()-(old.issuedAt??0)>=120000 && Date.now()-page.observedAt<10000){
+    if(command.checkOnly)return {...base,outcome:'rejected',message:'Not delivered — safe to send again. Nothing was sent by this check.'};
+    receipts.delete(command.requestId);old=undefined;
+   }
   }
-  return old.result;
+  if(old)return old.result;
  }
  if(command.checkOnly)return {...base,outcome:'uncertain',message:'No browser receipt is available. Nothing was sent by this status check.'};
  const sendEnabled=target?target.sendEnabled:observers.isDynamicThread(command.threadId);

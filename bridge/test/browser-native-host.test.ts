@@ -115,3 +115,55 @@ it('native host survives invalid observations: drops bad model fields, ignores g
  expect(log).not.toContain(SECRET);expect(log).not.toContain('xxxx');expect(log).not.toContain('Task');
  expect((await stat(join(dir,'desktop-cloud-host.log'))).mode&0o777).toBe(0o600);
 });
+
+async function staleReceiptHost(issuedAgoMs:number){
+ const home=await mkdtemp('/tmp/aw-native-stale-');cleanup.push(()=>rm(home,{recursive:true,force:true}));
+ const dir=join(home,'.agentic-wear');await mkdir(dir,{mode:0o700});await chmod(home,0o700);
+ const pairing={pairId:'test',bridgePublicKey:'test',watchPublicKey:'test'},threadId='01a1188b-a850-755b-91ec-717f6182900a';
+ const pairBinding=desktopCloudPairBinding(pairing);
+ const config={version:1,enabled:true,capability:'a'.repeat(64),pairBinding,targets:[{hostId:'durable',threadId,title:'Test',sendEnabled:true}],reconcileMs:2000};
+ const path=join(dir,'desktop-cloud.json');await writeFile(path,JSON.stringify(config),{mode:0o600});
+ const hash=createHash('sha256').update(JSON.stringify([threadId,'Hello'])).digest('hex');
+ const uncertain={requestId:'req-stale',threadId,outcome:'uncertain',message:'A prior send may have happened. Check the chat before retrying.'};
+ await writeFile(join(dir,'browser-send-receipts.json'),JSON.stringify({pairBinding,entries:[['req-stale',{hash,baseline:['old'],result:uncertain,issuedAt:Date.now()-issuedAgoMs}]]}),{mode:0o600});
+ const receiver=new DesktopCloudReceiver(pairing,vi.fn(),vi.fn(),path,vi.fn());await receiver.start();cleanup.push(()=>receiver.close());
+ const key=JSON.parse(await readFile('../browser-receiver/extension/manifest.json','utf8')).key as string;
+ const id=createHash('sha256').update(Buffer.from(key,'base64')).digest('hex').slice(0,32).split('').map(c=>String.fromCharCode(97+parseInt(c,16))).join('');
+ const child=spawn(process.execPath,[resolve('../browser-receiver/native-host.bundle.mjs'),`chrome-extension://${id}/`],{env:{...process.env,HOME:home}});
+ cleanup.push(async()=>{if(child.exitCode===null&&child.signalCode===null){child.kill();await new Promise<void>(r=>child.once('exit',()=>r()));}});
+ const commands:Record<string,unknown>[]=[];let bytes=Buffer.alloc(0);
+ const write=(value:unknown)=>{const b=Buffer.from(JSON.stringify(value)),h=Buffer.alloc(4);h.writeUInt32LE(b.length);child.stdin.write(Buffer.concat([h,b]));};
+ child.stdout.on('data',(b:Buffer)=>{bytes=Buffer.concat([bytes,b]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);if(bytes.length<n+4)return;const value=JSON.parse(bytes.subarray(4,n+4).toString()) as Record<string,unknown>;bytes=bytes.subarray(n+4);
+  if(value.kind==='send'){commands.push(value);write({kind:'send-result',result:{requestId:value.requestId,threadId:value.threadId,outcome:'accepted',messageId:'m1',nativeTurnId:'t1',message:'ok'}});}}});
+ const page=(extra:Record<string,unknown>={},prompts:{id:string;text:string}[]=[])=>({version:1,kind:'observation',url:`https://chatgpt.com/local/${threadId}`,documentId:randomUUID(),observedAt:Date.now(),extractionMs:1,visibility:'hidden',blocked:false,inputReady:true,turns:[{id:randomUUID(),prompts:[{id:'old',text:'older'},...prompts],reply:'r',completed:true,evidence:'response-actions-without-stop'}],...extra});
+ return {receiver,threadId,write,page,commands};
+}
+it('stale uncertain receipt: stays uncertain inside the 120 s grace',async()=>{
+ const h=await staleReceiptHost(30_000);h.write(h.page());
+ await vi.waitFor(()=>expect(h.receiver.sessions()[0]?.watchReady).toBe(true));
+ await expect(h.receiver.submitText(h.threadId,'req-stale','Hello',true)).rejects.toThrow('uncertain');
+ expect(h.commands).toHaveLength(0);
+});
+it('stale uncertain receipt: after 120 s and absent from a fresh page, the check says safe and a send dispatches once',async()=>{
+ const h=await staleReceiptHost(200_000);h.write(h.page());
+ await vi.waitFor(()=>expect(h.receiver.sessions()[0]?.watchReady).toBe(true));
+ await expect(h.receiver.submitText(h.threadId,'req-stale','Hello',true)).rejects.toThrow('safe to send again');
+ expect(h.commands).toHaveLength(0);
+ await expect(h.receiver.submitText(h.threadId,'req-stale','Hello')).resolves.toMatchObject({outcome:'accepted',messageId:'m1'});
+ expect(h.commands).toHaveLength(1);
+ // The replaced receipt now belongs to the new attempt: a repeat does not dispatch again.
+ await expect(h.receiver.submitText(h.threadId,'req-stale','Hello')).resolves.toMatchObject({outcome:'accepted'});
+ expect(h.commands).toHaveLength(1);
+});
+it('stale uncertain receipt: found in the page is accepted without sending',async()=>{
+ const h=await staleReceiptHost(200_000);h.write(h.page({},[{id:'new',text:'Hello'}]));
+ await vi.waitFor(()=>expect(h.receiver.sessions()[0]?.watchReady).toBe(true));
+ await expect(h.receiver.submitText(h.threadId,'req-stale','Hello',true)).resolves.toMatchObject({outcome:'accepted',messageId:'new'});
+ expect(h.commands).toHaveLength(0);
+});
+it('stale uncertain receipt: without a usable fresh observation it stays uncertain',async()=>{
+ const h=await staleReceiptHost(200_000);h.write(h.page({blocked:true,turns:[]}));
+ await vi.waitFor(()=>expect(h.receiver.sessions()[0]?.updatedAt).toBeGreaterThan(0));
+ await expect(h.receiver.submitText(h.threadId,'req-stale','Hello',true)).rejects.toThrow('uncertain');
+ expect(h.commands).toHaveLength(0);
+});
