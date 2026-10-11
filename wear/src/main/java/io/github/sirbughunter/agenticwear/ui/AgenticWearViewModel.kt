@@ -86,6 +86,8 @@ data class WearUiState(
     val submittedTurns: List<SubmittedTurn> = emptyList(),
     val sendingDraft: SubmittedTurn? = null,
     val canCheckTurnConfirmation: Boolean = false,
+    /** Thread of the unconfirmed request behind [canCheckTurnConfirmation]; null for a new, not-yet-assigned thread. */
+    val pendingTurnThreadId: String? = null,
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val collapseUpdates: Boolean = true,
@@ -633,6 +635,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    /** Removes only the local echo of a failed/uncertain send; never sends anything. */
+    fun dismissSubmission(requestId: String) {
+        preferences.dismissSubmittedTurn(requestId)
+        _state.update { it.copy(submittedTurns = preferences.submittedTurns) }
+    }
+
     fun retryChat() {
         if (preferences.pendingTurnRequestId != null && preferences.pendingTurnEnvelope != null) {
             _state.update { it.copy(pending = true, error = null) }
@@ -830,6 +838,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 selectedThreadId = "demo-build", submittedTurns = listOf(sent),
                 pending = normalized in setOf("send-sending", "send-confirming"),
                 canCheckTurnConfirmation = phase == SubmissionPhase.UNCERTAIN,
+                pendingTurnThreadId = "demo-build",
                 error = if (phase == SubmissionPhase.FAILED) "The request failed. Review your preserved message before sending again." else null,
                 chat = if (normalized == "send-sending") null else io.github.sirbughunter.agenticwear.model.ChatSnapshot(
                     "demo-build", "Watch text test", SessionStatus.ACTIVE, emptyList(), now, messages = messages))
@@ -1220,6 +1229,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun openChat(threadId: String) {
+        preferences.markChatOpened(threadId)
         stopChatStream(sendUnwatch = false)
         _state.update { current -> current.copy(screen = WearScreen.CHAT, pending = true, error = null) }
         viewModelScope.launch(Dispatchers.IO) {
@@ -1458,6 +1468,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             sendNotice = preferences.lastSendNotice,
             submittedTurns = preferences.submittedTurns,
             canCheckTurnConfirmation = preferences.pendingTurnRequestId != null && preferences.pendingTurnEnvelope != null,
+            pendingTurnThreadId = preferences.pendingTurnRequestId?.let { id ->
+                preferences.submittedTurns.lastOrNull { it.requestId == id }?.threadId
+            },
             transcriptionEngine = preferences.transcriptionEngine,
             approvalMode = preferences.approvalMode,
             collapseUpdates = preferences.collapseUpdates,

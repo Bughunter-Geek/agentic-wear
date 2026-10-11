@@ -15,6 +15,8 @@ data class AgentSession(
     val watchReady: Boolean = false,
     val pinned: Boolean = false,
     val source: String? = null,
+    /** "question" | "approval" when the chat is waiting for the user; null otherwise. */
+    val attention: String? = null,
 )
 
 /**

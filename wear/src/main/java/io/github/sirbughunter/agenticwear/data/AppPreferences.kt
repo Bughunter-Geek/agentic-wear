@@ -12,6 +12,7 @@ import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.Transcript
 import io.github.sirbughunter.agenticwear.model.SubmittedTurn
+import io.github.sirbughunter.agenticwear.model.pruneSubmittedTurns
 import io.github.sirbughunter.agenticwear.model.SubmissionPhase
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import org.json.JSONArray
@@ -91,6 +92,13 @@ class AppPreferences(context: Context) {
             }
         }
 
+    /** Per-chat "last opened on the watch" times, bounded; drives the Priority unread-reply rule. */
+    fun chatLastOpened(): Map<String, Long> = decodeLastOpened(prefs.getString(KEY_CHAT_LAST_OPENED, null))
+
+    fun markChatOpened(threadId: String, nowMillis: Long = System.currentTimeMillis()) = synchronized(lastOpenedLock) {
+        prefs.edit { putString(KEY_CHAT_LAST_OPENED, encodeLastOpened(withChatOpened(chatLastOpened(), threadId, nowMillis))) }
+    }
+
     fun alert(eventId: String): AgentAlert? = alertHistory().firstOrNull { it.eventId == eventId }
 
     var transcript: Transcript?
@@ -118,12 +126,12 @@ class AppPreferences(context: Context) {
                 SubmittedTurn(id, item.optString("threadId").takeIf(::isSafeModel), text,
                     item.optLong("createdAt"), runCatching { SubmissionPhase.valueOf(item.getString("phase")) }.getOrDefault(SubmissionPhase.UNCERTAIN),
                     item.optString("nativeTurnId").takeIf(::isSafeModel), item.optString("nativeMessageId").takeIf(::isSafeModel))
-            }.takeLast(16)
+            }.takeLast(16).let { pruneSubmittedTurns(it, System.currentTimeMillis()) }
         }.getOrDefault(emptyList()) }
 
     fun changeSubmittedTurns(change: (List<SubmittedTurn>) -> List<SubmittedTurn>) = synchronized(submissionLock) {
         val previous = submittedTurns
-        val updated = change(previous).takeLast(16)
+        val updated = pruneSubmittedTurns(change(previous).takeLast(16), System.currentTimeMillis())
         if (updated == previous) return@synchronized
         val data = JSONArray()
         updated.forEach { item ->
@@ -133,6 +141,9 @@ class AppPreferences(context: Context) {
         }
         check(prefs.edit().putString("submitted_turns", data.toString()).commit()) { "Could not preserve the submitted message safely." }
     }
+
+    fun dismissSubmittedTurn(requestId: String) =
+        changeSubmittedTurns { items -> io.github.sirbughunter.agenticwear.model.dismissSubmittedTurn(items, requestId) }
 
     fun updateSubmittedTurn(requestId: String, change: (SubmittedTurn) -> SubmittedTurn) =
         changeSubmittedTurns { items -> items.map { if (it.requestId == requestId) change(it) else it } }
@@ -318,6 +329,8 @@ class AppPreferences(context: Context) {
         private const val KEY_MODELS = "models"
         private const val KEY_ALERT = "latest_alert"
         private const val KEY_ALERTS = "recent_alerts"
+        private const val KEY_CHAT_LAST_OPENED = "chat_last_opened"
+        private val lastOpenedLock = Any()
         private const val KEY_TRANSCRIPT = "transcript"
         private const val KEY_REVISION_BASE = "revision_base"
         private const val KEY_CHAT_SNAPSHOT = "chat_snapshot"
@@ -386,3 +399,26 @@ object RelayUrlPolicy {
         return trimmed
     }
 }
+
+internal const val MAX_CHAT_LAST_OPENED = 200
+
+/** Records [threadId] as opened now, evicting the oldest-opened entries beyond [max]. */
+internal fun withChatOpened(
+    current: Map<String, Long>,
+    threadId: String,
+    nowMillis: Long,
+    max: Int = MAX_CHAT_LAST_OPENED,
+): Map<String, Long> {
+    if (threadId.isBlank()) return current
+    val merged = current.toMutableMap().apply { put(threadId, nowMillis) }
+    if (merged.size <= max) return merged
+    return merged.entries.sortedByDescending { it.value }.take(max).associate { it.key to it.value }
+}
+
+private fun encodeLastOpened(map: Map<String, Long>): String =
+    JSONObject().also { json -> map.forEach { (id, at) -> json.put(id, at) } }.toString()
+
+private fun decodeLastOpened(raw: String?): Map<String, Long> = runCatching {
+    val json = JSONObject(raw ?: return emptyMap())
+    buildMap { json.keys().forEach { id -> put(id, json.optLong(id, 0L)) } }
+}.getOrDefault(emptyMap())

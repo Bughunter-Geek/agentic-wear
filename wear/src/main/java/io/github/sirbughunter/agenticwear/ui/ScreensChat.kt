@@ -65,6 +65,7 @@ import io.github.sirbughunter.agenticwear.model.isAnsweredLocally
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.SubmissionPhase
 import io.github.sirbughunter.agenticwear.model.currentSubmission
+import io.github.sirbughunter.agenticwear.model.visibleSubmissions
 import io.github.sirbughunter.agenticwear.model.submittedChatMessages
 import io.github.sirbughunter.agenticwear.model.submissionStatusLabel
 import kotlinx.coroutines.flow.first
@@ -75,6 +76,7 @@ internal fun ChatScreen(
     state: WearUiState,
     onReply: () -> Unit,
     onRetry: () -> Unit,
+    onDismissSubmission: (String) -> Unit = {},
     onRateMessage: (ChatMessage, FeedbackRating) -> Unit,
     onPermissionResponse: (ChatMessage, Boolean) -> Unit,
     palette: OrbPalette,
@@ -84,7 +86,7 @@ internal fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val chat = state.chat?.takeIf { it.threadId == state.selectedThreadId || (state.selectedThreadId == null && state.sendingDraft == null) }
-    val submissions = state.submittedTurns.filter { it.threadId == state.selectedThreadId } + listOfNotNull(state.sendingDraft)
+    val submissions = visibleSubmissions(state.submittedTurns.filter { it.threadId == state.selectedThreadId }) + listOfNotNull(state.sendingDraft)
     val submission = currentSubmission(chat, submissions)
     val messages = submittedChatMessages(chat, submissions)
     val hasPendingPermission = messages.any { it.kind == ChatMessageKind.PERMISSION && !it.resolved }
@@ -217,7 +219,10 @@ internal fun ChatScreen(
                             SubmissionPhase.FAILED -> StatusKind.Error
                             else -> StatusKind.Attention
                         })
-                        Text(label, style = AwType.Caption)
+                        Text(label, style = AwType.Caption, modifier = Modifier.weight(1f, fill = false))
+                        if (submission != null && (submission.phase == SubmissionPhase.FAILED || submission.phase == SubmissionPhase.UNCERTAIN)) {
+                            AwPillButton("Dismiss", { onDismissSubmission(submission.requestId) }, height = 28.dp)
+                        }
                     }
                 }
             }
@@ -238,7 +243,7 @@ internal fun ChatScreen(
 
         if (!hasActionablePermission) {
             val retrying = state.error != null
-            val checkDelivery = state.canCheckTurnConfirmation || submission?.phase == SubmissionPhase.UNCERTAIN
+            val checkDelivery = canCheckDeliveryHere(state.canCheckTurnConfirmation, state.pendingTurnThreadId, state.selectedThreadId) || submission?.phase == SubmissionPhase.UNCERTAIN
             val reviewFailed = submission?.phase == SubmissionPhase.FAILED
             AwEdgeButton(
                 label = if (checkDelivery) "Check status" else if (reviewFailed) "Review message" else if (retrying) "Retry" else "Reply",

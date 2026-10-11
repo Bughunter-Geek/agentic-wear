@@ -65,8 +65,11 @@ internal fun SessionsScreen(
     val alerts = remember(activity, group) { (activity ?: AppPreferences(context).alertHistory()).asReversed() }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val priority = remember(state.sessions, group, alerts) {
+        if (group == "Priority") prioritySessions(state.sessions, alerts, AppPreferences(context).chatLastOpened()) else emptyList()
+    }
     val filtered = when (group) {
-        "Priority" -> state.sessions.filter { it.status == SessionStatus.ACTIVE || it.status == SessionStatus.ERROR }
+        "Priority" -> priority.map { it.session }
         "Pinned" -> state.sessions.filter { it.pinned }
         "Scheduled", "Activity" -> emptyList()
         else -> state.sessions
@@ -105,9 +108,15 @@ internal fun SessionsScreen(
                     }
                 }
                 else -> {
-                    if (group == "Priority") item { Text("Active tasks and errors. Desktop unread state isn’t available here.", style = AwType.Micro, textAlign = TextAlign.Center) }
+                    if (group == "Priority" && filtered.isNotEmpty()) item { Text("Running chats, questions waiting for you, and replies you haven’t opened.", style = AwType.Micro, textAlign = TextAlign.Center) }
                     if (filtered.isEmpty()) {
-                        item { BoundaryNote(if (group == "Pinned") "No pinned chats" else "No chats yet", "Open Codex on your Mac, then come back.") }
+                        item {
+                            when (group) {
+                                "Pinned" -> BoundaryNote("No pinned chats", "Open Codex on your Mac, then come back.")
+                                "Priority" -> BoundaryNote("Nothing needs you", "Running chats, questions waiting for you, and replies you haven’t opened appear here.")
+                                else -> BoundaryNote("No chats yet", "Open Codex on your Mac, then come back.")
+                            }
+                        }
                     } else if (group == "All") {
                         val pinned = filtered.filter { it.pinned }
                         val recent = filtered.filterNot { it.pinned }
@@ -119,6 +128,8 @@ internal fun SessionsScreen(
                             item(key = "recent-label") { AwSectionLabel("Recent") }
                             items(recent, key = { "r:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect) }
                         }
+                    } else if (group == "Priority") {
+                        items(priority, key = { it.session.id }) { SessionRow(it.session, state.selectedThreadId, onSelect, it.reason) }
                     } else {
                         items(filtered, key = { it.id }) { SessionRow(it, state.selectedThreadId, onSelect) }
                     }
@@ -160,12 +171,13 @@ private fun DotCard(palette: OrbPalette) {
 }
 
 @Composable
-private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (String) -> Unit) {
+private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (String) -> Unit, reason: PriorityReason? = null) {
     val ago = shortAgo(session.updatedAtMillis)
     val meta = buildString {
-        append(session.status.label)
+        append(reason?.label ?: session.status.label)
         if (session.status != SessionStatus.ERROR && session.updatedAtMillis > 0) append(" · ").append(ago)
         if (session.ownedByWear) append(" · Watch")
+        sourceLabel(session.source)?.let { append(" · ").append(it) }
     }
     AwRowCard(
         onClick = { onSelect(session.id) },

@@ -202,7 +202,8 @@ object PayloadCodec {
                         canAcceptDirectInput = value.optBoolean("canAcceptDirectInput", false),
                         watchReady = value.optBoolean("watchReady", false),
                         pinned = value.optBoolean("pinned", false),
-                        source = clean(value.optString("source"), 64).takeIf { it.isNotBlank() },
+                        source = value.optString("source").takeIf { it in KNOWN_SESSION_SOURCES },
+                        attention = value.optString("attention").takeIf { it == "question" || it == "approval" },
                     ),
                 )
             }
@@ -502,7 +503,8 @@ object PayloadCodec {
                     .put("canAcceptDirectInput", session.canAcceptDirectInput)
                     .put("watchReady", session.watchReady)
                     .put("pinned", session.pinned)
-                    .put("source", session.source),
+                    .put("source", session.source)
+                    .put("attention", session.attention),
             )
         }
     }.toString()
@@ -566,7 +568,8 @@ object PayloadCodec {
                         canAcceptDirectInput = item.optBoolean("canAcceptDirectInput"),
                         watchReady = item.optBoolean("watchReady"),
                         pinned = item.optBoolean("pinned"),
-                        source = item.optString("source").takeIf { !item.isNull("source") && it.isNotBlank() },
+                        source = item.optString("source").takeIf { !item.isNull("source") && it in KNOWN_SESSION_SOURCES },
+                        attention = item.optString("attention").takeIf { !item.isNull("attention") && (it == "question" || it == "approval") },
                     ),
                 )
             }
@@ -620,7 +623,7 @@ object PayloadCodec {
     }.getOrNull()
 
     private fun decodeChatMessages(data: JSONArray): List<ChatMessage> = buildList {
-        for (index in 0 until minOf(data.length(), MAX_CHAT_MESSAGES)) {
+        for (index in maxOf(0, data.length() - MAX_CHAT_MESSAGES) until data.length()) {
             val item = data.optJSONObject(index) ?: continue
             val id = item.optString("id").takeIf(::isSafeId) ?: continue
             val turnId = item.optString("turnId").takeIf(::isSafeId) ?: continue
@@ -661,7 +664,7 @@ object PayloadCodec {
     }
 
     private fun decodeStoredChatMessages(data: JSONArray): List<ChatMessage> = buildList {
-        for (index in 0 until minOf(data.length(), MAX_CHAT_MESSAGES)) {
+        for (index in maxOf(0, data.length() - MAX_CHAT_MESSAGES) until data.length()) {
             val item = data.optJSONObject(index) ?: continue
             val id = item.optString("id").takeIf(::isSafeId) ?: continue
             val turnId = item.optString("turnId").takeIf(::isSafeId) ?: continue
@@ -711,6 +714,7 @@ object PayloadCodec {
     private const val MAX_RELAY_FAILURE_STATUS = 599
     private const val MAX_ERROR_CLASS_CHARS = 80
     private const val MAX_CHAT_MESSAGES = 12
+    private val KNOWN_SESSION_SOURCES = setOf("cloud", "dot", "automation")
     private const val MAX_CHAT_MESSAGE_CHARS = 6_000
     private const val MAX_QUESTION_INDEX = 9
     private const val MAX_QUESTION_FALLBACK_CHARS = 1_000

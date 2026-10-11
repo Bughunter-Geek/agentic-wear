@@ -199,6 +199,7 @@ fun AgenticWearApp(
                     state = state,
                     onReply = viewModel::replyFromChat,
                     onRetry = viewModel::retryChat,
+                    onDismissSubmission = viewModel::dismissSubmission,
                     onRateMessage = viewModel::rateChatMessage,
                     onPermissionResponse = viewModel::respondToChatPermission,
                     palette = orbPalette,
