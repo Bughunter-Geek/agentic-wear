@@ -13,6 +13,8 @@ import {
   FastModeUnavailableError,
   type ModelView,
   type ApprovalEvent,
+  type QuestionEvent,
+  buildQuestionReplyText,
   type SessionView,
   type TerminalEvent,
   type ExternalTurnBaseline,
@@ -23,7 +25,7 @@ import { RelayClient } from "./relay-client.js";
 import { shouldWakeWatch } from "./wake-policy.js";
 import { ReplayGuard } from "./replay-guard.js";
 import { processAuthenticatedEnvelope } from "./inbound-envelope.js";
-import { followUpActionSchema, type FollowUpAction, type WatchPayload, type WireEnvelope } from "./schemas.js";
+import { followUpActionSchema, reasoningEffort, type FollowUpAction, type WatchPayload, type WireEnvelope } from "./schemas.js";
 import type { Transcriber } from "./transcriber.js";
 import { cleanPhononFillers, type CleanupDiagnostics } from "./filler-cleanup.js";
 import type { ExplicitCorrectionDiagnostics } from "./explicit-correction.js";
@@ -94,6 +96,7 @@ export class BridgeService {
       },
       (threadId) => this.onAgentOutput(threadId),
     );
+    this.appServer.setQuestionHandler((event) => this.onQuestion(event));
     this.liveVoice = new LiveVoice(this.appServer, (payload) => this.send(payload));
     this.appServer.setRealtimeHandler((method, params) => this.liveVoice.notification(method, params));
     this.appServer.setTurnStageHandler((threadId, stage) => this.turnTiming.markThread(threadId, stage));
@@ -192,7 +195,7 @@ export class BridgeService {
       this.crypto,
       this.replayGuard,
       (payload) => {
-        if (payload.kind === "turn.submit" && !(payload.threadId !== null &&
+        if ((payload.kind === "turn.submit" || payload.kind === "question.answer") && !(payload.threadId !== null &&
             (this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)))) {
           this.turnTiming.begin(payload.requestId, payload.threadId, envelope.sentAt);
         }
@@ -208,7 +211,7 @@ export class BridgeService {
         }
         return this.handleAuthenticatedCommand(payload);
       },
-      (payload) => payload.kind === "turn.submit" ? this.replayTurnReceipt(payload)
+      (payload) => payload.kind === "turn.submit" || payload.kind === "question.answer" ? this.replayTurnReceipt(payload)
         : payload.kind === "live.newTask" ? this.replayNewVoiceTask(payload) : Promise.resolve(),
     );
   }
@@ -219,7 +222,7 @@ export class BridgeService {
       if (receipt) return this.replayNewVoiceTask(payload);
       return this.handleWatchPayload(payload);
     }
-    if (payload.kind !== "turn.submit") return this.handleWatchPayload(payload);
+    if (payload.kind !== "turn.submit" && payload.kind !== "question.answer") return this.handleWatchPayload(payload);
     const receipt = await this.turnReceipts.begin(payload.requestId, payload);
     if (receipt) return this.replayTurnReceipt(payload);
     await this.handleWatchPayload(payload);
@@ -233,7 +236,7 @@ export class BridgeService {
     });
   }
 
-  private async replayTurnReceipt(payload: Extract<WatchPayload, { kind: "turn.submit" }>): Promise<void> {
+  private async replayTurnReceipt(payload: Extract<WatchPayload, { kind: "turn.submit" | "question.answer" }>): Promise<void> {
     // A replay claim may predate receipt support or survive a crash before
     // receipt creation. Absence is never permission to dispatch it again.
     const receipt = await this.turnReceipts.get(payload.requestId, payload);
@@ -290,6 +293,7 @@ export class BridgeService {
   }
 
   private async handleWatchPayload(payload: WatchPayload): Promise<void> {
+    let resolvedSubmit: Extract<WatchPayload, { kind: "turn.submit" }> | null = payload.kind === "turn.submit" ? payload : null;
     try {
       if ("threadId" in payload && (this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)) &&
           (payload.kind === "live.start" || payload.kind === "live.capability" || payload.kind === "feedback.submit")) {
@@ -376,81 +380,24 @@ export class BridgeService {
           await this.createTranscription(payload);
           return;
         case "turn.submit": {
-          const cloudRoute = await this.cloudTextRoute(payload.threadId);
-          if (cloudRoute) {
-            await cloudRoute.enqueue(payload.requestId, payload.text);
-            this.watchedThreadId = payload.threadId;
-            this.watchAcceptedAt = Date.now();
-            this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
-            await this.send({ version: 1, kind: "turn.accepted", requestId: payload.requestId,
-              threadId: payload.threadId, state: "waiting", selectionApplied: false,
-              message: "Watch message queued for this existing cloud task. Its current model settings are kept." });
-            await this.sendChatSnapshot(payload.threadId!);
-            return;
-          }
-          const submittedAt = Date.now();
-          const pendingPayload = (
-            threadId: string,
-            followUpAction: FollowUpAction = payload.followUpAction,
-          ): PendingTurn => ({
-            requestId: payload.requestId,
-            threadId,
-            text: payload.text,
-            model: payload.model ?? null,
-            effort: payload.effort,
-            ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
-            followUpAction,
-            createdAt: submittedAt,
-          });
-          const result = await this.appServer.submitTurn(
-            payload.threadId,
-            payload.text,
-            this.config.defaultCwd,
-            payload.model ?? null,
-            payload.effort,
-            payload.requestId,
-            (baseline, followUpMode) => {
-              if (payload.threadId === null) throw new Error("A new chat cannot require an external handoff");
-              return this.markPendingExternalAttempt(
-                pendingPayload(payload.threadId, followUpMode),
-                baseline,
-              );
-            },
-            payload.followUpAction,
-            ...(payload.fastMode !== undefined ? [payload.fastMode] as const : []),
-          );
-          this.turnTiming.bindThread(payload.requestId, result.threadId);
-          this.turnTiming.markRequest(payload.requestId, "appServerAccepted");
-          // Routing metadata only: ids and states, never prompt or reply text.
-          console.log(JSON.stringify({ level: "info", message: "watch.turn.route", requestId: payload.requestId,
-            threadId: result.threadId, state: result.state, created: result.created, steered: result.steered ?? false,
-            followUpMode: result.followUpMode ?? null }));
-          // The Watch is using this chat, so poll it every second until its turn finishes.
-          this.appServer.markHot(result.threadId);
-          if (result.created) await this.persistOwnedThreads();
-          if (result.state === "waiting") {
-            await this.storePendingTurn(pendingPayload(
-              result.threadId,
-              result.followUpMode ?? payload.followUpAction,
-            ));
-          } else await this.removePendingTurn(payload.requestId);
-          this.watchedThreadId = result.threadId;
-          this.watchAcceptedAt = Date.now();
-          this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
-          await this.send({
-            version: 1,
-            kind: "turn.accepted",
-            requestId: payload.requestId,
-            threadId: result.threadId,
-            state: result.state,
-            selectionApplied: result.selectionApplied,
-            message: [turnAcceptedMessage(result), tierNotice(payload.fastMode)].filter(Boolean).join(" ") || undefined,
-          });
-          this.turnTiming.markRequest(payload.requestId, "watchAckSent");
-          this.runBackgroundRefresh(async () => {
-            await this.sendChatSnapshot(result.threadId);
-            await this.sendSessions();
-          });
+          await this.submitTurn(payload);
+          return;
+        }
+        case "question.answer": {
+          const question = await this.appServer.findQuestionTitle(payload.threadId, payload.questionItemId, payload.questionIndex)
+            ?? (payload.question || null);
+          if (!question) throw new Error("That question is no longer available in Codex. Open the chat to answer it.");
+          const persisted = this.appServer.persistedThreadSettings(payload.threadId)?.effort;
+          const persistedEffort = typeof persisted === "string" && reasoningEffort.safeParse(persisted).success
+            ? persisted : "medium";
+          resolvedSubmit = {
+            version: 1, kind: "turn.submit", requestId: payload.requestId, threadId: payload.threadId,
+            text: buildQuestionReplyText({ questionItemId: payload.questionItemId, questionIndex: payload.questionIndex,
+              question, answer: payload.answer }),
+            // Keep the chat's own settings: no model override, its persisted effort when it is a valid value.
+            model: null, effort: persistedEffort, followUpAction: "default",
+          };
+          await this.submitTurn(resolvedSubmit);
           return;
         }
         case "chat.watch":
@@ -505,10 +452,10 @@ export class BridgeService {
         return;
       }
       if (
-        payload.kind === "turn.submit" &&
-        payload.threadId !== null &&
-        !this.cloudTextProof?.owns(payload.threadId) &&
-        !this.cloudTextSession?.owns(payload.threadId) &&
+        resolvedSubmit !== null &&
+        resolvedSubmit.threadId !== null &&
+        !this.cloudTextProof?.owns(resolvedSubmit.threadId) &&
+        !this.cloudTextSession?.owns(resolvedSubmit.threadId) &&
         isRetryablePendingTurnError(error)
       ) {
         // A Watch prompt already carries a stable idempotency key. If Codex's
@@ -517,19 +464,19 @@ export class BridgeService {
         // retrying. This avoids returning a destructive sync error for a
         // transient cross-client handoff while still guaranteeing one send.
         await this.storePendingTurn({
-          requestId: payload.requestId,
-          threadId: payload.threadId,
-          text: payload.text,
-          model: payload.model ?? null,
-          effort: payload.effort,
-          followUpAction: payload.followUpAction,
+          requestId: resolvedSubmit.requestId,
+          threadId: resolvedSubmit.threadId,
+          text: resolvedSubmit.text,
+          model: resolvedSubmit.model ?? null,
+          effort: resolvedSubmit.effort,
+          followUpAction: resolvedSubmit.followUpAction,
           createdAt: Date.now(),
         });
         await this.send({
           version: 1,
           kind: "turn.accepted",
           requestId: payload.requestId,
-          threadId: payload.threadId,
+          threadId: resolvedSubmit.threadId,
           state: "waiting",
           selectionApplied: false,
           message: "Prompt saved securely. Codex is synchronizing this chat, and Agentic Wear will send it once without another tap.",
@@ -551,16 +498,96 @@ export class BridgeService {
         kind,
         requestId: payload.requestId,
         threadId: "threadId" in payload ? payload.threadId : undefined,
-        message: publicRequestError(error, payload.kind),
-        ...(payload.kind === "turn.submit" && /timed out|socket closed|not connected|app server closed/iu.test(publicError(error))
+        message: publicRequestError(error, payload.kind === "question.answer" ? "turn.submit" : payload.kind),
+        ...(resolvedSubmit !== null && /timed out|socket closed|not connected|app server closed/iu.test(publicError(error))
           ? { deliveryUncertain: true }
           : {}),
         occurredAt: Date.now(),
       });
-      if (payload.kind === "turn.submit" || payload.kind === "chat.watch") {
+      if (resolvedSubmit !== null || payload.kind === "question.answer" || payload.kind === "chat.watch") {
         await this.sendSessions().catch(() => undefined);
       }
     }
+  }
+
+  /** Shared by turn.submit and question.answer: one dispatch path, one receipt/idempotency key. */
+  private async submitTurn(payload: Extract<WatchPayload, { kind: "turn.submit" }>): Promise<void> {
+    const cloudRoute = await this.cloudTextRoute(payload.threadId);
+    if (cloudRoute) {
+      await cloudRoute.enqueue(payload.requestId, payload.text);
+      this.watchedThreadId = payload.threadId;
+      this.watchAcceptedAt = Date.now();
+      this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
+      await this.send({ version: 1, kind: "turn.accepted", requestId: payload.requestId,
+        threadId: payload.threadId, state: "waiting", selectionApplied: false,
+        message: "Watch message queued for this existing cloud task. Its current model settings are kept." });
+      await this.sendChatSnapshot(payload.threadId!);
+      return;
+    }
+    const submittedAt = Date.now();
+    const pendingPayload = (
+      threadId: string,
+      followUpAction: FollowUpAction = payload.followUpAction,
+    ): PendingTurn => ({
+      requestId: payload.requestId,
+      threadId,
+      text: payload.text,
+      model: payload.model ?? null,
+      effort: payload.effort,
+      ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
+      followUpAction,
+      createdAt: submittedAt,
+    });
+    const result = await this.appServer.submitTurn(
+      payload.threadId,
+      payload.text,
+      this.config.defaultCwd,
+      payload.model ?? null,
+      payload.effort,
+      payload.requestId,
+      (baseline, followUpMode) => {
+        if (payload.threadId === null) throw new Error("A new chat cannot require an external handoff");
+        return this.markPendingExternalAttempt(
+          pendingPayload(payload.threadId, followUpMode),
+          baseline,
+        );
+      },
+      payload.followUpAction,
+      ...(payload.fastMode !== undefined ? [payload.fastMode] as const : []),
+    );
+    this.turnTiming.bindThread(payload.requestId, result.threadId);
+    this.turnTiming.markRequest(payload.requestId, "appServerAccepted");
+    // Routing metadata only: ids and states, never prompt or reply text.
+    console.log(JSON.stringify({ level: "info", message: "watch.turn.route", requestId: payload.requestId,
+      threadId: result.threadId, state: result.state, created: result.created, steered: result.steered ?? false,
+      followUpMode: result.followUpMode ?? null }));
+    // The Watch is using this chat, so poll it every second until its turn finishes.
+    this.appServer.markHot(result.threadId);
+    if (result.created) await this.persistOwnedThreads();
+    if (result.state === "waiting") {
+      await this.storePendingTurn(pendingPayload(
+        result.threadId,
+        result.followUpMode ?? payload.followUpAction,
+      ));
+    } else await this.removePendingTurn(payload.requestId);
+    this.watchedThreadId = result.threadId;
+    this.watchAcceptedAt = Date.now();
+    this.watchExpiresAt = this.watchAcceptedAt + CHAT_WATCH_TTL_MS;
+    await this.send({
+      version: 1,
+      kind: "turn.accepted",
+      requestId: payload.requestId,
+      threadId: result.threadId,
+      state: result.state,
+      selectionApplied: result.selectionApplied,
+      message: [turnAcceptedMessage(result), tierNotice(payload.fastMode)].filter(Boolean).join(" ") || undefined,
+    });
+    this.turnTiming.markRequest(payload.requestId, "watchAckSent");
+    this.runBackgroundRefresh(async () => {
+      await this.sendChatSnapshot(result.threadId);
+      await this.sendSessions();
+    });
+    return;
   }
 
   private async createTranscription(payload: Extract<WatchPayload, { kind: "transcription.create" }>): Promise<void> {
@@ -638,6 +665,16 @@ export class BridgeService {
     await this.sendSessions().catch((error: unknown) => {
       console.error(JSON.stringify({ level: "error", message: "Could not refresh sessions", error: publicError(error) }));
     });
+  }
+
+  private async onQuestion(event: QuestionEvent): Promise<void> {
+    await this.send({ version: 1, ...event });
+    // Metadata only: never the question title, detail or options.
+    console.log(JSON.stringify({ level: "info", message: "watch.question.sent", eventId: event.eventId,
+      threadId: event.threadId, sentAt: Date.now() }));
+    if (this.watchedThreadId === event.threadId && Date.now() <= this.watchExpiresAt) {
+      await this.sendChatSnapshot(event.threadId, undefined, true).catch(() => undefined);
+    }
   }
 
   private async onApproval(event: ApprovalEvent): Promise<void> {

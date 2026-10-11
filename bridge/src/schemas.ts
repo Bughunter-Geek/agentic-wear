@@ -7,7 +7,7 @@ import {
 
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
 const safeModel = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_.:/-]+$/u);
-const reasoningEffort = z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9_.:-]+$/u);
+export const reasoningEffort = z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9_.:-]+$/u);
 export const followUpActionSchema = z.enum(["default", "queue", "steer"]);
 export type FollowUpAction = z.infer<typeof followUpActionSchema>;
 const base64 = z.string().min(16).max(1_048_576).regex(/^[A-Za-z0-9+/]*={0,2}$/u);
@@ -110,6 +110,18 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     followUpAction: followUpActionSchema.default("default"),
     fastMode: z.boolean().optional(),
   }).strict(),
+  // Answer to a Codex "ask the user" question (an agentMessage item with `questions`).
+  z.object({
+    version: z.literal(1),
+    kind: z.literal("question.answer"),
+    requestId: safeId,
+    threadId: safeId,
+    questionItemId: safeId,
+    questionIndex: z.number().int().min(0).max(9),
+    answer: z.string().trim().min(1).max(MAX_TRANSCRIPT_CHARS),
+    // Fallback only: the bridge prefers the full title it can look up itself.
+    question: z.string().trim().max(1_000).optional(),
+  }).strict(),
   z.object({
     version: z.literal(1),
     kind: z.literal("approval.respond"),
@@ -141,6 +153,20 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
 ]);
 
 export type WatchPayload = z.infer<typeof watchPayloadSchema>;
+
+/** Bridge-to-watch event: Codex asked the user a question mid-turn. */
+export const questionRequestEventSchema = z.object({
+  version: z.literal(1),
+  kind: z.literal("question.request"),
+  eventId: z.string().min(1).max(300),
+  threadId: safeId,
+  title: z.string().max(100),
+  detail: z.string().max(300),
+  options: z.array(z.string().max(40)).max(4),
+  questionItemId: safeId,
+  questionIndex: z.number().int().min(0).max(9),
+  occurredAt: z.number().int().nonnegative(),
+}).strict();
 
 export const relaySocketMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("envelope"), envelope: wireEnvelopeSchema }).strict(),

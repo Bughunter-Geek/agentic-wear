@@ -94,6 +94,22 @@ export type TerminalEvent = {
   title: string;
   detail: string;
   occurredAt: number;
+  /** True when the completed turn's final answer item carries a Codex "ask the user" question. */
+  hasQuestion?: true;
+};
+
+export type QuestionView = { title: string; options: string[] };
+
+export type QuestionEvent = {
+  eventId: string;
+  kind: "question.request";
+  threadId: string;
+  title: string;
+  detail: string;
+  options: string[];
+  questionItemId: string;
+  questionIndex: number;
+  occurredAt: number;
 };
 
 export type ApprovalEvent = {
@@ -125,6 +141,9 @@ export type ChatMessage = {
   approvalId: string | null;
   canControl: boolean;
   resolved: boolean;
+  questions?: QuestionView[];
+  questionItemId?: string;
+  answered?: boolean;
 };
 
 export type ChatSnapshot = {
@@ -171,6 +190,10 @@ type CachedChatMessage = {
   approvalId: string | null;
   canControl: boolean;
   resolved: boolean;
+  /** Display-ready questions of an agentMessage item (assistant only). */
+  questions?: QuestionView[];
+  /** Raw (untruncated) question titles, index-aligned with the agent's own question list. */
+  questionTitles?: string[];
 };
 
 type CachedChat = {
@@ -180,9 +203,14 @@ type CachedChat = {
   messages: CachedChatMessage[];
 };
 
+type FinalAnswerInfo = { text: string; itemId?: string; completedAtMs?: number; questions?: QuestionView[] };
+const QUESTION_MAX_AGE_MS = 10 * 60_000;
+
 const itemsPreviewResponseSchema = z.object({ data: z.array(z.unknown()) }).passthrough();
 const itemsPreviewEntrySchema = z.object({
   turnId: z.string().optional(),
+  startedAtMs: z.number().optional(),
+  completedAtMs: z.number().optional(),
   item: z.object({
     type: z.string(),
     text: z.string().optional(),
@@ -282,6 +310,8 @@ export class AppServerClient {
   // submissions so a reply to a chat the Watch just used is noticed quickly even
   // when another client (e.g. Codex desktop) finishes the turn.
   private readonly hotThreads = new Map<string, number>();
+  private readonly emittedQuestionEvents = new Set<string>();
+  private questionHandler: (event: QuestionEvent) => Promise<void> = () => Promise.resolve();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
   private readonly optimisticUserMessages = new Map<string, Map<string, CachedChatMessage>>();
@@ -1401,6 +1431,15 @@ export class AppServerClient {
     }
   }
 
+  /** The thread's persisted model/effort (state_5.sqlite), or null when unreadable. */
+  persistedThreadSettings(threadId: string): ThreadSettings | null {
+    try { return this.readThreadSettings(threadId); } catch { return null; }
+  }
+
+  setQuestionHandler(handler: (event: QuestionEvent) => Promise<void>): void {
+    this.questionHandler = handler;
+  }
+
   markHot(threadId: string, forMs = HOT_THREAD_MS): void {
     // Re-insert so the map stays ordered oldest-first by last marking.
     this.hotThreads.delete(threadId);
@@ -1561,6 +1600,7 @@ export class AppServerClient {
         const revision = this.ephemeralRevisions.get(event.threadId);
         if (revision && event.item.text?.trim()) revision.text = event.item.text;
         else if (!revision) {
+          const asked = questionsFromItem(event.item);
           this.updateCachedAgentMessage(
             event.threadId,
             event.turnId,
@@ -1568,8 +1608,22 @@ export class AppServerClient {
             event.item.text ?? "",
             event.item.phase ?? "unknown",
             true,
+            asked,
           );
           await this.onAgentOutput(event.threadId);
+          if (asked) {
+            await this.emitQuestion({
+              threadId: event.threadId,
+              itemId: event.item.id,
+              questions: asked.questions,
+              completedAtMs: event.completedAtMs,
+              source: "notification",
+              title: async () => {
+                const thread = this.threadCache.get(event.threadId) ?? await this.readThread(event.threadId, true);
+                return isTopLevelUserThread(thread) ? threadTitle(thread) : null;
+              },
+            });
+          }
         }
       }
       return;
@@ -1605,22 +1659,28 @@ export class AppServerClient {
         const kind = internalCancellation
           ? "terminal.interrupted"
           : `terminal.${event.turn.status}` as TerminalEvent["kind"];
+        const answer = !internalCancellation && event.turn.status === "completed"
+          ? await this.finalAnswerInfo(event.threadId, event.turn.id)
+          : null;
         const detail = internalCancellation
           ? "Codex cancelled an internal response task. Open the session and retry only if no reply appears."
           : event.turn.status === "completed"
-          ? previewText(await this.finalAnswerPreview(event.threadId, event.turn.id) ?? "") ??
+          ? previewText(answer?.text ?? "") ??
             "The agent finished its full response."
           : event.turn.status === "failed"
             ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
             : "The agent was interrupted before finishing.";
+        const title = threadTitle(thread);
+        await this.emitCompletionQuestion(event.threadId, title, answer, "notification");
         await this.emitTerminal({
           eventId: `turn:${event.threadId}:${event.turn.id}:${event.turn.status}`,
           kind,
           turnScope: "topLevel",
           threadId: event.threadId,
-          title: threadTitle(thread),
+          title,
           detail,
           occurredAt,
+          ...(answer?.questions ? { hasQuestion: true as const } : {}),
         }, "notification");
       } finally {
         if (shouldRelease) {
@@ -1856,6 +1916,7 @@ export class AppServerClient {
     text: string,
     phase: ChatParagraph["phase"] = "unknown",
     replace = false,
+    asked: { questions: QuestionView[]; titles: string[] } | null = null,
   ): void {
     let cached = this.chatCaches.get(threadId);
     if (!cached) {
@@ -1873,6 +1934,7 @@ export class AppServerClient {
     if (existing) {
       existing.text = boundedChatText(replace ? text : existing.text + text);
       if (phase !== "unknown") existing.phase = phase;
+      if (asked) { existing.questions = asked.questions; existing.questionTitles = asked.titles; }
     } else if (text.trim()) {
       cached.messages.push({
         id: itemId,
@@ -1884,6 +1946,7 @@ export class AppServerClient {
         approvalId: null,
         canControl: false,
         resolved: false,
+        ...(asked ? { questions: asked.questions, questionTitles: asked.titles } : {}),
       });
     }
     cached.messages = cached.messages.slice(-MAX_CACHED_CHAT_MESSAGES);
@@ -1990,12 +2053,20 @@ export class AppServerClient {
 
   /** Text of the turn's final answer for the notification preview, or null. Never throws; never logs text. */
   private async finalAnswerPreview(threadId: string, turnId: string): Promise<string | null> {
+    return (await this.finalAnswerInfo(threadId, turnId))?.text ?? null;
+  }
+
+  /** The turn's final answer text plus its questions (when it asks any). Never throws; never logs text. */
+  private async finalAnswerInfo(threadId: string, turnId: string): Promise<FinalAnswerInfo | null> {
     try {
       const cached = this.chatCaches.get(threadId)?.messages.filter((message) =>
         message.turnId === turnId && message.role === "assistant" && message.kind === "message" && message.text.trim()
       );
       const fromCache = cached?.findLast((message) => message.phase === "final_answer") ?? cached?.at(-1);
-      if (fromCache) return fromCache.text;
+      if (fromCache) {
+        return { text: fromCache.text, itemId: fromCache.id,
+          ...(fromCache.questions?.length ? { questions: fromCache.questions } : {}) };
+      }
       const raw = await this.request("thread/items/list", {
         threadId,
         turnId,
@@ -2009,12 +2080,141 @@ export class AppServerClient {
         if (!entry.success) return [];
         const { turnId: entryTurnId, item } = entry.data;
         if (entryTurnId !== undefined && entryTurnId !== turnId) return [];
-        return item.type === "agentMessage" && item.text?.trim() ? [item] : [];
+        return item.type === "agentMessage" && item.text?.trim()
+          ? [{ item, completedAtMs: entry.data.completedAtMs ?? entry.data.startedAtMs }] : [];
       });
-      return (messages.find((item) => item.phase === "final_answer") ?? messages[0])?.text ?? null;
+      const chosen = messages.find(({ item }) => item.phase === "final_answer") ?? messages[0];
+      if (!chosen?.item.text) return null;
+      const asked = questionsFromItem(chosen.item);
+      const itemId = typeof chosen.item.id === "string" ? chosen.item.id : undefined;
+      return { text: chosen.item.text, ...(itemId ? { itemId } : {}),
+        ...(chosen.completedAtMs !== undefined ? { completedAtMs: chosen.completedAtMs } : {}),
+        ...(asked ? { questions: asked.questions } : {}) };
     } catch {
       return null;
     }
+  }
+
+  private async emitCompletionQuestion(
+    threadId: string,
+    title: string,
+    answer: FinalAnswerInfo | null,
+    source: "notification" | "monitor",
+  ): Promise<void> {
+    if (!answer?.questions || !answer.itemId) return;
+    try {
+      await this.emitQuestion({ threadId, itemId: answer.itemId, questions: answer.questions,
+        completedAtMs: answer.completedAtMs, source, title: () => Promise.resolve(title) });
+    } catch (error) {
+      console.error(JSON.stringify({ level: "error", message: "question event skipped", error: safeError(error) }));
+    }
+  }
+
+  /** Emit a watch `question.request` once per question item. Never logs question text. */
+  private async emitQuestion(input: {
+    threadId: string;
+    itemId: string;
+    questions: QuestionView[];
+    completedAtMs: number | undefined;
+    source: "notification" | "monitor" | "poll";
+    title: () => Promise<string | null>;
+  }): Promise<void> {
+    const eventId = `question:${input.threadId}:${input.itemId}`;
+    if (this.emittedQuestionEvents.has(eventId)) return;
+    if (input.completedAtMs !== undefined && Date.now() - input.completedAtMs > QUESTION_MAX_AGE_MS) return;
+    const first = input.questions[0];
+    if (!first) return;
+    const chat = this.chatCaches.get(input.threadId)?.messages;
+    if (chat && this.isQuestionAnswered(chat, input.itemId)) return;
+    const title = await input.title();
+    if (title === null) return;
+    this.rememberQuestionEvent(eventId);
+    const event: QuestionEvent = {
+      eventId,
+      kind: "question.request",
+      threadId: input.threadId,
+      title,
+      detail: cutWithEllipsis(first.title.replace(/\s+/gu, " ").trim(), 300),
+      options: first.options.slice(0, 4).map((option) => cutWithEllipsis(option, 40)),
+      questionItemId: input.itemId,
+      questionIndex: 0,
+      occurredAt: input.completedAtMs ?? Date.now(),
+    };
+    console.log(JSON.stringify({ level: "info", message: "watch.question.detected", eventId,
+      threadId: input.threadId, source: input.source, detectedAt: Date.now() }));
+    try {
+      await this.questionHandler(event);
+    } catch (error) {
+      this.emittedQuestionEvents.delete(eventId);
+      throw error;
+    }
+  }
+
+  private isQuestionAnswered(messages: CachedChatMessage[], itemId: string): boolean {
+    const asked = messages.findIndex((message) => message.id === itemId);
+    return messages.some((message, index) => index > asked && message.role === "user" && message.kind === "message" &&
+      questionReplyItemIds(message.text).includes(itemId));
+  }
+
+  private rememberQuestionEvent(eventId: string): void {
+    this.emittedQuestionEvents.add(eventId);
+    if (this.emittedQuestionEvents.size > 1_000) {
+      const oldest = this.emittedQuestionEvents.values().next().value;
+      if (oldest) this.emittedQuestionEvents.delete(oldest);
+    }
+  }
+
+  /** Poll the running turn of an already-monitored chat for unseen question items. Never throws. */
+  private async scanRunningTurnQuestions(session: SessionView, turnId: string): Promise<void> {
+    try {
+      const raw = await this.request("thread/items/list", {
+        threadId: session.id, turnId, sortDirection: "desc", limit: 10,
+      }, 1_500);
+      const parsed = itemsPreviewResponseSchema.safeParse(raw);
+      if (!parsed.success) return;
+      const entries = parsed.data.data.flatMap((value) => {
+        const entry = itemsPreviewEntrySchema.safeParse(value);
+        return entry.success && (entry.data.turnId === undefined || entry.data.turnId === turnId) ? [entry.data] : [];
+      });
+      const answered = new Set(entries.flatMap(({ item }) =>
+        item.type === "userMessage" ? questionReplyItemIds(rawUserItemText(item)) : []));
+      for (const entry of entries.reverse()) {
+        const { item } = entry;
+        if (item.type !== "agentMessage" || typeof item.id !== "string") continue;
+        const asked = questionsFromItem(item);
+        if (!asked || answered.has(item.id)) continue;
+        await this.emitQuestion({
+          threadId: session.id,
+          itemId: item.id,
+          questions: asked.questions,
+          completedAtMs: entry.completedAtMs ?? entry.startedAtMs,
+          source: "poll",
+          title: () => Promise.resolve(session.title),
+        });
+      }
+    } catch (error) {
+      console.error(JSON.stringify({ level: "warn", message: "question scan skipped", error: safeError(error) }));
+    }
+  }
+
+  /** Full question title for a reply: chat cache first, then the newest items of the thread. Never throws. */
+  async findQuestionTitle(threadId: string, itemId: string, questionIndex: number): Promise<string | null> {
+    const cached = this.chatCaches.get(threadId)?.messages.find((message) => message.id === itemId);
+    const fromCache = cached?.questionTitles?.[questionIndex];
+    if (fromCache) return fromCache;
+    try {
+      const raw = await this.request("thread/items/list", {
+        threadId, sortDirection: "desc", limit: 100,
+      }, 1_500);
+      const parsed = itemsPreviewResponseSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      for (const value of parsed.data.data) {
+        const entry = itemsPreviewEntrySchema.safeParse(value);
+        if (!entry.success || entry.data.item.id !== itemId) continue;
+        return questionsFromItem(entry.data.item)?.titles[questionIndex] ?? null;
+      }
+    } catch { /* fall back to the watch's copy */ }
+    return null;
   }
 
   private async emitRecentTerminals(session: SessionView, newerThanMs: number): Promise<void> {
@@ -2024,7 +2224,11 @@ export class AppServerClient {
       sortDirection: "desc",
       itemsView: "notLoaded",
     });
-    const turns = turnListResponseSchema.parse(raw).data
+    const allTurns = turnListResponseSchema.parse(raw).data;
+    // Codex questions arrive mid-turn: look inside the newest running turn of a chat we already poll.
+    const running = allTurns.find((turn) => turn.status === "inProgress");
+    if (running) await this.scanRunningTurnQuestions(session, running.id);
+    const turns = allTurns
       .filter((turn) => turn.status !== "inProgress" && isTerminalNewerThan(turn.completedAt, newerThanMs))
       .reverse();
     for (const turn of turns) {
@@ -2037,14 +2241,18 @@ export class AppServerClient {
       const kind = internalCancellation
         ? "terminal.interrupted"
         : `terminal.${turn.status}` as TerminalEvent["kind"];
+      const answer = !internalCancellation && turn.status === "completed"
+        ? await this.finalAnswerInfo(session.id, turn.id)
+        : null;
       const detail = internalCancellation
         ? "Codex cancelled an internal response task. Open the session and retry only if no reply appears."
         : turn.status === "completed"
-        ? previewText(await this.finalAnswerPreview(session.id, turn.id) ?? "") ??
+        ? previewText(answer?.text ?? "") ??
           "The agent finished its full response."
         : turn.status === "failed"
           ? sanitizePublicText(turn.error?.message ?? "The agent stopped with an error.")
           : "The agent was interrupted before finishing.";
+      await this.emitCompletionQuestion(session.id, session.title, answer, "monitor");
       await this.emitTerminal({
         eventId: `turn:${session.id}:${turn.id}:${turn.status}`,
         kind,
@@ -2053,6 +2261,7 @@ export class AppServerClient {
         title: session.title,
         detail,
         occurredAt: turn.completedAt! * 1_000,
+        ...(answer?.questions ? { hasQuestion: true as const } : {}),
       }, "monitor");
       if (this.controlledTurnIds.get(session.id) === turn.id) {
         await this.releaseThread(session.id);
@@ -2197,7 +2406,7 @@ function textInput(text: string): Record<string, unknown> {
 }
 
 function threadTitle(thread: CodexThread): string {
-  return clean(thread.name ?? thread.preview, 100) || "Untitled session";
+  return clean(thread.name ?? displayUserText(thread.preview), 100) || "Untitled session";
 }
 
 function clean(value: string, limit: number): string {
@@ -2245,24 +2454,170 @@ export function displayAgentText(text: string): string {
   return text;
 }
 
-/** One-line notification preview of an agent reply: directives stripped, whitespace collapsed, first 30 words. */
+/** Cut to at most `max` characters (code points), ending in "…" when cut. */
+function cutWithEllipsis(value: string, max: number): string {
+  const chars = Array.from(value);
+  return chars.length <= max ? value : `${chars.slice(0, max - 1).join("").trimEnd()}…`;
+}
+
+/** Remove inline markdown openers left unmatched by a cut: `**`, `~~`, a single backtick, `[label](url`. */
+function dropDanglingMarkdown(value: string): string {
+  let result = value.replace(/\[([^\][]*)\]\([^)]*$/u, "$1");
+  for (const marker of ["**", "~~"]) {
+    let count = 0;
+    for (let at = result.indexOf(marker); at >= 0; at = result.indexOf(marker, at + marker.length)) count += 1;
+    if (count % 2 === 1) {
+      const last = result.lastIndexOf(marker);
+      result = result.slice(0, last) + result.slice(last + marker.length);
+    }
+  }
+  const ticks = [...result.matchAll(/`+/gu)].map((match) => match[0].length);
+  if (!ticks.some((length) => length >= 2) && ticks.length % 2 === 1) {
+    const last = result.lastIndexOf("`");
+    result = result.slice(0, last) + result.slice(last + 1);
+  }
+  return result.split("\n").map((line) => line.trimEnd()).join("\n").trimEnd();
+}
+
+const PREVIEW_MAX_LINES = 8;
+
+/**
+ * Notification preview of an agent reply: directives stripped, line breaks kept (spaces collapsed within lines,
+ * empty lines dropped, at most 8 lines), first 30 words across lines. A cut never leaves a dangling inline marker.
+ */
 export function previewText(text: string, maxWords = 30, maxChars = 400): string | null {
-  const flat = displayAgentText(text).replace(/\s+/gu, " ").trim();
-  if (!flat) return null;
-  const words = flat.split(" ");
-  let result = words.slice(0, maxWords).join(" ");
-  let truncated = words.length > maxWords;
+  const allLines = displayAgentText(text).split(/\r?\n/u).map((line) => line.replace(/\s+/gu, " ").trim()).filter(Boolean);
+  if (allLines.length === 0) return null;
+  let truncated = allLines.length > PREVIEW_MAX_LINES;
+  const lines: string[] = [];
+  let words = 0;
+  for (const line of allLines.slice(0, PREVIEW_MAX_LINES)) {
+    const lineWords = line.split(" ");
+    if (words + lineWords.length > maxWords) {
+      const room = maxWords - words;
+      if (room > 0) lines.push(lineWords.slice(0, room).join(" "));
+      truncated = true;
+      break;
+    }
+    lines.push(line);
+    words += lineWords.length;
+  }
+  let result = lines.join("\n");
   if (result.length > maxChars) {
     result = result.slice(0, maxChars).trimEnd();
     truncated = true;
   }
-  return truncated ? `${result}…` : result;
+  if (!truncated) return result;
+  return `${dropDanglingMarkdown(result)}…`;
+}
+
+const TAG_QUESTION_REPLY = /<send_user_message_question_reply>([\s\S]*?)<\/send_user_message_question_reply>/gu;
+const CONTEXT_BLOCKS = [
+  /<environment_context>[\s\S]*?<\/environment_context>/gu,
+  /<turn_aborted>[\s\S]*?<\/turn_aborted>/gu,
+  /<external_codex_apps_open_page>[\s\S]*?<\/external_codex_apps_open_page>/gu,
+];
+
+type QuestionReplyEntry = { questionItemId: string; question: string; answer: string };
+
+function parseQuestionReplyEntries(inner: string): QuestionReplyEntry[] | null {
+  try {
+    const parsed: unknown = JSON.parse(inner.trim());
+    if (!Array.isArray(parsed)) return null;
+    const entries: QuestionReplyEntry[] = [];
+    for (const entry of parsed) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const { questionItemId, question, answer } = entry as Record<string, unknown>;
+      if (typeof answer !== "string") continue;
+      entries.push({
+        questionItemId: typeof questionItemId === "string" ? questionItemId : "",
+        question: typeof question === "string" ? question : "",
+        answer,
+      });
+    }
+    return entries.length > 0 ? entries : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Item ids of the questions a user message answers (decoded from the reply wrapper); [] for other messages. */
+export function questionReplyItemIds(text: string): string[] {
+  const ids: string[] = [];
+  for (const match of text.matchAll(TAG_QUESTION_REPLY)) {
+    for (const entry of parseQuestionReplyEntries(match[1] ?? "") ?? []) {
+      try {
+        const decoded: unknown = JSON.parse(entry.questionItemId);
+        if (Array.isArray(decoded) && typeof decoded[1] === "string") ids.push(decoded[1]);
+      } catch { /* not an encoded id */ }
+    }
+  }
+  return ids;
+}
+
+/** Exactly the text the desktop sends for an answered Codex question. */
+export function buildQuestionReplyText(reply: {
+  questionItemId: string; questionIndex: number; question: string; answer: string;
+}): string {
+  const json = JSON.stringify([{
+    questionItemId: JSON.stringify(["request_user_input_async", reply.questionItemId, reply.questionIndex]),
+    question: reply.question,
+    answer: reply.answer,
+  }]).replace(/</gu, "\\u003c");
+  return `<send_user_message_question_reply>\n${json}\n</send_user_message_question_reply>`;
+}
+
+/**
+ * Watch-visible text of a user message: question replies become a quoted question plus the answer, internal
+ * context blocks are removed. Returns "" when nothing visible is left (the message should be dropped).
+ */
+export function displayUserText(text: string): string {
+  let result = text;
+  for (const block of CONTEXT_BLOCKS) result = result.replace(block, "");
+  result = result.replace(TAG_QUESTION_REPLY, (_whole, inner: string) => {
+    const entries = parseQuestionReplyEntries(inner);
+    if (!entries) return inner.trim();
+    return entries.map((entry) => {
+      const question = entry.question.replace(/\s+/gu, " ").trim();
+      const chars = Array.from(question);
+      const quoted = question ? `> ${chars.length > 120 ? `${chars.slice(0, 120).join("")}…` : question}\n` : "";
+      return `${quoted}${entry.answer}`;
+    }).join("\n\n");
+  });
+  return result.trim();
+}
+
+const MAX_QUESTIONS = 3;
+const MAX_QUESTION_OPTIONS = 6;
+
+/** Questions of a Codex agentMessage item (display-ready) with their raw titles, or null when it has none. */
+export function questionsFromItem(item: unknown): { questions: QuestionView[]; titles: string[] } | null {
+  const raw = (item as { questions?: unknown } | null)?.questions;
+  if (!Array.isArray(raw)) return null;
+  const questions: QuestionView[] = [];
+  const titles: string[] = [];
+  for (const entry of raw.slice(0, MAX_QUESTIONS)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { title, options } = entry as { title?: unknown; options?: unknown };
+    if (typeof title !== "string") continue;
+    const display = displayAgentText(title).trim();
+    if (!display) continue;
+    questions.push({
+      title: Array.from(display).slice(0, 600).join(""),
+      options: Array.isArray(options)
+        ? options.flatMap((option) => typeof option === "string" && option.trim()
+          ? [Array.from(option.trim()).slice(0, 120).join("")] : []).slice(0, MAX_QUESTION_OPTIONS)
+        : [],
+    });
+    titles.push(title.trim().slice(0, 4_000));
+  }
+  return questions.length > 0 ? { questions, titles } : null;
 }
 
 function displayMessage(message: CachedChatMessage): CachedChatMessage {
-  return message.role === "assistant" && message.kind === "message"
-    ? { ...message, text: displayAgentText(message.text) }
-    : { ...message };
+  if (message.role === "assistant" && message.kind === "message") return { ...message, text: displayAgentText(message.text) };
+  if (message.role === "user" && message.kind === "message") return { ...message, text: displayUserText(message.text) };
+  return { ...message };
 }
 
 function splitParagraphs(message: CachedChatMessage): ChatParagraph[] {
@@ -2286,12 +2641,35 @@ function freshChatStatus(
   return threadStatus;
 }
 
+/** Last index of a user message answering each question item id. */
+function questionReplyPositions(messages: CachedChatMessage[]): Map<string, number> {
+  const positions = new Map<string, number>();
+  messages.forEach((message, index) => {
+    if (message.role !== "user" || message.kind !== "message") return;
+    for (const id of questionReplyItemIds(message.text)) positions.set(id, index);
+  });
+  return positions;
+}
+
+function chatMessageView(message: CachedChatMessage, index: number, replies: Map<string, number>): ChatMessage {
+  const { questionTitles: _titles, ...rest } = displayMessage(message);
+  if (!rest.questions || rest.questions.length === 0) {
+    const { questions: _questions, ...plain } = rest;
+    return plain;
+  }
+  return { ...rest, questionItemId: message.id, answered: (replies.get(message.id) ?? -1) > index };
+}
+
 export function materializeChat(cache: CachedChat): ChatSnapshot {
+  const replies = questionReplyPositions(cache.messages);
+  const visible = cache.messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.role !== "user" || message.kind !== "message" || displayUserText(message.text) !== "");
   return {
     threadId: cache.threadId,
     title: cache.title,
     status: cache.status,
-    messages: cache.messages.slice(-MAX_CHAT_MESSAGES).map(displayMessage),
+    messages: visible.slice(-MAX_CHAT_MESSAGES).map(({ message, index }) => chatMessageView(message, index, replies)),
     paragraphs: cache.messages.map(displayMessage).flatMap(splitParagraphs).slice(-MAX_CHAT_PARAGRAPHS),
   };
 }
@@ -2305,6 +2683,7 @@ function chatMessageFromItem(
   item: z.infer<typeof chatTurnListResponseSchema>["data"][number]["items"][number],
 ): CachedChatMessage | null {
   if (item.type === "agentMessage" && item.text?.trim()) {
+    const asked = questionsFromItem(item);
     return {
       id: item.id,
       turnId,
@@ -2315,6 +2694,7 @@ function chatMessageFromItem(
       approvalId: null,
       canControl: false,
       resolved: false,
+      ...(asked ? { questions: asked.questions, questionTitles: asked.titles } : {}),
     };
   }
   if (item.type !== "userMessage") return null;
@@ -2346,6 +2726,16 @@ function chatMessageFromItem(
     canControl: false,
     resolved: false,
   };
+}
+
+function rawUserItemText(item: Record<string, unknown>): string {
+  if (!Array.isArray(item.content)) return "";
+  return item.content
+    .flatMap((part: unknown) => {
+      const { type, text } = (part ?? {}) as { type?: unknown; text?: unknown };
+      return type === "text" && typeof text === "string" && text.trim() ? [text.trim()] : [];
+    })
+    .join("\n\n");
 }
 
 function userMessageText(

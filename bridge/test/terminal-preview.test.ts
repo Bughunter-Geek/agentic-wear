@@ -69,8 +69,8 @@ const completedNotification = {
 };
 
 describe("previewText", () => {
-  it("strips directives, collapses whitespace and trims", () => {
-    expect(previewText('Done.\n\n  All   good\t here.\n::inbox-item{title="T" summary="S"}')).toBe("Done. All good here.");
+  it("strips directives, collapses spaces within lines and trims", () => {
+    expect(previewText('Done.\n\n  All   good\t here.\n::inbox-item{title="T" summary="S"}')).toBe("Done.\nAll good here.");
   });
   it("returns null for empty or whitespace-only text", () => {
     expect(previewText("")).toBeNull();
@@ -86,6 +86,29 @@ describe("previewText", () => {
   it("truncates 31 or more words to the first 30 with an ellipsis", () => {
     const words = Array.from({ length: 31 }, (_, i) => `w${i}`);
     expect(previewText(words.join(" "))).toBe(`${words.slice(0, 30).join(" ")}…`);
+  });
+  it("keeps line breaks, collapses spaces within lines and drops empty lines", () => {
+    expect(previewText("- one   two\n\n\n- three\tfour\n   \nfive")).toBe("- one two\n- three four\nfive");
+  });
+  it("keeps at most 8 lines", () => {
+    const text = Array.from({ length: 10 }, (_, i) => `l${i}`).join("\n");
+    expect(previewText(text)).toBe(`${Array.from({ length: 8 }, (_, i) => `l${i}`).join("\n")}…`);
+  });
+  it("counts 30 words across lines", () => {
+    const line = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+    expect(previewText(`${line(20)}\n${line(20)}`)).toBe(`${line(20)}\n${line(10)}…`);
+  });
+  it("removes unmatched inline markers left by the cut but keeps the words", () => {
+    const filler = Array.from({ length: 29 }, (_, i) => `w${i}`).join(" ");
+    expect(previewText(`${filler} **bold text here`)).toBe(`${filler} bold…`);
+    expect(previewText(`${filler} ~~gone text`)).toBe(`${filler} gone…`);
+    expect(previewText(`${filler} \`code span`)).toBe(`${filler} code…`);
+    const short = Array.from({ length: 27 }, (_, i) => `w${i}`).join(" ");
+    expect(previewText(`${short} [the label](https://example.com/path more words`)).toBe(`${short} the label…`);
+    expect(previewText(`${filler} **bold** done more`)).toBe(`${filler} bold…`.replace("bold", "**bold**"));
+  });
+  it("keeps balanced markers and untouched text without ellipsis", () => {
+    expect(previewText("**bold** and `code` and [x](y)")).toBe("**bold** and `code` and [x](y)");
   });
   it("caps very long single tokens at 400 characters", () => {
     expect(previewText("x".repeat(700))).toBe(`${"x".repeat(400)}…`);
@@ -104,7 +127,7 @@ describe("terminal.completed preview", () => {
     internals.request = vi.fn(() => Promise.reject(new Error("request must not be called")));
     await internals.handleNotification("turn/completed", completedNotification);
     expect(events).toHaveLength(1);
-    expect(events[0]?.detail).toBe("Here is the final answer.");
+    expect(events[0]?.detail).toBe("Here is the\nfinal answer.");
     expect(internals.request).not.toHaveBeenCalled();
   });
 
