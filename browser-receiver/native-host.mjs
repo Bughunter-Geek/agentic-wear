@@ -94,7 +94,7 @@ process.stdin.on('data',b=>{
    catch(error){hostLog('accept',String(error?.message??'error').slice(0,80));status({status:'ignored_observation'});reply({status:'ignored'});continue;}
    pages.set(d.url,d);
    status({status:d.blocked?'blocked':'ready',...result,observedAt:d.observedAt,visibility:d.visibility,extractionMs:d.extractionMs,
-    pages:[...pages].map(([url,p])=>({url,documentId:p.documentId,blocked:p.blocked,inputReady:p.inputReady,observedAt:p.observedAt,messages:p.turns.length,userMessages:p.turns.reduce((n,t)=>n+(t.role==='user'?1:(t.prompts?.length||0)),0),lastTurnId:p.turns.at(-1)?.id})),rssBytes:process.memoryUsage().rss});reply({status:d.blocked?'blocked':'ready'});
+    pages:[...pages].map(([url,p])=>({url,documentId:p.documentId,blocked:p.blocked,inputReady:p.inputReady,observedAt:p.observedAt,messages:p.turns.length,userMessages:p.turns.reduce((n,t)=>n+(t.role==='user'?1:(t.prompts?.length||0)),0),lastTurnId:p.turns.at(-1)?.id,model:p.model??null,effort:p.effort??null,efforts:p.efforts??[]})),rssBytes:process.memoryUsage().rss});reply({status:d.blocked?'blocked':'ready'});
   }catch(error){hostLog('handler',String(error?.message??'error').slice(0,80));status({status:'ignored_observation'});}
  }
 });

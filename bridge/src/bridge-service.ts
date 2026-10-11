@@ -271,10 +271,13 @@ export class BridgeService {
     if(!receipt?.response && payload.kind==="turn.submit" && payload.threadId && this.desktopCloud?.owns(payload.threadId)) {
       try {
         const browserResult=await this.desktopCloud.submitText(payload.threadId,payload.requestId,payload.text,true);
+        const verified=browserResult.verifiedSelection;
+        const selectionApplied=Boolean(verified && (payload.model==null||verified.model===payload.model) &&
+          (payload.cloudEffortIndex===undefined||verified.effortIndex===payload.cloudEffortIndex));
         await this.send({version:1,kind:"turn.accepted",requestId:payload.requestId,threadId:payload.threadId,
-          state:"running",selectionApplied:false,message:"Delivery confirmed from the existing browser receipt. No second copy was sent."});
+          state:"running",selectionApplied,verifiedSelection:verified,message:"Delivery confirmed from the existing browser receipt. No second copy was sent."});
         if(browserResult.nativeTurnId)await this.send({version:1,kind:"turn.started",requestId:payload.requestId,threadId:payload.threadId,
-          nativeTurnId:browserResult.nativeTurnId,deliveryState:"running",selectionApplied:false});
+          nativeTurnId:browserResult.nativeTurnId,deliveryState:"running",selectionApplied,verifiedSelection:verified});
         await this.sendChatSnapshot(payload.threadId); return;
       } catch { /* Unconfirmed stays uncertain; a status check must never dispatch text. */ }
     }
@@ -562,12 +565,17 @@ export class BridgeService {
             if(effortIndex!==undefined&&effortIndex>=(options?.efforts.length??0))throw new Error("That reasoning level is not offered by this cloud chat. Nothing was sent.");
             const browserResult=await this.desktopCloud.submitText(payload.threadId,payload.requestId,payload.text,false,
               {...(model!==undefined?{model}:{}),...(effortIndex!==undefined?{effortIndex}:{})});
+            const verified=browserResult.verifiedSelection;
+            const selectionApplied=Boolean(verified && (model===undefined||verified.model===model) &&
+              (effortIndex===undefined||verified.effortIndex===effortIndex));
             this.watchedThreadId=payload.threadId;
             this.watchAcceptedAt=Date.now(); this.watchExpiresAt=this.watchAcceptedAt+CHAT_WATCH_TTL_MS;
             await this.send({version:1,kind:"turn.accepted",requestId:payload.requestId,threadId:payload.threadId,
-              state:"running",selectionApplied:false,message:"Message appeared in the connected browser chat. Its current model settings are kept."});
+              state:"running",selectionApplied,verifiedSelection:verified,
+              message:verified?`Sent with ${verified.model}${verified.effortLabel?` · ${verified.effortLabel}`:""}, verified in the browser before sending.`:
+                "Message appeared in the connected browser chat; model settings were not independently verified."});
             if(browserResult.nativeTurnId)await this.send({version:1,kind:"turn.started",requestId:payload.requestId,threadId:payload.threadId,
-              nativeTurnId:browserResult.nativeTurnId,deliveryState:"running",selectionApplied:false});
+              nativeTurnId:browserResult.nativeTurnId,deliveryState:"running",selectionApplied,verifiedSelection:verified});
             await this.sendChatSnapshot(payload.threadId);
             return;
           }

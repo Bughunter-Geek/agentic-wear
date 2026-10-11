@@ -91,7 +91,8 @@ export const cloudSendSchema = z.object({version:z.literal(1), kind:z.literal("s
 export type CloudSend = z.infer<typeof cloudSendSchema>;
 export const cloudSendResultSchema = z.object({requestId:id, threadId:id,
   outcome:z.enum(["accepted","rejected","uncertain"]), messageId:id.optional(), nativeTurnId:id.optional(),
-  message:z.string().max(400)}).strict();
+  message:z.string().max(400),
+  verifiedSelection:z.object({model:cloudModelField,effortIndex:z.number().int().min(0).max(9).optional(),effortLabel:z.string().min(1).max(64).optional()}).strict().optional()}).strict();
 export type CloudSendResult = z.infer<typeof cloudSendResultSchema>;
 const frame = { version: z.literal(1), id, streamId: z.string().uuid() };
 export const cloudFrameSchema = z.discriminatedUnion("kind", [

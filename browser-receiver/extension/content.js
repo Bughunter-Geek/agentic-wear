@@ -63,7 +63,7 @@
   // ---- Model / reasoning selection (Codex cloud pages only; Dot never uses any of this) ----
   // Radix menu structure observed on the real page; see the build 89 contract.
   const MODEL_NAME=/^[A-Za-z0-9_.:/ -]{1,64}$/;
-  let models=[],efforts=[],maxEffort=null,lastLearnAt=0,lastInteraction=0,selfDriving=false,learning=null;
+  let lastModelControl=null,catalogModel=null,models=[],efforts=[],maxEffort=null,lastLearnAt=0,lastInteraction=0,selfDriving=false,learning=null;
   const LEARN_REFRESH_MS=30*60*1000,LEARN_QUIET_MS=10000;
   // Real user activity in the page (our own synthetic events are ignored via selfDriving).
   for(const type of ['pointerdown','pointermove','mousedown','keydown','wheel','touchstart'])
@@ -74,13 +74,19 @@
   const text=e=>norm(e.innerText||e.textContent);
   function modelButton(){
     if(isDot)return null;
-    const all=[...document.querySelectorAll('main button[aria-haspopup=menu]')];
-    if(all.length<=1)return all[0]||null;
+    if(openMenuEl()&&lastModelControl?.isConnected)return lastModelControl;
+    const candidate=b=>{
+      const name=b.getAttribute('aria-label')||visiblePair(b)?.model||text(b);
+      return /^(Loading model|GPT(?:-|\s)|Daybreak(?:\s|$)|Auto(?:\s|$))/i.test(name)||models.some(m=>name===m||name.startsWith(m+' '));
+    };
+    // The model popover can be portalled outside main. Permission menus beside
+    // the composer are not model controls, even when they are the only menu.
     for(let el=editor();el&&el!==document.body;el=el.parentElement){
-      const near=[...el.querySelectorAll('button[aria-haspopup=menu]')];
-      if(near.length===1)return near[0];if(near.length>1)break;
+      const near=[...el.querySelectorAll('button, [role=button]')].filter(candidate);
+      if(near.length===1)return lastModelControl=near[0];if(near.length>1)return null;
     }
-    return all.find(b=>/^(Loading model|GPT|Daybreak)/i.test(text(b)))||null;
+    const all=[...document.querySelectorAll('button, [role=button]')].filter(candidate);
+    return all.length===1?(lastModelControl=all[0]):null;
   }
   function parseModelText(value){
     const known=[...models].sort((a,b)=>b.length-a.length).find(m=>value===m||value.startsWith(m+' '));
@@ -124,12 +130,13 @@
   function readCurrent(){
     const button=modelButton();if(!button)return null;
     const value=text(button);if(!value||/^Loading model/i.test(value))return null;
-    const pair=visiblePair(button);
+    const explicit=button.getAttribute('aria-label');
+    const pair=explicit&&/^(GPT(?:-|\s)|Daybreak(?:\s|$)|Auto(?:\s|$))/i.test(explicit)?parseModelText(norm(explicit)):visiblePair(button);
     if(pair&&/^Loading/i.test(pair.model))return null;
     const parsed=pair||parseModelText(value);
     if(!MODEL_NAME.test(parsed.model))return null;
     const label=parsed.label.slice(0,64);
-    return {model:parsed.model,label,index:effortIndexOf(label)};
+    return {model:parsed.model,label,index:catalogModel===parsed.model?effortIndexOf(label):null};
   }
   const openMenuEl=()=>document.querySelector('[role=menu][data-state=open]');
   const radioName=r=>r.getAttribute('aria-label')||text(r);
@@ -143,16 +150,56 @@
     const status=m?{...parseModelText(m[1]),pos:Number(m[2]),total:Number(m[3])}:null;
     return {slider:sliderState,radios,model:selected?radioName(selected):(status?status.model:null),status};
   }
+  // The animated composer label keeps its ordered label catalogue in sibling
+  // leaves, including unsupported endpoints. Align it to the menu's CURRENT
+  // slider position and range; never assume global labels equal model options.
+  function effortLabels(button,current,slider){
+    if(!button||!current?.label||!slider||!Number.isInteger(slider.now)||slider.min!==0)return null;
+    const count=slider.max+1,candidates=[];
+    for(const parent of button.querySelectorAll('*')){
+      const children=[...parent.children];
+      if(children.length<count||children.length>12)continue;
+      const labels=children.map(e=>norm(e.textContent));
+      if(labels.some(l=>!l||l.length>64)||new Set(labels).size!==labels.length)continue;
+      const at=labels.indexOf(current.label),offset=at-slider.now;
+      if(at<0||offset<0||offset+count>labels.length)continue;
+      candidates.push(labels.slice(offset,offset+count));
+    }
+    // Some animation versions wrap each label in several spans rather than
+    // keeping sibling leaves. Match an unambiguous ordered leaf window too.
+    const leaves=[...button.querySelectorAll('*')].filter(e=>!e.children.length).map(e=>norm(e.textContent)).filter(Boolean);
+    for(let at=0;at<leaves.length;at++){
+      if(leaves[at]!==current.label)continue;
+      const offset=at-slider.now,labels=leaves.slice(offset,offset+count);
+      if(offset<0||labels.length!==count||new Set(labels).size!==count)continue;
+      if(labels.some(l=>l===current.model||/^Select\b/i.test(l)||!/^[A-Za-z][A-Za-z -]{0,63}$/.test(l)))continue;
+      candidates.push(labels);
+    }
+    const unique=[...new Set(candidates.map(x=>JSON.stringify(x)))];
+    return unique.length===1?JSON.parse(unique[0]):null;
+  }
   // Remember everything an open menu shows. Read-only: never changes a setting.
   function learnFromMenu(menu){
     const state=readMenu(menu);
     for(const r of state.radios){const name=radioName(r);if(MODEL_NAME.test(name)&&!/^Default/i.test(name)&&!models.includes(name))models.push(name);}
     if(state.model&&MODEL_NAME.test(state.model)&&!/^Default/i.test(state.model)&&!models.includes(state.model))models.push(state.model);
     models=models.slice(-24);
+    const buttonCurrent=readCurrent();
+    // Opening the real menu changes the button label to "Select effort".
+    // Its selected radio/status is authoritative while the popover is open.
+    const current=state.model?{model:state.model,label:state.status?.label||(buttonCurrent?.model===state.model?buttonCurrent.label:'')}:buttonCurrent;
+    if(current&&catalogModel!==current.model){catalogModel=current.model;efforts=[];maxEffort=null;aliases.clear();}
     if(state.slider&&Number.isFinite(state.slider.max)&&state.slider.max>=0&&state.slider.max<=9)maxEffort=state.slider.max;
     if(state.status&&state.status.label&&state.status.pos>=1&&state.status.pos<=10)efforts[state.status.pos-1]=state.status.label;
-    const current=readCurrent();
-    if(current&&current.label&&state.slider&&Number.isFinite(state.slider.now))aliases.set(current.label.toLowerCase(),state.slider.now);
+    const labels=effortLabels(modelButton(),current,state.slider);
+    if(labels){efforts=labels;labels.forEach((label,i)=>aliases.set(label.toLowerCase(),i));}
+    if(current&&current.label&&state.slider&&Number.isInteger(state.slider.now)){
+      const known=aliases.get(current.label.toLowerCase());
+      if(known===undefined||known===state.slider.now){
+        aliases.set(current.label.toLowerCase(),state.slider.now);
+        efforts[state.slider.now]=current.label;
+      }
+    }
     return state;
   }
   async function openMenu(){
@@ -209,6 +256,18 @@
         if(!openMenuEl()&&!await openMenu())return fail();
         menu=openMenuEl();state=learnFromMenu(menu);
         if(state.model!==want.model)return fail();
+        // Capture this model's own closed-button catalogue before changing
+        // effort. A different model can expose a different range/label mapping.
+        const baselineSlider=state.slider;
+        if(!await closeMenu())return false;
+        await wait(150);
+        const baseline=readCurrent();
+        if(!baseline||baseline.model!==want.model)return false;
+        const labels=effortLabels(modelButton(),baseline,baselineSlider);
+        if(labels){efforts=labels;labels.forEach((label,i)=>aliases.set(label.toLowerCase(),i));}
+        if(!await openMenu())return false;
+        menu=openMenuEl();state=learnFromMenu(menu);
+        if(state.model!==want.model)return fail();
       }
       if(want.effortIndex!==undefined){
         const slider=menu.querySelector('[role=slider]');
@@ -232,11 +291,11 @@
       if(!current)return false;
       if(want.model!==undefined&&current.model!==want.model)return false;
       if(want.effortIndex!==undefined){
-        if(finalSlider!==want.effortIndex)return false;
+        if(finalSlider!==want.effortIndex||!current.label)return false;
         const known=current.label?aliases.get(current.label.toLowerCase()):undefined;
         if(known!==undefined&&known!==want.effortIndex)return false;
         if(known===undefined&&current.label){
-          if(statusLabel&&current.label.toLowerCase()!==statusLabel.toLowerCase()&&effortIndexOf(current.label)!==null)return false;
+          if(!statusLabel||current.label.toLowerCase()!==statusLabel.toLowerCase())return false;
           aliases.set(current.label.toLowerCase(),want.effortIndex);
         }
       }
@@ -246,17 +305,24 @@
   function modelFields(){
     if(isDot)return {};
     const current=readCurrent();
+    const same=current&&catalogModel===current.model;
+    // The animated catalogue is mounted only while the menu is CLOSED.
+    // Align it using the range/index learned from the menu, after it closes.
+    if(same&&!openMenuEl()&&current.index!==null&&maxEffort!==null){
+      const labels=effortLabels(modelButton(),current,{min:0,max:maxEffort,now:current.index});
+      if(labels){efforts=labels;labels.forEach((label,i)=>aliases.set(label.toLowerCase(),i));}
+    }
     return {
-      ...(current?{model:current.model,effort:{label:current.label||'Unknown',...(current.index!==null?{index:current.index}:{}),...(maxEffort!==null?{max:maxEffort}:{})}}:{}),
+      ...(current?{model:current.model,effort:{label:current.label||'Unknown',...(current.index!==null?{index:current.index}:{}),...(same&&maxEffort!==null?{max:maxEffort}:{})}}:{}),
       ...(models.length?{models:[...models]}:{}),
-      ...(maxEffort!==null?{efforts:Array.from({length:maxEffort+1},(_,i)=>efforts[i]||'')}:{}),
+      ...(same&&maxEffort!==null?{efforts:Array.from({length:maxEffort+1},(_,i)=>efforts[i]||'')}:{}),
     };
   }
   // Read-only learning pass: only when nobody is looking at or using this page.
   function canLearn(){
     if(isDot||sending||learning||selfDriving||openMenuEl())return false;
     const now=Date.now();
-    if(lastLearnAt&&now-lastLearnAt<LEARN_REFRESH_MS)return false;
+    if(lastLearnAt&&now-lastLearnAt<LEARN_REFRESH_MS&&catalogModel===readCurrent()?.model)return false;
     if(!(document.visibilityState==='hidden'||!document.hasFocus()))return false;
     if(now-lastInteraction<LEARN_QUIET_MS)return false;
     return !blocked()&&!!modelButton()&&!!readCurrent();
@@ -286,7 +352,8 @@
     timer=setTimeout(check,Math.max(0,deadline-Date.now()));check();if(done)observer.disconnect();
   });}
   async function send(command){
-    const result=(outcome,message,messageId,nativeTurnId)=>({requestId:command.requestId,threadId:command.threadId,outcome,message,...(messageId?{messageId}:{}),...(nativeTurnId?{nativeTurnId}:{})});
+    let verifiedSelection;
+    const result=(outcome,message,messageId,nativeTurnId)=>({requestId:command.requestId,threadId:command.threadId,outcome,message,...(messageId?{messageId}:{}),...(nativeTurnId?{nativeTurnId}:{}),...(outcome==='accepted'&&verifiedSelection?{verifiedSelection}:{})});
     if(command.url!==TARGET||command.documentId!==documentId||Date.now()>=command.expiresAt||blocked())return result('rejected','The browser chat changed or is unavailable.');
     if(learning)await learning;
     if(sending||stopped())return result('rejected','The chat is busy. Wait for the current response.');
@@ -318,6 +385,14 @@
         return buttons.length===1?buttons[0]:null;
       },Math.min(command.expiresAt,Date.now()+3000));
       if(!button||Date.now()>=command.expiresAt||blocked()||stopped()||clean(composer)!==command.text.trim())return result('rejected','The send control was unavailable; text remains in the browser draft.');
+      // Re-read immediately before Send: a concurrent desktop change must not
+      // turn a verified Watch choice into a send under another configuration.
+      if(!isDot){
+        const current=readCurrent();
+        if((want.model!==undefined&&current?.model!==want.model)||(want.effortIndex!==undefined&&current?.index!==want.effortIndex))
+          return result('rejected','The cloud model settings changed before sending. Your draft is kept.');
+        if(current)verifiedSelection={model:current.model,...(current.index!==null?{effortIndex:current.index}:{}),...(current.label?{effortLabel:current.label}:{})};
+      }
       clicked=true;button.click();
       const posted=await waitFor(()=>{
         if(blocked()||clean(composer))return null;

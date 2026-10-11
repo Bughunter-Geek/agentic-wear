@@ -8,7 +8,7 @@ const dotUrl='https://chatgpt.com/dots/home',ns='fa24ed5a57dc8199b97f68f7d0098d1
 const MODELS=['GPT-6.1 Sol','GPT-6 Astra','GPT-6 Sol','Daybreak Blue'],LABELS=['Minimal','Low','Medium','High','Max'];
 const tick=ms=>new Promise(r=>setTimeout(r,ms));
 // A fake Radix-like model menu built from the structure observed on the real page.
-function harness({realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
+function harness({openButtonLabel=false,noPopupAttribute=false,outsideMain=false,realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
  const state={model,effort,opens:0,clicks:0,sliderKeys:[]};
  const composerHtml=dot?'<div class="ProseMirror" contenteditable="true" aria-label="Message"></div>':'<div class="ProseMirror" contenteditable="true" data-codex-composer="true"></div>';
  const dotRow=(id,role,text)=>`<article class="message-row ${role==='user'?'self':''}" data-message-id="${ns}~${ns}~CalpicoMessage~Sentinel_${id}"><div class="message-body">${text}<div class="message-inline-actions"><button data-action="reply">Reply</button></div></div></article>`;
@@ -22,14 +22,17 @@ function harness({realButton=false,longButton=false,hidden=false,focused=true,in
  w.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();},onMessage:{addListener:x=>{listener=x;},removeListener(){}}}};
  d.execCommand=(_n,_u,t)=>{d.querySelector('.ProseMirror').textContent=t;return true;};
  const button=d.getElementById('mb');
+ if(noPopupAttribute)button.removeAttribute('aria-haspopup');
+ if(outsideMain){d.body.append(button);const permission=d.createElement('button');permission.setAttribute('aria-haspopup','menu');permission.textContent='Ask for approval';d.querySelector('main').append(permission);}
  const paint=()=>{
   if(realButton){const H='style="opacity:0"';button.innerHTML=`<span><span><span><span><span><span ${H}><span ${H}>Select effort</span></span><span><span><span><span><span>${state.model}</span></span></span></span></span><span><span class="sr-only">${LABELS[state.effort]}</span><span><span><span>${['None',...LABELS,'Persistent'].map(l=>`<span ${H}>${l}</span>`).join('')}</span></span></span></span></span></span></span></span><svg ${H}><use></use></svg>`;return;}
   if(longButton){button.textContent=`${state.model} ${'Very long label '.repeat(8)}`;return;}
   button.textContent=buttonStuck?`${MODELS[0]} ${LABELS[2]}`:`${state.model} ${LABELS[state.effort]}`;};paint();
  const menu=()=>d.querySelector('[role=menu]');
- const close=()=>{menu()?.remove();};
+ const close=()=>{menu()?.remove();if(openButtonLabel)paint();};
  const open=()=>{
   if(menu())return;state.opens++;
+  if(openButtonLabel)button.textContent='Select effort';
   const m=d.createElement('div');m.setAttribute('role','menu');m.dataset.state='open';
   const radios=MODELS.map(n=>`<div role="menuitemradio" aria-checked="${n===state.model}" ${n===state.model?'data-model-selected="true"':''}>${n}</div>`).join('');
   m.innerHTML=`<div role="menuitem" aria-label="Select model" data-model-picker-view-toggle="true">${state.model}${LABELS[state.effort]}</div>
@@ -43,7 +46,7 @@ function harness({realButton=false,longButton=false,hidden=false,focused=true,in
   slider.addEventListener('keydown',e=>{
    state.sliderKeys.push(e.key);if(stuck)return;
    if(e.key==='ArrowRight')state.effort=Math.min(4,state.effort+1);else if(e.key==='ArrowLeft')state.effort=Math.max(0,state.effort-1);else if(e.key==='Home')state.effort=0;
-   slider.setAttribute('aria-valuenow',String(state.effort));paint();
+   slider.setAttribute('aria-valuenow',String(state.effort));m.querySelector('[role=status]').textContent=`${state.model} ${LABELS[state.effort]}, ${state.effort+1} of 5.`;paint();
   });
  };
  button.addEventListener('pointerdown',open);
@@ -105,8 +108,16 @@ describe('cloud model and reasoning selection',()=>{
  it('applies model and effort, verifies them, then sends once',async()=>{
   const h=harness();try{
    const r=await h.send({model:'GPT-6 Astra',effortIndex:4});
-   assert.equal(r.outcome,'accepted',r.message);assert.equal(h.state.model,'GPT-6 Astra');assert.equal(h.state.effort,4);
+   assert.equal(r.outcome,'accepted',r.message);assert.deepEqual(JSON.parse(JSON.stringify(r.verifiedSelection)),{model:'GPT-6 Astra',effortIndex:4,effortLabel:'Max'});assert.equal(h.state.model,'GPT-6 Astra');assert.equal(h.state.effort,4);
    assert.equal(h.state.clicks,1);assert.equal(h.menuOpen(),false);
+  }finally{h.stop();}
+ });
+ it('verifies a new model when its menu calls Low Standard, using the closed-button labels',async()=>{
+  const h=harness({realButton:true,openButtonLabel:true});try{
+   const r=await h.send({model:'GPT-6 Astra',effortIndex:1});
+   assert.equal(r.outcome,'accepted',r.message);
+   assert.deepEqual(JSON.parse(JSON.stringify(r.verifiedSelection)),{model:'GPT-6 Astra',effortIndex:1,effortLabel:'Low'});
+   assert.equal(h.state.clicks,1);
   }finally{h.stop();}
  });
  it('only changes the effort when the model already matches, and changes nothing when already matching',async()=>{
@@ -142,6 +153,23 @@ describe('cloud model and reasoning selection',()=>{
  it('reads the real nested button structure (hidden label list + visible model/effort pair)',async()=>{
   const h=harness({realButton:true});try{await tick(150);
    assert.equal(h.last().model,'GPT-6.1 Sol');assert.equal(h.last().effort.label,'Medium');
+  }finally{h.stop();}
+ });
+ it('learns every supported name from the real button catalogue without cycling settings',async()=>{
+  const h=harness({realButton:true,hidden:true});try{await tick(900);
+   assert.deepEqual(h.last().efforts,LABELS);assert.deepEqual(h.state.sliderKeys,[]);
+   assert.equal(h.state.effort,2);assert.equal(h.last().effort.index,2);
+  }finally{h.stop();}
+ });
+ it('rejects a slider change if the composer still reports the old effort',async()=>{
+  const h=harness({buttonStuck:true});try{
+   const result=await h.send({effortIndex:4});
+   assert.equal(result.outcome,'rejected');assert.equal(h.state.clicks,0);
+  }finally{h.stop();}
+ });
+ it('finds a portalled model control and never treats Ask for approval as the model',async()=>{
+  const h=harness({openButtonLabel:true,noPopupAttribute:true,outsideMain:true,realButton:true,hidden:true});try{await tick(900);
+   assert.equal(h.last().model,'GPT-6.1 Sol');assert.deepEqual(h.last().efforts,LABELS);
   }finally{h.stop();}
  });
  it('never emits a model that is long or multi-line when the structure is not recognised',async()=>{
