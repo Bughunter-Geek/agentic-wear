@@ -32,6 +32,10 @@ export type SessionView = {
   /** Epoch milliseconds on the watch wire (native App Server threads use seconds). */
   updatedAt: number;
   status: "active" | "idle" | "error" | "notLoaded";
+  /** Needs the user: an unanswered Codex question or a pending approval. */
+  attention?: "question" | "approval";
+  /** Browser-route chats only; absent for Mac chats. */
+  source?: "cloud" | "dot";
   ownedByWear: boolean;
   canAcceptDirectInput: boolean;
   watchReady: boolean;
@@ -311,6 +315,13 @@ export class AppServerClient {
   // when another client (e.g. Codex desktop) finishes the turn.
   private readonly hotThreads = new Map<string, number>();
   private readonly emittedQuestionEvents = new Set<string>();
+  // Priority-list evidence (ids and timings only). The desktop app's chats are
+  // `notLoaded` here, so running state comes from the monitor's inProgress turn.
+  private readonly runningTurns = new Map<string, { turnId: string; seenAt: number }>();
+  private readonly questionAttention = new Map<string, { itemId: string; emittedAt: number; turnId: string }>();
+  private readonly derivedSignatures = new Map<string, string>();
+  private sessionsChangedHandler: () => void = () => {};
+  private sessionsChangedTimer: NodeJS.Timeout | null = null;
   private questionHandler: (event: QuestionEvent) => Promise<void> = () => Promise.resolve();
   private readonly ephemeralRevisions = new Map<string, EphemeralRevision>();
   private readonly chatCaches = new Map<string, CachedChat>();
@@ -776,6 +787,7 @@ export class AppServerClient {
     let activeFollowUpMode: ActiveFollowUpMode | null = null;
     let previousTurnId: string | null = null;
     const messageId = clientUserMessageId ?? randomUUID();
+    if (threadId !== null) for (const itemId of questionReplyItemIds(text)) this.clearQuestionAttention(threadId, itemId);
     let serviceTier: string | undefined;
     if (threadId === null) {
       serviceTier = await this.serviceTierForSubmission(fastMode, model, null, defaultCwd);
@@ -1440,6 +1452,57 @@ export class AppServerClient {
     this.questionHandler = handler;
   }
 
+  /** Called (debounced ~1 s) when a chat's derived status or attention changes. */
+  setSessionsChangedHandler(handler: () => void): void {
+    this.sessionsChangedHandler = handler;
+  }
+
+  private isRunning(threadId: string): boolean {
+    const running = this.runningTurns.get(threadId);
+    return (running !== undefined && Date.now() - running.seenAt < RUNNING_TURN_STALE_MS) || this.controlledTurnIds.has(threadId);
+  }
+
+  private questionPending(threadId: string): boolean {
+    const question = this.questionAttention.get(threadId);
+    if (!question) return false;
+    const cached = this.chatCaches.get(threadId)?.messages;
+    return Date.now() - question.emittedAt <= QUESTION_ATTENTION_TTL_MS &&
+      !(cached && this.isQuestionAnswered(cached, question.itemId));
+  }
+
+  private attentionFor(threadId: string): SessionView["attention"] | undefined {
+    for (const approval of this.approvals.values()) if (approval.threadId === threadId) return "approval";
+    return this.questionPending(threadId) ? "question" : undefined;
+  }
+
+  /** Re-derive status/attention for a chat; schedule one quiet sessions refresh when it changed. */
+  private noteDerivedState(threadId: string): void {
+    if (this.questionAttention.has(threadId) && !this.questionPending(threadId)) this.questionAttention.delete(threadId);
+    const signature = `${this.isRunning(threadId) ? "active" : "-"}|${this.attentionFor(threadId) ?? "-"}`;
+    const previous = this.derivedSignatures.get(threadId) ?? "-|-";
+    if (signature === previous) return;
+    if (signature === "-|-") this.derivedSignatures.delete(threadId); else this.derivedSignatures.set(threadId, signature);
+    if (this.sessionsChangedTimer) return;
+    this.sessionsChangedTimer = setTimeout(() => {
+      this.sessionsChangedTimer = null;
+      try { this.sessionsChangedHandler(); } catch { /* refresh is best effort */ }
+    }, SESSIONS_CHANGED_DEBOUNCE_MS);
+    this.sessionsChangedTimer.unref();
+  }
+
+  private recordRunningTurn(threadId: string, turnId: string | null): void {
+    if (turnId === null) this.runningTurns.delete(threadId);
+    else this.runningTurns.set(threadId, { turnId, seenAt: Date.now() });
+    this.noteDerivedState(threadId);
+  }
+
+  private clearQuestionAttention(threadId: string, itemId?: string): void {
+    const question = this.questionAttention.get(threadId);
+    if (!question || (itemId !== undefined && question.itemId !== itemId)) return;
+    this.questionAttention.delete(threadId);
+    this.noteDerivedState(threadId);
+  }
+
   markHot(threadId: string, forMs = HOT_THREAD_MS): void {
     // Re-insert so the map stays ordered oldest-first by last marking.
     this.hotThreads.delete(threadId);
@@ -1514,6 +1577,7 @@ export class AppServerClient {
     this.write({ id: pending.rpcId, result });
     this.resolveCachedPermission(approvalId);
     this.approvals.delete(approvalId);
+    this.noteDerivedState(pending.threadId);
   }
 
   async close(): Promise<void> {
@@ -1618,6 +1682,7 @@ export class AppServerClient {
               questions: asked.questions,
               completedAtMs: event.completedAtMs,
               source: "notification",
+              turnId: event.turnId,
               title: async () => {
                 const thread = this.threadCache.get(event.threadId) ?? await this.readThread(event.threadId, true);
                 return isTopLevelUserThread(thread) ? threadTitle(thread) : null;
@@ -1632,6 +1697,7 @@ export class AppServerClient {
     if (terminal) {
       const event = terminal;
       this.turnStageHandler?.(event.threadId, "turnCompleted");
+      if (this.runningTurns.get(event.threadId)?.turnId === event.turn.id) this.recordRunningTurn(event.threadId, null);
       const shouldRelease = this.controlledTurnIds.get(event.threadId) === event.turn.id &&
         !this.realtimeThreads.has(event.threadId);
       const internalCancellation = isInternalCancellationFailure(event.turn.status, event.turn.error?.message);
@@ -1671,7 +1737,7 @@ export class AppServerClient {
             ? sanitizePublicText(event.turn.error?.message ?? "The agent stopped with an error.")
             : "The agent was interrupted before finishing.";
         const title = threadTitle(thread);
-        await this.emitCompletionQuestion(event.threadId, title, answer, "notification");
+        await this.emitCompletionQuestion(event.threadId, title, answer, "notification", { turnId: event.turn.id });
         await this.emitTerminal({
           eventId: `turn:${event.threadId}:${event.turn.id}:${event.turn.status}`,
           kind,
@@ -1723,6 +1789,7 @@ export class AppServerClient {
           if (String(approval.rpcId) === String(resolved.data.requestId)) {
             this.resolveCachedPermission(approvalId);
             this.approvals.delete(approvalId);
+            this.noteDerivedState(approval.threadId);
           }
         }
       }
@@ -1760,6 +1827,7 @@ export class AppServerClient {
           };
       this.approvals.set(approvalId, pending);
       if (this.approvals.size > 100) this.approvals.delete(this.approvals.keys().next().value ?? "");
+      this.noteDerivedState(pending.threadId);
     }
     const detail = sanitizePublicText(
       parsed.data.reason ?? parsed.data.command ??
@@ -2100,11 +2168,13 @@ export class AppServerClient {
     title: string,
     answer: FinalAnswerInfo | null,
     source: "notification" | "monitor",
+    tracking: { turnId: string; track?: boolean } | null = null,
   ): Promise<void> {
     if (!answer?.questions || !answer.itemId) return;
     try {
       await this.emitQuestion({ threadId, itemId: answer.itemId, questions: answer.questions,
-        completedAtMs: answer.completedAtMs, source, title: () => Promise.resolve(title) });
+        completedAtMs: answer.completedAtMs, source, title: () => Promise.resolve(title),
+        ...(tracking ? { turnId: tracking.turnId, ...(tracking.track === false ? { track: false } : {}) } : {}) });
     } catch (error) {
       console.error(JSON.stringify({ level: "error", message: "question event skipped", error: safeError(error) }));
     }
@@ -2118,6 +2188,10 @@ export class AppServerClient {
     completedAtMs: number | undefined;
     source: "notification" | "monitor" | "poll";
     title: () => Promise<string | null>;
+    /** Turn that holds the question; enables the Priority "question" attention. */
+    turnId?: string;
+    /** False when a newer turn already exists in the chat (the question is history). */
+    track?: boolean;
   }): Promise<void> {
     const eventId = `question:${input.threadId}:${input.itemId}`;
     if (this.emittedQuestionEvents.has(eventId)) return;
@@ -2129,6 +2203,10 @@ export class AppServerClient {
     const title = await input.title();
     if (title === null) return;
     this.rememberQuestionEvent(eventId);
+    if (input.turnId !== undefined && input.track !== false) {
+      this.questionAttention.set(input.threadId, { itemId: input.itemId, emittedAt: Date.now(), turnId: input.turnId });
+      this.noteDerivedState(input.threadId);
+    }
     const event: QuestionEvent = {
       eventId,
       kind: "question.request",
@@ -2146,6 +2224,7 @@ export class AppServerClient {
       await this.questionHandler(event);
     } catch (error) {
       this.emittedQuestionEvents.delete(eventId);
+      this.clearQuestionAttention(input.threadId, input.itemId);
       throw error;
     }
   }
@@ -2178,6 +2257,7 @@ export class AppServerClient {
       });
       const answered = new Set(entries.flatMap(({ item }) =>
         item.type === "userMessage" ? questionReplyItemIds(rawUserItemText(item)) : []));
+      for (const itemId of answered) this.clearQuestionAttention(session.id, itemId);
       for (const entry of entries.reverse()) {
         const { item } = entry;
         if (item.type !== "agentMessage" || typeof item.id !== "string") continue;
@@ -2189,6 +2269,7 @@ export class AppServerClient {
           questions: asked.questions,
           completedAtMs: entry.completedAtMs ?? entry.startedAtMs,
           source: "poll",
+          turnId,
           title: () => Promise.resolve(session.title),
         });
       }
@@ -2227,6 +2308,12 @@ export class AppServerClient {
     const allTurns = turnListResponseSchema.parse(raw).data;
     // Codex questions arrive mid-turn: look inside the newest running turn of a chat we already poll.
     const running = allTurns.find((turn) => turn.status === "inProgress");
+    this.recordRunningTurn(session.id, running?.id ?? null);
+    // A newer turn than the one that asked means the question was answered or abandoned.
+    const newest = allTurns[0];
+    const asked = this.questionAttention.get(session.id);
+    if (asked && newest && newest.id !== asked.turnId) this.clearQuestionAttention(session.id);
+    else this.noteDerivedState(session.id); // picks up expiry and answers seen in the chat cache
     if (running) await this.scanRunningTurnQuestions(session, running.id);
     const turns = allTurns
       .filter((turn) => turn.status !== "inProgress" && isTerminalNewerThan(turn.completedAt, newerThanMs))
@@ -2252,7 +2339,8 @@ export class AppServerClient {
         : turn.status === "failed"
           ? sanitizePublicText(turn.error?.message ?? "The agent stopped with an error.")
           : "The agent was interrupted before finishing.";
-      await this.emitCompletionQuestion(session.id, session.title, answer, "monitor");
+      await this.emitCompletionQuestion(session.id, session.title, answer, "monitor",
+        { turnId: turn.id, track: newest?.id === turn.id });
       await this.emitTerminal({
         eventId: `turn:${session.id}:${turn.id}:${turn.status}`,
         kind,
@@ -2311,13 +2399,16 @@ export class AppServerClient {
   }
 
   private sessionView(thread: CodexThread): SessionView {
+    const attention = this.attentionFor(thread.id);
     return {
       id: thread.id,
       ...(typeof thread.model === "string" ? { model: thread.model } : {}),
       ...(typeof thread.modelProvider === "string" ? { modelProvider: thread.modelProvider } : {}),
       title: threadTitle(thread),
       updatedAt: thread.updatedAt * 1_000,
-      status: thread.status.type === "systemError" ? "error" : thread.status.type,
+      status: thread.status.type === "systemError" ? "error"
+        : thread.status.type !== "active" && this.isRunning(thread.id) ? "active" : thread.status.type,
+      ...(attention ? { attention } : {}),
       ownedByWear: this.watchOwnedThreadIds.has(thread.id),
       canAcceptDirectInput: thread.canAcceptDirectInput === true,
       watchReady: this.watchReadyThreads.has(thread.id),
@@ -2896,6 +2987,9 @@ const MAX_CACHED_CHATS = 20;
 const MAX_PENDING_PERMISSION_MESSAGES = 100;
 const MAX_TERMINAL_SCAN_TURNS = 8;
 const MAX_TERMINAL_SCAN_SESSIONS = 12;
+const RUNNING_TURN_STALE_MS = 60_000;
+const QUESTION_ATTENTION_TTL_MS = 24 * 60 * 60 * 1_000;
+const SESSIONS_CHANGED_DEBOUNCE_MS = 1_000;
 const HOT_THREAD_MS = 120_000;
 const HOT_SCAN_INTERVAL_MS = 1_000;
 const MAX_HOT_THREADS = 32;

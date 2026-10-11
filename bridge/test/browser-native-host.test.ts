@@ -36,3 +36,33 @@ it('native host persists send identity, checks uncertainty without resending, an
  await expect(receiver.submitText(threadId,'request-one','Hello')).resolves.toMatchObject({outcome:'accepted'});expect(commands).toHaveLength(1);
  await expect(receiver.submitText(threadId,'request-one','Different')).rejects.toThrow('different content');expect(commands).toHaveLength(1);
 });
+
+it('native host ignores unknown pages without exiting and creates dynamic cloud chats from local/<uuid> URLs',async()=>{
+ const home=await mkdtemp('/tmp/aw-native-dyn-');cleanup.push(()=>rm(home,{recursive:true,force:true}));
+ const dir=join(home,'.agentic-wear');await mkdir(dir,{mode:0o700});await chmod(home,0o700);
+ const pairing={pairId:'test',bridgePublicKey:'test',watchPublicKey:'test'},configured='01a1188b-a850-755b-91ec-717f6182900a',dynamic='01a1188b-a850-755b-91ec-717f6182900b';
+ const config={version:1,enabled:true,capability:'a'.repeat(64),pairBinding:desktopCloudPairBinding(pairing),targets:[{hostId:'durable',threadId:configured,title:'Test',sendEnabled:true}],reconcileMs:2000};
+ const path=join(dir,'desktop-cloud.json');await writeFile(path,JSON.stringify(config),{mode:0o600});
+ const receiver=new DesktopCloudReceiver(pairing,vi.fn(),vi.fn(),path,vi.fn());await receiver.start();cleanup.push(()=>receiver.close());
+ const key=JSON.parse(await readFile('../browser-receiver/extension/manifest.json','utf8')).key as string;
+ const id=createHash('sha256').update(Buffer.from(key,'base64')).digest('hex').slice(0,32).split('').map(c=>String.fromCharCode(97+parseInt(c,16))).join('');
+ const child=spawn(process.execPath,[resolve('../browser-receiver/native-host.bundle.mjs'),`chrome-extension://${id}/`],{env:{...process.env,HOME:home}});
+ cleanup.push(async()=>{if(child.exitCode===null&&child.signalCode===null){child.kill();await new Promise<void>(r=>child.once('exit',()=>r()));}});
+ let exited=false;child.once('exit',()=>{exited=true;});
+ const commands:Record<string,unknown>[]=[],statuses:string[]=[];let bytes=Buffer.alloc(0);
+ const write=(value:unknown)=>{const b=Buffer.from(JSON.stringify(value)),h=Buffer.alloc(4);h.writeUInt32LE(b.length);child.stdin.write(Buffer.concat([h,b]));};
+ child.stdout.on('data',(b:Buffer)=>{bytes=Buffer.concat([bytes,b]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);if(bytes.length<n+4)return;const value=JSON.parse(bytes.subarray(4,n+4).toString()) as Record<string,unknown>;bytes=bytes.subarray(n+4);
+  if(value.kind==='send'){commands.push(value);write({kind:'send-result',result:{requestId:value.requestId,threadId:value.threadId,outcome:'accepted',messageId:'m',message:'ok'}});}
+  else if(typeof value.status==='string')statuses.push(value.status);}});
+ const page=(url:string,extra:Record<string,unknown>={})=>({version:1,kind:'observation',url,documentId:randomUUID(),observedAt:Date.now(),extractionMs:1,visibility:'hidden',blocked:false,inputReady:true,turns:[{id:randomUUID(),prompts:[{id:'p',text:'hi'}],reply:'r',completed:true,evidence:'response-actions-without-stop'}],...extra});
+ write(page(`https://chatgpt.com/c/${dynamic}`));
+ await vi.waitFor(()=>expect(statuses).toContain('ignored'));expect(exited).toBe(false);
+ write(page(`https://chatgpt.com/local/${dynamic}?x=1`));
+ await vi.waitFor(()=>expect(statuses.filter(s=>s==='ignored')).toHaveLength(2));expect(exited).toBe(false);
+ write(page(`https://chatgpt.com/local/${dynamic}`,{title:'Dynamic task'}));
+ await vi.waitFor(()=>expect(receiver.sessions().find(s=>s.id===dynamic)?.watchReady).toBe(true));
+ expect(receiver.sessions().find(s=>s.id===dynamic)).toMatchObject({title:'Dynamic task',source:'cloud'});
+ await expect(receiver.submitText(dynamic,'req-dyn','Hello')).resolves.toMatchObject({outcome:'accepted'});
+ expect(commands).toHaveLength(1);expect(commands[0]).toMatchObject({threadId:dynamic,url:`https://chatgpt.com/local/${dynamic}`});
+ expect(exited).toBe(false);
+});

@@ -114,6 +114,8 @@ export class BridgeService {
       (threadId) => this.onAgentOutput(threadId),
     );
     this.appServer.setQuestionHandler((event) => this.onQuestion(event));
+    // Status/attention changes refresh the watch's session list (quiet sessions.snapshot, debounced in the client).
+    this.appServer.setSessionsChangedHandler(() => { void this.sendSessions().catch(() => undefined); });
     this.liveVoice = new LiveVoice(this.appServer, (payload) => this.send(payload));
     this.appServer.setRealtimeHandler((method, params) => this.liveVoice.notification(method, params));
     this.appServer.setTurnStageHandler((threadId, stage) => this.turnTiming.markThread(threadId, stage));

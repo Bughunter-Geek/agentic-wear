@@ -110,7 +110,7 @@ describe("bounded automatic existing-cloud-task text", () => {
     const seconds = 1_791_577_579;
     const f = await fixture(native([{ id: "recent", status: "completed", startedAt: seconds - 10, completedAt: seconds, items: [] }]));
     const local = Object.create(AppServerClient.prototype) as { sessionView: (thread: unknown) => SessionView };
-    Object.assign(local, { watchOwnedThreadIds: new Set(), watchReadyThreads: new Set() });
+    Object.assign(local, { watchOwnedThreadIds: new Set(), watchReadyThreads: new Set(), approvals: new Map(), questionAttention: new Map(), runningTurns: new Map(), controlledTurnIds: new Map(), chatCaches: new Map() });
     const normal = local.sessionView({ id: TARGET.threadId, name: "Normal", preview: "", updatedAt: seconds, status: { type: "idle" } });
     expect((await f.session.session())?.updatedAt).toBe(normal.updatedAt);
     expect(normal.updatedAt).toBe(seconds * 1000);

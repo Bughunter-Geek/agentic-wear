@@ -1,10 +1,13 @@
 import { z } from "zod";
-import { cloudEventId, type CloudSnapshot, type CloudTerminal } from "./desktop-cloud-protocol.js";
+import {
+  DEFAULT_CLOUD_CHAT_TITLE, MAX_DYNAMIC_CLOUD_CHATS, cloudEventId, localCloudChatThreadId,
+  type CloudSnapshot, type CloudTerminal,
+} from "./desktop-cloud-protocol.js";
 const turnId = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.:-]+$/u);
 export const browserObservationSchema = z.object({
   version:z.literal(1), kind:z.literal("observation"), url:z.string().max(300), documentId:z.string().uuid(),
   observedAt:z.number().int().nonnegative(), extractionMs:z.number().nonnegative().max(10000),
-  identity:z.string().max(128).optional(), inputReady:z.boolean().optional(),
+  identity:z.string().max(128).optional(), title:z.string().max(200).optional(), inputReady:z.boolean().optional(),
   visibility:z.enum(["visible","hidden"]),blocked:z.boolean(),
   turns:z.array(z.object({id:turnId,reply:z.string().max(4000),role:z.enum(["user","assistant"]).optional(), prompts:z.array(z.object({id:turnId,text:z.string().max(4000)}).strict()).max(10).optional(),completed:z.boolean(),
     evidence:z.literal("response-actions-without-stop").nullable()}).strict()).max(20),
@@ -20,6 +23,8 @@ export class BrowserCloudObserver {
   constructor(private readonly target:{threadId:string;title:string;url?:string;dotNamespace?:string;sendEnabled?:boolean},
     private readonly snapshot:(value:CloudSnapshot,at:number)=>void,
     private readonly terminal:(value:CloudTerminal)=>void){}
+  /** Dynamic chats follow the page title; the target object is owned by the registry. */
+  setTitle(title:string):void{(this.target as {title:string}).title=title;}
   accept(value:BrowserObservation):{baseline:boolean;turns:number;completed:number;pending:number} {
     const expected=this.target.url ?? `https://chatgpt.com/local/${this.target.threadId}`;
     if(this.target.dotNamespace && value.identity!==this.target.dotNamespace)throw new Error("Wrong Dot identity");
@@ -69,4 +74,43 @@ export class BrowserCloudObserver {
     for(const event of terminals)this.terminal(event);
     return {baseline,turns:value.turns.length,completed,pending:this.pending.size};
   }
+}
+
+export type CloudObserverTarget={threadId:string;title:string;url?:string;dotNamespace?:string;sendEnabled?:boolean};
+/**
+ * Observers for the configured targets plus, when enabled, one per open
+ * `https://chatgpt.com/local/<uuid>` tab (capped; the oldest-observed is evicted).
+ * Observations for any other URL resolve to null and are ignored by the host.
+ */
+export class BrowserCloudObservers {
+  private readonly fixed=new Map<string,BrowserCloudObserver>();
+  private readonly dynamic=new Map<string,{observer:BrowserCloudObserver;threadId:string;observedAt:number}>();
+  constructor(targets:readonly CloudObserverTarget[],private readonly auto:boolean,
+    private readonly snapshot:(value:CloudSnapshot,at:number)=>void,
+    private readonly terminal:(value:CloudTerminal)=>void,
+    private readonly onEvict:(url:string)=>void=()=>{}){
+    for(const target of targets)this.fixed.set(target.url??`https://chatgpt.com/local/${target.threadId}`,new BrowserCloudObserver(target,snapshot,terminal));
+  }
+  /** Observer for an observation, creating a dynamic one for a valid local chat URL; null when the page is not wanted. */
+  resolve(value:Pick<BrowserObservation,"url"|"title"|"observedAt">):BrowserCloudObserver|null{
+    const fixed=this.fixed.get(value.url);if(fixed)return fixed;
+    if(!this.auto)return null;
+    const threadId=localCloudChatThreadId(value.url);if(!threadId)return null;
+    const title=value.title?.trim()||DEFAULT_CLOUD_CHAT_TITLE;
+    let entry=this.dynamic.get(value.url);
+    if(!entry){
+      entry={observer:new BrowserCloudObserver({threadId,title,url:value.url,sendEnabled:true},this.snapshot,this.terminal),threadId,observedAt:value.observedAt};
+      this.dynamic.set(value.url,entry);
+      while(this.dynamic.size>MAX_DYNAMIC_CLOUD_CHATS){
+        let oldest:string|undefined;
+        for(const [url,candidate] of this.dynamic)if(url!==value.url&&(oldest===undefined||candidate.observedAt<this.dynamic.get(oldest)!.observedAt))oldest=url;
+        if(oldest===undefined)break;
+        this.dynamic.delete(oldest);this.onEvict(oldest);
+      }
+    }else{entry.observedAt=value.observedAt;entry.observer.setTitle(title);}
+    return entry.observer;
+  }
+  /** True when the thread is an open dynamic cloud chat (sends are allowed). */
+  isDynamicThread(threadId:string):boolean{for(const entry of this.dynamic.values())if(entry.threadId===threadId)return true;return false;}
+  get dynamicCount():number{return this.dynamic.size;}
 }

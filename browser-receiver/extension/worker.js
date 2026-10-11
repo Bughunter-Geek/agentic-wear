@@ -1,9 +1,23 @@
-const TARGETS=new Set(['https://chatgpt.com/local/01a1188b-a850-755b-91ec-717f6182900a','https://chatgpt.com/dots/home']);
+const DOT_URL='https://chatgpt.com/dots/home';
+const LOCAL_URL=/^https:\/\/chatgpt\.com\/local\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const isTarget=url=>typeof url==='string'&&(url===DOT_URL||LOCAL_URL.test(url));
 let native;
 const owners=new Map(),protectedTabs=new Set();
 function release(id){for(const [url,owner] of owners)if(owner.tabId===id)owners.delete(url);}
 chrome.tabs.onRemoved.addListener(id=>{protectedTabs.delete(id);release(id);});
-chrome.tabs.onUpdated.addListener((id,change)=>{if(change.url){release(id);if(protectedTabs.has(id)&&!TARGETS.has(change.url)){protectedTabs.delete(id);chrome.tabs.update(id,{autoDiscardable:true}).catch(()=>{});}}});
+chrome.tabs.onUpdated.addListener((id,change)=>{if(change.url){release(id);if(isTarget(change.url))inject(id);if(protectedTabs.has(id)&&!isTarget(change.url)){protectedTabs.delete(id);chrome.tabs.update(id,{autoDiscardable:true}).catch(()=>{});}}});
+// Attach content.js to matching tabs that were open before the extension (re)loaded, or that
+// navigated in-page to another chat. content.js guards against double injection itself.
+function inject(tabId){
+ try{chrome.scripting.executeScript({target:{tabId,frameIds:[0]},files:['content.js']}).catch(()=>{});}catch{}
+}
+function attachOpenTabs(){
+ try{chrome.tabs.query({url:['https://chatgpt.com/local/*',DOT_URL]}).then(tabs=>{
+  for(const tab of tabs)if(tab.id!==undefined&&isTarget(tab.url))inject(tab.id);
+ }).catch(()=>{});}catch{}
+}
+chrome.runtime.onInstalled.addListener(attachOpenTabs);
+chrome.runtime.onStartup.addListener(attachOpenTabs);
 function connect(){
  if(native)return native;
  const port=chrome.runtime.connectNative('io.github.sirbughunter.agenticwear.cloud');native=port;
@@ -23,7 +37,7 @@ function connect(){
  });return port;
 }
 chrome.runtime.onMessage.addListener((message,sender)=>{
- if(sender.id!==chrome.runtime.id||sender.frameId!==0||!TARGETS.has(sender.url)||!sender.tab||message?.url!==sender.url)return;
+ if(sender.id!==chrome.runtime.id||sender.frameId!==0||!isTarget(sender.url)||!sender.tab||message?.url!==sender.url)return;
  if(message.version!==1||message.kind!=='observation'||JSON.stringify(message).length>220000)return;
  const owner=owners.get(sender.url);if(owner&&owner.tabId!==sender.tab.id)return;
  owners.set(sender.url,{tabId:sender.tab.id,documentId:message.documentId});

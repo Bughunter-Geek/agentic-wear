@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { ChatSnapshot, SessionView } from "./app-server-client.js";
 import type { BridgeConfig } from "./config.js";
 import {
-  CLOUD_FRAME_BYTES, CLOUD_MAX_AGE_MS, cloudEventId, cloudFrameSchema, cloudHelloSchema,
+  CLOUD_FRAME_BYTES, CLOUD_MAX_AGE_MS, DEFAULT_CLOUD_CHAT_TITLE, DYNAMIC_CLOUD_OWN_MS, autoCloudChatsEnabled, cloudEventId, isCloudChatUuid, cloudFrameSchema, cloudHelloSchema,
   desktopCloudConfigPath, desktopCloudPairBinding, desktopCloudSocketPath, logDesktopCloud,
   readDesktopCloudConfig, readPrivateJson, writePrivateJson,
   type CloudSendResult, type CloudFrame, type CloudLog, type CloudSnapshot, type CloudTerminal, type DesktopCloudConfig,
@@ -40,6 +40,8 @@ export class DesktopCloudReceiver {
   private active: Socket | null = null;
   private sockets = new Set<Socket>();
   private snapshots = new Map<string, { snapshot: CloudSnapshot; observedAt: number }>();
+  // Open `chatgpt.com/local/<uuid>` tabs reported by the browser (not in the config allowlist).
+  private dynamicSeen = new Map<string, { title: string; seenAt: number }>();
   private receipts = new Set<string>();
   private socketInode: number | null = null;
   private closed = false;
@@ -47,7 +49,8 @@ export class DesktopCloudReceiver {
   async submitText(threadId:string, requestId:string, text:string, checkOnly=false):Promise<CloudSendResult> {
     const target=this.config?.targets.find(t=>t.threadId===threadId);
     const cached=this.snapshots.get(threadId);
-    if(!target?.sendEnabled || !this.active || (!checkOnly && !cached?.snapshot.inputReady) || !cached ||
+    const sendEnabled=target ? target.sendEnabled : this.isDynamic(threadId);
+    if(!sendEnabled || !this.active || (!checkOnly && !cached?.snapshot.inputReady) || !cached ||
        Date.now()-cached.observedAt > CLOUD_MAX_AGE_MS) throw new Error("Open the connected browser chat with an empty composer before sending. Your Watch draft is kept.");
     if(this.sends.has(requestId) || [...this.sends.values()].some(s=>s.threadId===threadId)) throw new Error("A Watch send is already in progress for this chat.");
     const socket=this.active;
@@ -88,20 +91,51 @@ export class DesktopCloudReceiver {
     this.socketInode = (await lstat(socketPath)).ino;
     this.log("listening", { targets: this.config.targets.length });
   }
-  owns(threadId: unknown): boolean { return this.config?.targets.some((target) => target.threadId === threadId) ?? false; }
+  /** A dynamic (non-config) cloud chat seen within DYNAMIC_CLOUD_OWN_MS while auto chats are enabled. */
+  private isDynamic(threadId: unknown): boolean {
+    if (typeof threadId !== "string" || !autoCloudChatsEnabled(this.config) || this.config?.targets.some((t) => t.threadId === threadId)) return false;
+    const seen = this.dynamicSeen.get(threadId);
+    return seen !== undefined && Date.now() - seen.seenAt <= DYNAMIC_CLOUD_OWN_MS;
+  }
+  private noteDynamic(threadId: string, title: string | null): void {
+    const previous = this.dynamicSeen.get(threadId);
+    this.dynamicSeen.delete(threadId);
+    this.dynamicSeen.set(threadId, { title: title?.trim() || previous?.title || DEFAULT_CLOUD_CHAT_TITLE, seenAt: Date.now() });
+    for (const [id, seen] of this.dynamicSeen) if (Date.now() - seen.seenAt > DYNAMIC_CLOUD_OWN_MS) this.dynamicSeen.delete(id);
+    while (this.dynamicSeen.size > 32) this.dynamicSeen.delete(this.dynamicSeen.keys().next().value!);
+  }
+  owns(threadId: unknown): boolean {
+    return (this.config?.targets.some((target) => target.threadId === threadId) ?? false) || this.isDynamic(threadId);
+  }
   sessions(): SessionView[] {
-    return (this.config?.targets ?? []).map((target) => {
+    const now = Date.now();
+    const fresh = (threadId: string) => { const cached = this.snapshots.get(threadId); return cached !== undefined && now - cached.observedAt < CLOUD_MAX_AGE_MS; };
+    const targets = (this.config?.targets ?? []).map((target) => {
       const cached = this.snapshots.get(target.threadId);
+      const ready = Boolean(target.sendEnabled && this.active && cached?.snapshot.inputReady && now-cached.observedAt<CLOUD_MAX_AGE_MS);
       return { id: target.threadId, title: target.title, updatedAt: cached?.observedAt ?? 0,
         status: this.active && cached ? cached.snapshot.status : "notLoaded",
-        ownedByWear: false, canAcceptDirectInput: Boolean(target.sendEnabled && this.active && cached?.snapshot.inputReady && Date.now()-cached.observedAt<CLOUD_MAX_AGE_MS), watchReady: Boolean(target.sendEnabled && this.active && cached?.snapshot.inputReady && Date.now()-cached.observedAt<CLOUD_MAX_AGE_MS) };
+        source: target.dotNamespace ? "dot" as const : "cloud" as const,
+        ownedByWear: false, canAcceptDirectInput: ready, watchReady: ready };
     });
+    // A dynamic chat is listed only while its tab keeps reporting (fresh snapshot).
+    const dynamic: SessionView[] = !this.active || !autoCloudChatsEnabled(this.config) ? [] : [...this.dynamicSeen.entries()]
+      .filter(([id]) => this.isDynamic(id) && fresh(id))
+      .map(([id, seen]) => {
+        const cached = this.snapshots.get(id)!;
+        const ready = Boolean(cached.snapshot.inputReady);
+        return { id, title: cached.snapshot.title.trim() || seen.title, updatedAt: cached.observedAt, status: cached.snapshot.status,
+          source: "cloud" as const, ownedByWear: false, canAcceptDirectInput: ready, watchReady: ready };
+      });
+    return [...targets, ...dynamic];
   }
   snapshot(threadId: string): ChatSnapshot {
     const target = this.config?.targets.find((entry) => entry.threadId === threadId);
-    if (!target) throw new Error("Cloud chat is not in the receive-only allowlist");
+    const dynamic = target ? undefined : this.dynamicSeen.get(threadId);
+    if (!target && !(dynamic && this.isDynamic(threadId))) throw new Error("Cloud chat is not in the receive-only allowlist");
+    const title = target?.title ?? dynamic?.title ?? DEFAULT_CLOUD_CHAT_TITLE;
     const cached = this.snapshots.get(threadId)?.snapshot;
-    const snapshot = cached ?? { threadId, title: target.title, status: "notLoaded" as const, messages: [] };
+    const snapshot = cached ?? { threadId, title, status: "notLoaded" as const, messages: [] };
     return { ...snapshot, status: this.active ? snapshot.status : "notLoaded",
       paragraphs: snapshot.messages.filter((message) => message.role === "assistant")
         .map(({ id, text, phase }) => ({ id, text, phase })) };
@@ -160,7 +194,8 @@ export class DesktopCloudReceiver {
       return;
     }
     const threadId = frame.kind === "snapshot" ? frame.snapshot.threadId : frame.event.threadId;
-    if (!this.owns(threadId)) throw new Error("Thread not allowlisted");
+    const configured = this.config?.targets.some((target) => target.threadId === threadId) ?? false;
+    if (!configured && !(autoCloudChatsEnabled(this.config) && isCloudChatUuid(threadId))) throw new Error("Thread not allowlisted");
     const observedAt = frame.kind === "snapshot" ? frame.observedAt : frame.event.observedAt;
     if (observedAt > Date.now() + 5_000 || Date.now() - observedAt > CLOUD_MAX_AGE_MS) {
       this.log("stale_frame", { threadId }); return;
@@ -169,6 +204,7 @@ export class DesktopCloudReceiver {
       const previous = this.snapshots.get(threadId);
       if (!previous || observedAt >= previous.observedAt) {
         this.snapshots.set(threadId, { snapshot: frame.snapshot, observedAt });
+        if (!configured) this.noteDynamic(threadId, frame.snapshot.title);
         // Ack cache admission immediately. Relay delivery of a quiet snapshot
         // must not hold an urgent terminal alert behind a slow network request.
         this.onSnapshot(threadId);
@@ -176,6 +212,7 @@ export class DesktopCloudReceiver {
       return;
     }
     const event = frame.event;
+    if (!configured) this.noteDynamic(threadId, event.title);
     if (event.eventId !== cloudEventId(threadId, event.turnId, event.kind) || frame.id !== event.eventId) throw new Error("Invalid terminal identity");
     if (!this.receipts.has(event.eventId)) {
       const receivedAt = Date.now();

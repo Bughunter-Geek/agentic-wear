@@ -17,8 +17,21 @@ export const desktopCloudConfigSchema = z.object({
     title: z.string().min(1).max(200), url: z.string().url().max(300).optional(),
     dotNamespace: z.string().regex(/^[a-f0-9]{32}$/u).optional(), sendEnabled: z.boolean().optional() }).strict()).min(1).max(4),
   reconcileMs: z.number().int().min(1_000).max(10_000).default(2_000),
+  // Every open https://chatgpt.com/local/<uuid> tab becomes a session. Absent means true.
+  autoCloudChats: z.boolean().optional(),
 }).strict().refine((value) => new Set(value.targets.map((t) => t.threadId)).size === value.targets.length);
 export type DesktopCloudConfig = z.infer<typeof desktopCloudConfigSchema>;
+export const MAX_DYNAMIC_CLOUD_CHATS = 8;
+export const DYNAMIC_CLOUD_OWN_MS = 10 * 60_000;
+export const DEFAULT_CLOUD_CHAT_TITLE = "Codex cloud chat";
+const LOCAL_CHAT_URL = /^https:\/\/chatgpt\.com\/local\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+/** Thread id of a valid `https://chatgpt.com/local/<uuid>` URL (no query or hash), else null. */
+export function localCloudChatThreadId(url: string): string | null { return LOCAL_CHAT_URL.exec(url)?.[1] ?? null; }
+export function isCloudChatUuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
+export function autoCloudChatsEnabled(config: Pick<DesktopCloudConfig, "autoCloudChats"> | null | undefined): boolean {
+  return config?.autoCloudChats !== false;
+}
 export const CLOUD_FRAME_BYTES = 256 * 1024;
 export const CLOUD_MAX_AGE_MS = 60_000;
 export function desktopCloudConfigPath(): string { return join(homedir(), ".agentic-wear", "desktop-cloud.json"); }

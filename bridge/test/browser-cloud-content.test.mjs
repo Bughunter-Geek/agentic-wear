@@ -79,3 +79,45 @@ it('submits once and acknowledges the new user message, preserving an existing d
 it('refuses expired commands and a changed document before typing',async()=>{
  const h=await senderHarness();try{assert.equal((await h.send({expiresAt:Date.now()-1})).outcome,'rejected');assert.equal((await h.send({documentId:'wrong'})).outcome,'rejected');assert.equal(h.clicks(),0);}finally{h.dom.window.close();}
 });
+
+describe('automatic cloud chat URLs, titles and double injection',()=>{
+ const uuid='01a1188b-a850-755b-91ec-717f6182900b';
+ const mk=(href,title='')=>new JSDOM(`<!doctype html><html><head><title>${title}</title></head><body>${html}</body></html>`,{url:href,runScripts:'outside-only'});
+ async function observe(href,title,{second=false}={}){
+  const dom=mk(href,title),seen=[],listeners=[];
+  dom.window.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();},onMessage:{addListener:f=>listeners.push(f),removeListener:f=>listeners.splice(listeners.indexOf(f),1)}}};
+  Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
+  dom.window.eval(script);if(second)dom.window.eval(script);
+  await new Promise(r=>setTimeout(r,130));dom.window.close();return {seen,listeners};
+ }
+ it('accepts any local uuid chat but not /c/, other paths, query or hash',async()=>{
+  assert.ok((await observe(`https://chatgpt.com/local/${uuid}`,'x')).seen.length>0);
+  for(const bad of [`https://chatgpt.com/c/${uuid}`,`https://chatgpt.com/local/${uuid}?a=1`,`https://chatgpt.com/local/${uuid}#h`,`https://chatgpt.com/local/${uuid}/x`,'https://chatgpt.com/local/not-a-uuid','https://chatgpt.com/'])
+   assert.equal((await observe(bad,'x')).seen.length,0,bad);
+ });
+ it('reports the title without a ChatGPT suffix, capped, with a fallback',async()=>{
+  const t=async title=>(await observe(`https://chatgpt.com/local/${uuid}`,title)).seen.at(-1).title;
+  assert.equal(await t('Fix the build | ChatGPT'),'Fix the build');
+  assert.equal(await t('Fix the build - ChatGPT'),'Fix the build');
+  assert.equal(await t('Plain title'),'Plain title');
+  assert.equal(await t(''),'Codex cloud chat');
+  assert.equal(await t('ChatGPT'),'Codex cloud chat');
+  assert.equal((await t('a'.repeat(500))).length,200);
+ });
+ it('does not send a title for Dot',async()=>{
+  const out=await run(dotPage([dotRow('a'.repeat(32),'user','hi')]),dotUrl);assert.equal('title' in out.at(-1),false);
+ });
+ it('runs once when injected twice into the same page',async()=>{
+  const {listeners}=await observe(`https://chatgpt.com/local/${uuid}`,'x',{second:true});
+  assert.equal(listeners.length,1);
+ });
+ it('a second injection for another chat retires the first instance',async()=>{
+  const dom=mk(`https://chatgpt.com/local/${uuid}`,'x'),listeners=[];
+  dom.window.chrome={runtime:{id:'ext',sendMessage:()=>Promise.resolve(),onMessage:{addListener:f=>listeners.push(f),removeListener:f=>listeners.splice(listeners.indexOf(f),1)}}};
+  Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
+  dom.window.eval(script);assert.equal(listeners.length,1);
+  dom.window.history.pushState({},'','/local/01a1188b-a850-755b-91ec-717f6182900c');
+  dom.window.eval(script);assert.equal(listeners.length,1);
+  dom.window.close();
+ });
+});

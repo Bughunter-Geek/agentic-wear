@@ -1,9 +1,19 @@
 (() => {
-  const CLOUD='https://chatgpt.com/local/01a1188b-a850-755b-91ec-717f6182900a';
   const DOT='https://chatgpt.com/dots/home', NAMESPACE='fa24ed5a57dc8199b97f68f7d0098d11';
+  const LOCAL=/^https:\/\/chatgpt\.com\/local\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const TARGET=location.href;
-  if(![CLOUD,DOT].includes(TARGET))return;
+  if(TARGET!==DOT&&!LOCAL.test(TARGET))return;
+  // The worker may inject this file into a tab that already has it (extension reload,
+  // or an in-page navigation to another chat). Same URL: keep the running instance.
+  // Different URL: retire the old instance so only one answers commands.
+  const previous=window.__agenticWearCloudReceiver;
+  if(previous&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
+  if(previous&&previous.stop)previous.stop();
   const isDot=TARGET===DOT, documentId=crypto.randomUUID();
+  const chatTitle=()=>{
+    const text=(document.title||'').replace(/\s*[|\u2013\u2014-]\s*ChatGPT\s*$/i,'').trim().slice(0,200);
+    return text&&!/^ChatGPT$/i.test(text)?text:'Codex cloud chat';
+  };
   let scheduled=false,last='',lastSent=0,sending=false;
   const label=e=>e.getAttribute('aria-label')||(e.innerText||e.textContent||'').trim();
   const clean=e=>{
@@ -54,7 +64,7 @@
     scheduled=false;if(location.href!==TARGET)return;
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
-      ...(isDot?{identity:NAMESPACE}:{}),inputReady:!unavailable&&!sending&&!stopped()&&!!composer&&!clean(composer),turns:unavailable?[]:readTurns()};
+      ...(isDot?{identity:NAMESPACE}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!stopped()&&!!composer&&!clean(composer),turns:unavailable?[]:readTurns()};
     const encoded=JSON.stringify(model),now=Date.now();
     if(encoded===last&&now-lastSent<3000)return;
     last=encoded;lastSent=now;
@@ -98,13 +108,21 @@
     }catch{return result(clicked?'uncertain':'rejected',clicked?'Send outcome is uncertain. Check the chat before retrying.':'The editor refused the message. Check its draft.');}
     finally{sending=false;inspect();}
   }
-  chrome.runtime.onMessage?.addListener((command,sender,respond)=>{
+  const onCommand=(command,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
     if(command?.kind==='observe'){lastSent=0;inspect();respond({documentId});return;}
     if(command?.kind!=='send')return;
     void send(command).then(respond);return true;
-  });
+  };
+  chrome.runtime.onMessage?.addListener(onCommand);
   function schedule(){if(!scheduled){scheduled=true;queueMicrotask(inspect);}}
-  new MutationObserver(schedule).observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
-  document.addEventListener('visibilitychange',schedule);setInterval(inspect,1000);schedule();
+  const pageObserver=new MutationObserver(schedule);
+  pageObserver.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
+  document.addEventListener('visibilitychange',schedule);const tick=setInterval(inspect,1000);
+  const handle={url:TARGET,alive:true,stop(){
+    handle.alive=false;clearInterval(tick);pageObserver.disconnect();document.removeEventListener('visibilitychange',schedule);
+    try{chrome.runtime.onMessage?.removeListener(onCommand);}catch{}
+  }};
+  window.__agenticWearCloudReceiver=handle;
+  schedule();
 })();

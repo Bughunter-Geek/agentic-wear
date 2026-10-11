@@ -2,9 +2,9 @@ import {readFileSync,writeFileSync,renameSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {BrowserCloudObserver,browserObservationSchema} from '../bridge/dist/browser-cloud-observer.js';
+import {BrowserCloudObservers,browserObservationSchema} from '../bridge/dist/browser-cloud-observer.js';
 import {DesktopCloudTransport} from '../bridge/dist/desktop-cloud-adapter.js';
-import {readDesktopCloudConfig,desktopCloudConfigPath,desktopCloudSocketPath,cloudSendResultSchema,readPrivateJson,writePrivateJson} from '../bridge/dist/desktop-cloud-protocol.js';
+import {autoCloudChatsEnabled,readDesktopCloudConfig,desktopCloudConfigPath,desktopCloudSocketPath,cloudSendResultSchema,readPrivateJson,writePrivateJson} from '../bridge/dist/desktop-cloud-protocol.js';
 const manifest=JSON.parse(readFileSync(new URL('./extension/manifest.json',import.meta.url)));
 const extensionId=[...createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32)].map(c=>String.fromCharCode(97+parseInt(c,16))).join('');
 if(process.argv[2]!==`chrome-extension://${extensionId}/`)process.exit(2);
@@ -30,7 +30,8 @@ async function send(command){
   return old.result;
  }
  if(command.checkOnly)return {...base,outcome:'uncertain',message:'No browser receipt is available. Nothing was sent by this status check.'};
- if(!target?.sendEnabled||!page||page.blocked||!page.inputReady||Date.now()-page.observedAt>60000||Date.now()>=command.expiresAt)return {...base,outcome:'rejected',message:'The browser chat is unavailable or its composer is busy.'};
+ const sendEnabled=target?target.sendEnabled:observers.isDynamicThread(command.threadId);
+ if(!sendEnabled||!page||page.blocked||!page.inputReady||Date.now()-page.observedAt>60000||Date.now()>=command.expiresAt)return {...base,outcome:'rejected',message:'The browser chat is unavailable or its composer is busy.'};
  const uncertain={...base,outcome:'uncertain',message:'A prior send may have happened. Check the chat before retrying.'};
  const baseline=page.turns.flatMap(t=>t.role==='user'?[t.id]:(t.prompts||[]).map(p=>p.id));
  receipts.set(command.requestId,{hash,baseline,result:uncertain});await persist();
@@ -44,7 +45,8 @@ async function send(command){
 const transport=new DesktopCloudTransport(config,desktopCloudSocketPath(desktopCloudConfigPath()),(event,fields)=>{
  process.stderr.write(JSON.stringify({event,at:Date.now(),...fields})+'\n');
 },send);
-const observers=new Map(config.targets.map(target=>[target.url??`https://chatgpt.com/local/${target.threadId}`,new BrowserCloudObserver(target,(s,t)=>transport.snapshot(s,t),e=>transport.terminal(e))]));
+// Config targets plus, unless autoCloudChats is false, one observer per open chatgpt.com/local/<uuid> tab (max 8).
+const observers=new BrowserCloudObservers(config.targets,autoCloudChatsEnabled(config),(s,t)=>transport.snapshot(s,t),e=>transport.terminal(e),url=>pages.delete(url));
 transport.start();let input=Buffer.alloc(0);
 // Native-clock observations are not subject to hidden page timer throttling.
 const heartbeat=setInterval(()=>reply({kind:'observe'}),10000);heartbeat.unref();
@@ -56,7 +58,8 @@ process.stdin.on('data',b=>{
     const result=cloudSendResultSchema.parse(raw.result),pending=waiting.get(result.requestId);
     if(pending&&pending.threadId===result.threadId){clearTimeout(pending.timer);waiting.delete(result.requestId);pending.resolve(result);}continue;
    }
-   const d=browserObservationSchema.parse(raw),observer=observers.get(d.url);if(!observer)throw Error('Unknown page');
+   const d=browserObservationSchema.parse(raw),observer=observers.resolve(d);
+   if(!observer){status({status:'ignored_observation'});reply({status:'ignored'});continue;}
    for(const [requestId,receipt] of receipts){if(receipt.result.outcome==='accepted'&&receipt.result.messageId)observer.linkRequest(receipt.result.messageId,requestId);}
    const result=observer.accept(d);pages.set(d.url,d);
    status({status:d.blocked?'blocked':'ready',...result,observedAt:d.observedAt,visibility:d.visibility,extractionMs:d.extractionMs,
