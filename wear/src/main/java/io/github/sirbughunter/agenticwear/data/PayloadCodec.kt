@@ -2,6 +2,7 @@ package io.github.sirbughunter.agenticwear.data
 
 import io.github.sirbughunter.agenticwear.model.AgentAlert
 import io.github.sirbughunter.agenticwear.model.AgentSession
+import io.github.sirbughunter.agenticwear.model.CloudModelInfo
 import io.github.sirbughunter.agenticwear.model.AlertKind
 import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.ChatParagraph
@@ -51,7 +52,8 @@ object PayloadCodec {
             .put("threadId", payload.threadId)
             .put("text", payload.text)
             .put("effort", ReasoningEffortPolicy.normalize(payload.effort))
-            .apply { payload.model?.takeIf(::isSafeModelValue)?.let { put("model", it) } }
+            .apply { payload.model?.takeIf { if (payload.cloudModel) isSafeCloudLabel(it) else isSafeModelValue(it) }?.let { put("model", it) } }
+            .apply { payload.cloudEffortIndex?.takeIf { it in 0..9 }?.let { put("cloudEffortIndex", it) } }
             .apply { payload.followUpAction.wireOverride()?.let { put("followUpAction", it) } }
             .toString()
         is BridgePayload.AnswerQuestion -> JSONObject()
@@ -204,11 +206,43 @@ object PayloadCodec {
                         pinned = value.optBoolean("pinned", false),
                         source = value.optString("source").takeIf { it in KNOWN_SESSION_SOURCES },
                         attention = value.optString("attention").takeIf { it == "question" || it == "approval" },
+                        cloud = decodeCloudInfo(value),
                     ),
                 )
             }
         }
     }
+
+    /** Reads cloudModel/cloudModels/cloudEffort/cloudEfforts; null when no model list was reported. */
+    fun decodeCloudInfo(json: JSONObject): CloudModelInfo? {
+        val models = json.optJSONArray("cloudModels")?.let { array ->
+            (0 until minOf(array.length(), MAX_CLOUD_OPTIONS)).mapNotNull { array.optString(it).trim().takeIf(::isSafeCloudLabel) }.distinct()
+        }.orEmpty()
+        if (models.isEmpty()) return null
+        val efforts = json.optJSONArray("cloudEfforts")?.let { array ->
+            (0 until minOf(array.length(), MAX_CLOUD_OPTIONS)).map { index ->
+                array.optString(index).trim().takeIf(::isSafeCloudLabel) ?: "Level ${index + 1}"
+            }
+        }.orEmpty()
+        val effort = json.optJSONObject("cloudEffort")
+        return CloudModelInfo(
+            model = json.optString("cloudModel").trim().takeIf(::isSafeCloudLabel),
+            models = models,
+            effortIndex = effort?.takeIf { it.has("index") }?.optInt("index", -1)?.takeIf { it in 0 until MAX_CLOUD_OPTIONS },
+            effortLabel = effort?.optString("label")?.trim()?.takeIf(::isSafeCloudLabel),
+            efforts = efforts,
+        )
+    }
+
+    private fun putCloudInfo(target: JSONObject, info: CloudModelInfo?) {
+        if (info == null) return
+        info.model?.let { target.put("cloudModel", it) }
+        target.put("cloudModels", JSONArray(info.models))
+        if (info.effortIndex != null) target.put("cloudEffort", JSONObject().put("index", info.effortIndex).put("label", info.effortLabel ?: ""))
+        target.put("cloudEfforts", JSONArray(info.efforts))
+    }
+
+    private fun isSafeCloudLabel(value: String): Boolean = value.length in 1..64 && value.none { it.isISOControl() }
 
     fun decodeModels(json: JSONObject): List<ModelOption> {
         if (json.optInt("version") != 1 || json.optString("kind") != "sessions.snapshot") return emptyList()
@@ -407,6 +441,7 @@ object PayloadCodec {
             requestId = json.optString("requestId").takeIf(::isSafeId),
             messages = messages,
             partial = json.optBoolean("partial", false),
+            cloud = decodeCloudInfo(json),
         )
     }
 
@@ -416,6 +451,7 @@ object PayloadCodec {
         .put("status", snapshot.status.name)
         .put("generatedAt", snapshot.generatedAtMillis)
         .put("requestId", snapshot.requestId)
+        .also { putCloudInfo(it, snapshot.cloud) }
         .put(
             "paragraphs",
             JSONArray().apply {
@@ -505,7 +541,8 @@ object PayloadCodec {
                     .put("watchReady", session.watchReady)
                     .put("pinned", session.pinned)
                     .put("source", session.source)
-                    .put("attention", session.attention),
+                    .put("attention", session.attention)
+                    .also { putCloudInfo(it, session.cloud) },
             )
         }
     }.toString()
@@ -571,6 +608,7 @@ object PayloadCodec {
                         pinned = item.optBoolean("pinned"),
                         source = item.optString("source").takeIf { !item.isNull("source") && it in KNOWN_SESSION_SOURCES },
                         attention = item.optString("attention").takeIf { !item.isNull("attention") && (it == "question" || it == "approval") },
+                        cloud = decodeCloudInfo(item),
                     ),
                 )
             }
@@ -715,6 +753,7 @@ object PayloadCodec {
     private const val MAX_RELAY_FAILURE_STATUS = 599
     private const val MAX_ERROR_CLASS_CHARS = 80
     private const val MAX_CHAT_MESSAGES = 12
+    private const val MAX_CLOUD_OPTIONS = 16
     private val KNOWN_SESSION_SOURCES = setOf("cloud", "dot", "automation")
     private const val MAX_CHAT_MESSAGE_CHARS = 6_000
     private const val MAX_QUESTION_INDEX = 9

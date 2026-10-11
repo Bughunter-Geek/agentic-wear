@@ -17,7 +17,39 @@ data class AgentSession(
     val source: String? = null,
     /** "question" | "approval" when the chat is waiting for the user; null otherwise. */
     val attention: String? = null,
+    /** Browser-route cloud chats only: selectable models and reasoning levels reported by the bridge. */
+    val cloud: CloudModelInfo? = null,
 )
+
+data class CloudModelInfo(
+    val model: String?,
+    val models: List<String>,
+    val effortIndex: Int?,
+    val effortLabel: String?,
+    /** Reasoning labels by slider index; empty when the bridge did not report them. */
+    val efforts: List<String>,
+)
+
+enum class ModelPicker { MAC, CLOUD, NONE }
+
+/** Mac chats keep the Codex picker, cloud chats get one only when the bridge reported options, Dot never. */
+fun modelPickerFor(source: String?, cloud: CloudModelInfo?): ModelPicker = when (source) {
+    "dot" -> ModelPicker.NONE
+    "cloud" -> if (cloud != null && cloud.models.isNotEmpty()) ModelPicker.CLOUD else ModelPicker.NONE
+    else -> ModelPicker.MAC
+}
+
+data class CloudSelection(val model: String?, val effortIndex: Int?)
+
+/** Only values the user changed (and the bridge advertised) are sent. */
+fun cloudSelectionToSend(info: CloudModelInfo?, chosenModel: String?, chosenEffortIndex: Int?): CloudSelection {
+    if (info == null) return CloudSelection(null, null)
+    val model = chosenModel?.takeIf { it != info.model && it in info.models }
+    val limit = if (info.efforts.isEmpty()) 0 else info.efforts.size
+    val effort = chosenEffortIndex?.takeIf { it != info.effortIndex && it in 0 until limit }
+    return CloudSelection(model, effort)
+}
+
 
 /**
  * A model advertised by the private Codex bridge.
@@ -198,6 +230,7 @@ data class ChatSnapshot(
     },
     /** True for a trimmed inline snapshot that must be merged into, not replace, the stored chat. */
     val partial: Boolean = false,
+    val cloud: CloudModelInfo? = null,
 )
 
 const val MAX_MERGED_CHAT_MESSAGES = 12
@@ -214,7 +247,7 @@ fun mergeChatSnapshot(current: ChatSnapshot?, incoming: ChatSnapshot): ChatSnaps
     val kept = if (firstOverlap == null) current.messages else current.messages.takeWhile { it.id != firstOverlap }
     val merged = LinkedHashMap<String, ChatMessage>()
     (kept + incoming.messages).forEach { merged[it.id] = it }
-    return incoming.copy(messages = merged.values.toList().takeLast(MAX_MERGED_CHAT_MESSAGES))
+    return incoming.copy(messages = merged.values.toList().takeLast(MAX_MERGED_CHAT_MESSAGES), cloud = incoming.cloud ?: current.cloud)
 }
 
 /** Dot and cloud chats run through the browser route, which cannot change model, effort or speed. */
@@ -241,6 +274,9 @@ sealed interface BridgePayload {
         val text: String,
         val model: String? = null,
         val effort: String = ReasoningEffortPolicy.DEFAULT,
+        /** Cloud chats: [model] is a display name (may contain spaces) and this is the slider index. */
+        val cloudEffortIndex: Int? = null,
+        val cloudModel: Boolean = false,
         val followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
     ) : BridgePayload
     /** Answers an agent question; the bridge wraps it into the normal user-message path. */

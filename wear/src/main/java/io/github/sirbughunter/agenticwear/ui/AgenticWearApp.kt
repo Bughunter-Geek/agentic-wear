@@ -179,6 +179,8 @@ fun AgenticWearApp(
                     onRetry = viewModel::retryTranscript,
                     onModel = viewModel::setModel,
                     onEffort = viewModel::setReasoningEffort,
+                    onCloudModel = viewModel::setCloudModel,
+                    onCloudEffort = viewModel::setCloudEffort,
                     onApprovalMode = viewModel::setApprovalMode,
                     onRefreshSessions = viewModel::refreshSessionsForRecovery,
                     onStartNewSession = viewModel::startNewSessionForRecovery,

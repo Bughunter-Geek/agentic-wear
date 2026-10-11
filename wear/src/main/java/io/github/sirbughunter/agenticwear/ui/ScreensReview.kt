@@ -56,7 +56,9 @@ import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
-import io.github.sirbughunter.agenticwear.model.supportsModelSelection
+import io.github.sirbughunter.agenticwear.model.CloudModelInfo
+import io.github.sirbughunter.agenticwear.model.ModelPicker
+import io.github.sirbughunter.agenticwear.model.modelPickerFor
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import kotlinx.coroutines.delay
@@ -92,6 +94,8 @@ internal fun TranscriptScreen(
     onRetry: () -> Unit,
     onModel: (String?) -> Unit,
     onEffort: (String) -> Unit,
+    onCloudModel: (String?, String) -> Unit = { _, _ -> },
+    onCloudEffort: (String?, Int) -> Unit = { _, _ -> },
     onApprovalMode: (ApprovalMode) -> Unit,
     onRefreshSessions: () -> Unit,
     onStartNewSession: () -> Unit,
@@ -117,9 +121,15 @@ internal fun TranscriptScreen(
     val actionsEnabled = !state.pending && !state.recording && !state.transcribing
     val selectedModel = state.models.firstOrNull { it.model == state.selectedModel }
     val targetId = transcript?.threadId ?: state.selectedThreadId
-    val showModelChoice = supportsModelSelection(state.sessions.firstOrNull { it.id == targetId }?.source)
-    val modelLabel = selectedModel?.displayName ?: state.selectedModel ?: "Auto"
-    val effortLabel = ReasoningEffortPolicy.label(state.reasoningEffort)
+    val cloudInfo = state.cloudInfoFor(targetId)
+    val picker = modelPickerFor(state.sessions.firstOrNull { it.id == targetId }?.source, cloudInfo)
+    val showModelChoice = picker != ModelPicker.NONE
+    val cloudChoice = state.cloudChoiceThreadId == targetId
+    val cloudModelNow = (if (cloudChoice) state.cloudModelChoice else null) ?: cloudInfo?.model
+    val cloudEffortNow = (if (cloudChoice) state.cloudEffortChoice else null) ?: cloudInfo?.effortIndex
+    val cloudEffortLabel = cloudEffortNow?.let { cloudInfo?.efforts?.getOrNull(it) ?: if (it == cloudInfo?.effortIndex) cloudInfo.effortLabel else null }
+    val modelLabel = if (picker == ModelPicker.CLOUD) cloudModelNow ?: "Model" else selectedModel?.displayName ?: state.selectedModel ?: "Auto"
+    val effortLabel = if (picker == ModelPicker.CLOUD) cloudEffortLabel ?: "" else ReasoningEffortPolicy.label(state.reasoningEffort)
     val engineLabel = when (state.transcriptionEngine) {
         TranscriptionEngine.BRIDGE_PHONON -> "Phonon"
         TranscriptionEngine.BRIDGE_WHISPER -> "Mac dictation"
@@ -304,7 +314,10 @@ internal fun TranscriptScreen(
         )
 
         AwDialog(visible = dialog == "model", onDismiss = { dialog = "" }) {
-            ModelEffortDialog(state, onModel, onEffort, onDone = { dialog = "" })
+            if (picker == ModelPicker.CLOUD && cloudInfo != null) {
+                CloudModelDialog(cloudInfo, cloudModelNow, cloudEffortNow,
+                    onModel = { onCloudModel(targetId, it) }, onEffort = { onCloudEffort(targetId, it) }, onDone = { dialog = "" })
+            } else ModelEffortDialog(state, onModel, onEffort, onDone = { dialog = "" })
         }
         AwDialog(visible = dialog == "approval", onDismiss = { dialog = "" }) {
             AwScrollColumn {
@@ -480,6 +493,48 @@ private fun BoxScope.ModelEffortDialog(
                 selected = isSelected,
                 onClick = { onModel(option?.model) },
             )
+        }
+    }
+    AwEdgeButton("Done", onClick = onDone)
+}
+
+@Composable
+private fun BoxScope.CloudModelDialog(
+    info: CloudModelInfo,
+    model: String?,
+    effortIndex: Int?,
+    onModel: (String) -> Unit,
+    onEffort: (Int) -> Unit,
+    onDone: () -> Unit,
+) {
+    AwScrollColumn(bottomPadding = 76.dp) {
+        AwScreenTitle("Model")
+        if (info.efforts.isNotEmpty()) {
+            AwSectionLabel("Reasoning effort")
+            info.efforts.withIndex().toList().chunked(4).forEach { row ->
+                Row(
+                    Modifier.fillMaxWidth().clip(Aw.PillShape).background(Aw.Surface).border(1.dp, Aw.Line, Aw.PillShape).padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    row.forEach { (index, label) ->
+                        val on = index == effortIndex
+                        Box(
+                            Modifier.weight(1f).heightIn(min = 36.dp).clip(Aw.PillShape)
+                                .background(if (on) Aw.Text else androidx.compose.ui.graphics.Color.Transparent)
+                                .clickable(role = Role.RadioButton) { onEffort(index) }
+                                .semantics { this.selected = on; contentDescription = "$label effort"; stateDescription = if (on) "Selected" else "Not selected" },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(shortEffort(label), color = if (on) Aw.OnPrimary else Aw.TextSecondary, fontSize = 11.sp,
+                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
+                        }
+                    }
+                }
+            }
+        }
+        AwSectionLabel("Model · next turn")
+        info.models.forEach { name ->
+            AwOption(title = name, subtitle = null, selected = name == model, onClick = { onModel(name) })
         }
     }
     AwEdgeButton("Done", onClick = onDone)

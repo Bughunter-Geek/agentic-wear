@@ -29,6 +29,7 @@ import io.github.sirbughunter.agenticwear.notification.AgentNotifier
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
+import io.github.sirbughunter.agenticwear.model.CloudModelInfo
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.editedDraft
@@ -94,6 +95,10 @@ data class WearUiState(
     val popSoundEnabled: Boolean = true,
     val selectedModel: String? = null,
     val reasoningEffort: String = ReasoningEffortPolicy.DEFAULT,
+    /** In-memory cloud chat choices (null = unchanged); only valid for [cloudChoiceThreadId]. */
+    val cloudChoiceThreadId: String? = null,
+    val cloudModelChoice: String? = null,
+    val cloudEffortChoice: Int? = null,
     val relayUrl: String = "",
     val appUpdate: UpdateUiState = UpdateUiState(),
     val showInstallPermissionPrompt: Boolean = false,
@@ -272,6 +277,12 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             current.copy(selectedModel = selected, reasoningEffort = defaultEffort)
         }
     }
+
+    fun setCloudModel(threadId: String?, model: String) =
+        _state.update { it.withCloudChoice(threadId, model = model) }
+
+    fun setCloudEffort(threadId: String?, index: Int) =
+        _state.update { it.withCloudChoice(threadId, effort = index) }
 
     fun setReasoningEffort(effort: String) {
         val modelOption = _state.value.models.firstOrNull { it.model == _state.value.selectedModel }
@@ -462,8 +473,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
         val draftText = transcript.text
         val targetThreadId = threadIdForDraftSubmission(current)
-        val modelChoiceApplies = io.github.sirbughunter.agenticwear.model.supportsModelSelection(
-            current.sessions.firstOrNull { it.id == targetThreadId }?.source)
+        val targetSource = current.sessions.firstOrNull { it.id == targetThreadId }?.source
+        val cloudInfo = current.cloudInfoFor(targetThreadId)
+        val picker = io.github.sirbughunter.agenticwear.model.modelPickerFor(targetSource, cloudInfo)
+        val modelChoiceApplies = picker == io.github.sirbughunter.agenticwear.model.ModelPicker.MAC
+        val cloudSend = if (picker == io.github.sirbughunter.agenticwear.model.ModelPicker.CLOUD && current.cloudChoiceThreadId == targetThreadId)
+            io.github.sirbughunter.agenticwear.model.cloudSelectionToSend(cloudInfo, current.cloudModelChoice, current.cloudEffortChoice)
+        else io.github.sirbughunter.agenticwear.model.CloudSelection(null, null)
         if (targetThreadId != null) {
             preferences.selectedThreadId = targetThreadId
         }
@@ -474,9 +490,11 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             val threadId = repository.submitTurn(
                 threadId = targetThreadId,
                 text = draftText,
-                model = if (modelChoiceApplies) current.selectedModel else null,
+                model = if (modelChoiceApplies) current.selectedModel else cloudSend.model,
                 effort = if (modelChoiceApplies) current.reasoningEffort else ReasoningEffortPolicy.DEFAULT,
                 followUpAction = followUpAction,
+                cloudEffortIndex = cloudSend.effortIndex,
+                cloudModel = cloudSend.model != null,
                 onPrepared = { _state.update { it.copy(submittedTurns = preferences.submittedTurns, sendingDraft = null) } },
             )
             preferences.selectedThreadId = threadId
@@ -1533,3 +1551,16 @@ internal fun prepareTextReply(current: WearUiState, draft: Transcript): WearUiSt
     error = null,
     replyingFromChat = true,
 )
+
+/** Cloud model options for [threadId]: the session's report, else the open chat's. */
+internal fun WearUiState.cloudInfoFor(threadId: String?): CloudModelInfo? =
+    sessions.firstOrNull { it.id == threadId }?.cloud ?: chat?.takeIf { it.threadId == threadId }?.cloud
+
+internal fun WearUiState.withCloudChoice(threadId: String?, model: String? = null, effort: Int? = null): WearUiState {
+    val same = cloudChoiceThreadId == threadId
+    return copy(
+        cloudChoiceThreadId = threadId,
+        cloudModelChoice = model ?: if (same) cloudModelChoice else null,
+        cloudEffortChoice = effort ?: if (same) cloudEffortChoice else null,
+    )
+}

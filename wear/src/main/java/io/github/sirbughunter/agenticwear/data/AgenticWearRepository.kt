@@ -217,6 +217,8 @@ class AgenticWearRepository(private val context: Context) {
         model: String?,
         effort: String,
         followUpAction: FollowUpAction = FollowUpAction.DEFAULT,
+        cloudEffortIndex: Int? = null,
+        cloudModel: Boolean = false,
         onPrepared: () -> Unit = {},
         questionAnswer: QuestionAnswer? = null,
     ): String {
@@ -231,7 +233,7 @@ class AgenticWearRepository(private val context: Context) {
                 questionAnswer.answer, questionAnswer.question,
             )
         } else {
-            BridgePayload.SubmitTurn(id, threadId, text.trim(), model, effort, followUpAction)
+            BridgePayload.SubmitTurn(id, threadId, text.trim(), model, effort, cloudEffortIndex, cloudModel, followUpAction)
         }
         val fingerprint = java.security.MessageDigest.getInstance("SHA-256")
             .digest(PayloadCodec.encode(payload("")).toByteArray(Charsets.UTF_8))
