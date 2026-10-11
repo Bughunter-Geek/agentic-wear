@@ -106,9 +106,7 @@ internal fun ChatScreen(
             + (if (submissionLabel != null) 1 else 0)
         ) - 1
     // Re-entering a chat must position its current content again.
-    var positionedThreadId by remember { mutableStateOf<String?>(null) }
     val displayThreadId = state.selectedThreadId ?: state.sendingDraft?.requestId ?: "new-chat"
-    var previousFollowRevision by remember(displayThreadId) { mutableStateOf<ChatFollowRevision?>(null) }
     // The reader's intent, not post-layout geometry: only a user scroll can change it (or the jump button).
     var followLatest by remember(displayThreadId) { mutableStateOf(true) }
     val programmaticScroll = remember { booleanArrayOf(false) }
@@ -127,22 +125,25 @@ internal fun ChatScreen(
             wasScrolling = scrolling
         }
     }
-    LaunchedEffect(displayThreadId, followRevision) {
-        val currentThreadId = displayThreadId
-        val shouldFollow = shouldFollowChatRevision(
-            firstPosition = positionedThreadId != currentThreadId,
-            nearLatest = followLatest,
-            previous = previousFollowRevision,
-            current = followRevision,
-        )
-        previousFollowRevision = followRevision
-        if (shouldFollow) {
-            snapshotFlow { listState.layoutInfo.totalItemsCount to listState.layoutInfo.viewportSize.height }
-                .first { (count, height) -> count > lastContentIndex && height > 0 }
-            programmaticScroll[0] = true
-            try { listState.scrollChatToBottom(lastContentIndex, animated = false) } finally { programmaticScroll[0] = false }
-            positionedThreadId = currentThreadId
-        }
+    // Decide synchronously and queue the scroll for the very measure pass that lays out the new
+    // content, so no frame is ever drawn at the stale offset. A large offset on the last item is
+    // clamped by the list to the end of the content (single step, snapping, no animation).
+    val followState = remember { ChatFollowMemory() }
+    if (followState.threadId != displayThreadId) {
+        followState.threadId = displayThreadId
+        followState.previous = null
+        followState.positioned = false
+    }
+    val shouldFollow = shouldFollowChatRevision(
+        firstPosition = !followState.positioned,
+        nearLatest = followLatest,
+        previous = followState.previous,
+        current = followRevision,
+    )
+    followState.previous = followRevision
+    if (shouldFollow && lastContentIndex >= 0) {
+        listState.requestScrollToItem(lastContentIndex, CHAT_SCROLL_TO_END_OFFSET)
+        followState.positioned = true
     }
 
     Box(Modifier.fillMaxSize().background(Aw.Bg)) {
@@ -281,6 +282,13 @@ internal data class ChatFollowRevision(
 )
 
 internal const val CHAT_BOTTOM_TOLERANCE_PX = 24
+private const val CHAT_SCROLL_TO_END_OFFSET = 1_000_000
+
+private class ChatFollowMemory {
+    var threadId: String? = null
+    var previous: ChatFollowRevision? = null
+    var positioned = false
+}
 
 /** Reader intent: a finished user scroll sets it from the bottom position; the jump button sets it. */
 internal fun nextFollowLatest(current: Boolean, userScrollEnded: Boolean, atBottom: Boolean, tappedNewest: Boolean): Boolean =
