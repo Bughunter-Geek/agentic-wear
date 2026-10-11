@@ -1,4 +1,5 @@
 import {readFileSync} from 'node:fs';
+import {MessageChannel} from 'node:worker_threads';
 import {JSDOM} from 'jsdom';
 import {describe,it} from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,13 +9,16 @@ const dotUrl='https://chatgpt.com/dots/home',ns='fa24ed5a57dc8199b97f68f7d0098d1
 const MODELS=['GPT-6.1 Sol','GPT-6 Astra','GPT-6 Sol','Daybreak Blue'],LABELS=['Minimal','Low','Medium','High','Max'];
 const tick=ms=>new Promise(r=>setTimeout(r,ms));
 // A fake Radix-like model menu built from the structure observed on the real page.
-function harness({postMissing=false,openButtonLabel=false,noPopupAttribute=false,outsideMain=false,realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
+function harness({labels=LABELS,timersStalled=false,expireOnFirstStep=false,postMissing=false,openButtonLabel=false,noPopupAttribute=false,outsideMain=false,realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
+ const LABELS=labels;
  const state={model,effort,opens:0,clicks:0,sliderKeys:[]};
  const composerHtml=dot?'<div class="ProseMirror" contenteditable="true" aria-label="Message"></div>':'<div class="ProseMirror" contenteditable="true" data-codex-composer="true"></div>';
  const dotRow=(id,role,text)=>`<article class="message-row ${role==='user'?'self':''}" data-message-id="${ns}~${ns}~CalpicoMessage~Sentinel_${id}"><div class="message-body">${text}<div class="message-inline-actions"><button data-action="reply">Reply</button></div></div></article>`;
  const pre=dot?`<button data-orbit-profile-trigger="true" aria-label="Open Lumen’s profile"></button>${dotRow('a'.repeat(32),'assistant','hello')}`:'';
  const dom=new JSDOM(`<main>${pre}${composerHtml}<button aria-label="Send">Send</button><button aria-haspopup="menu" id="mb"></button></main>`,{url:dot?dotUrl:url,runScripts:'outside-only'});
  const w=dom.window,d=w.document,seen=[];let listener;
+ w.MessageChannel=MessageChannel;
+ if(timersStalled){w.setTimeout=()=>1;w.clearTimeout=()=>{};w.setInterval=()=>1;w.clearInterval=()=>{};}
  Object.defineProperty(w.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
  if(hidden)Object.defineProperty(d,'visibilityState',{get:()=>'hidden'});
  d.hasFocus=()=>focused;
@@ -44,7 +48,7 @@ function harness({postMissing=false,openButtonLabel=false,noPopupAttribute=false
   for(const r of m.querySelectorAll('[role=menuitemradio]'))r.addEventListener('click',()=>{const n=r.textContent;if(MODELS.includes(n)){state.model=n;paint();close();}});
   const slider=m.querySelector('[role=slider]');
   slider.addEventListener('keydown',e=>{
-   state.sliderKeys.push(e.key);if(stuck)return;
+   state.sliderKeys.push(e.key);if(expireOnFirstStep)skew+=10000;if(stuck)return;
    if(e.key==='ArrowRight')state.effort=Math.min(4,state.effort+1);else if(e.key==='ArrowLeft')state.effort=Math.max(0,state.effort-1);else if(e.key==='Home')state.effort=0;
    slider.setAttribute('aria-valuenow',String(state.effort));m.querySelector('[role=status]').textContent=`${state.model} ${LABELS[state.effort]}, ${state.effort+1} of 5.`;paint();
   });
@@ -64,6 +68,20 @@ function harness({postMissing=false,openButtonLabel=false,noPopupAttribute=false
   stop:()=>w.close()};
 }
 describe('cloud model and reasoning selection',()=>{
+ it('applies Light instead of Ultra even when all background timers are stalled',async()=>{
+  const h=harness({labels:['Light','Medium','High','Max','Ultra'],timersStalled:true,realButton:true,effort:4});try{
+   const r=await Promise.race([h.send({model:'GPT-6.1 Sol',effortIndex:0}),tick(1500).then(()=>{throw new Error('Page timer stalled settings');})]);
+   assert.equal(r.outcome,'accepted',r.message);assert.equal(h.state.effort,0);assert.equal(h.state.clicks,1);
+   assert.equal(r.verifiedSelection.effortLabel,'Light');
+  }finally{h.stop();}
+ });
+ it('never keeps stepping or types after the command deadline expires',async()=>{
+  const h=harness({expireOnFirstStep:true,effort:4});try{
+   const r=await h.send({effortIndex:0});
+   assert.equal(r.outcome,'rejected');assert.deepEqual(h.state.sliderKeys.filter(k=>k.startsWith('Arrow')),['ArrowLeft']);assert.equal(h.state.effort,3);assert.equal(h.state.clicks,0);assert.equal(h.editorText(),'');
+  }finally{h.stop();}
+ });
+
  it('retains verified UI settings when Send is clicked but delivery cannot be confirmed',async()=>{
   const h=harness({postMissing:true});try{
    await tick(120);

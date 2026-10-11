@@ -69,7 +69,13 @@
   for(const type of ['pointerdown','pointermove','mousedown','keydown','wheel','touchstart'])
     document.addEventListener(type,()=>{if(!selfDriving)lastInteraction=Date.now();},{capture:true,passive:true});
   const aliases=new Map();
-  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  // Yield a task so React can commit without a chained background-page timer.
+  // A frozen page may still resume late; callers must check their deadline.
+  const nextTask=()=>new Promise(resolve=>{
+    const channel=new MessageChannel();
+    channel.port1.onmessage=()=>{channel.port1.close();channel.port2.close();resolve();};
+    channel.port2.postMessage(null);
+  });
   const norm=s=>(s||'').replace(/\s+/g,' ').trim();
   const text=e=>norm(e.innerText||e.textContent);
   function modelButton(){
@@ -202,103 +208,108 @@
     }
     return state;
   }
-  async function openMenu(){
+  async function openMenu(deadline=Date.now()+2500){
+    if(Date.now()>=deadline)return false;
     if(openMenuEl())return true;
     const button=modelButton();if(!button)return false;
     const fire=(type,Ctor)=>button.dispatchEvent(new (window[Ctor]||MouseEvent)(type,{bubbles:true,cancelable:true,button:0,ctrlKey:false,pointerType:'mouse'}));
     for(const attempt of [()=>fire('pointerdown','PointerEvent'),()=>button.click(),()=>{button.focus();button.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));}]){
+      if(Date.now()>=deadline)return false;
       attempt();
-      for(let i=0;i<8;i++){await wait(60);if(openMenuEl())return true;}
+      if(await waitFor(openMenuEl,Math.min(deadline,Date.now()+450)))return Date.now()<deadline;
     }
     return false;
   }
-  async function closeMenu(){
-    for(let attempt=0;attempt<3&&openMenuEl();attempt++){
-      (document.activeElement||document.body).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
-      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
-      for(let i=0;i<5&&openMenuEl();i++)await wait(60);
-    }
-    return !openMenuEl();
+  async function closeMenu(deadline=Date.now()+1500){
+    if(!openMenuEl())return true;
+    if(Date.now()>=deadline)return false;
+    (document.activeElement||document.body).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    return !!await waitFor(()=>!openMenuEl(),deadline);
   }
   // One read-only pass while the tab is hidden: learn the model list, effort range and label.
   function learn(){
     lastLearnAt=Date.now();
     learning=(async()=>{
       selfDriving=true;
+      const deadline=Date.now()+2500;
       try{
-        if(!await openMenu())return;
+        if(!await openMenu(deadline))return;
         let menu=openMenuEl();
         if(menu&&!menu.querySelector('[role=menuitemradio]')){
           const toggle=menu.querySelector('[data-model-picker-view-toggle=true]');
-          if(toggle){toggle.click();await wait(150);menu=openMenuEl()||menu;}
+          if(toggle&&Date.now()<deadline){toggle.click();await waitFor(()=>openMenuEl()?.querySelector('[role=menuitemradio]'),deadline);menu=openMenuEl()||menu;}
         }
-        if(menu)learnFromMenu(menu);
+        if(menu&&Date.now()<deadline)learnFromMenu(menu);
       }catch{}finally{await closeMenu();selfDriving=false;learning=null;scheduled=false;lastSent=0;schedule();}
     })();
   }
-  async function applySettings(want){
+  async function applySettings(want,deadline){
     selfDriving=true;
-    try{return await applySettingsInner(want);}finally{selfDriving=false;}
+    try{return await applySettingsInner(want,deadline);}finally{selfDriving=false;}
   }
-  async function applySettingsInner(want){
+  async function applySettingsInner(want,deadline){
+    const active=()=>Date.now()<deadline;
     const fail=async()=>{await closeMenu();return false;};
     try{
-      if(!await openMenu())return fail();
+      if(!active()||!await openMenu(deadline))return fail();
       let menu=openMenuEl();let state=learnFromMenu(menu);
       if(want.model!==undefined&&state.model!==want.model){
         let radio=state.radios.find(r=>radioName(r)===want.model);
         if(!radio){
           const toggle=menu.querySelector('[data-model-picker-view-toggle=true]');
-          if(toggle){toggle.click();await wait(150);menu=openMenuEl()||menu;radio=readMenu(menu).radios.find(r=>radioName(r)===want.model);}
+          if(toggle&&active()){
+            toggle.click();
+            radio=await waitFor(()=>openMenuEl()&&readMenu(openMenuEl()).radios.find(r=>radioName(r)===want.model),deadline);
+          }
         }
-        if(!radio)return fail();
-        radio.click();await wait(200);
-        if(!openMenuEl()&&!await openMenu())return fail();
+        if(!radio||!active())return fail();
+        radio.click();
+        if(!await waitFor(()=>readCurrent()?.model===want.model||(openMenuEl()&&readMenu(openMenuEl()).model===want.model),deadline)||!active())return fail();
+        if(!openMenuEl()&&!await openMenu(deadline))return fail();
         menu=openMenuEl();state=learnFromMenu(menu);
         if(state.model!==want.model)return fail();
-        // Capture this model's own closed-button catalogue before changing
-        // effort. A different model can expose a different range/label mapping.
         const baselineSlider=state.slider;
-        if(!await closeMenu())return false;
-        await wait(150);
-        const baseline=readCurrent();
-        if(!baseline||baseline.model!==want.model)return false;
+        if(!await closeMenu(deadline)||!active())return false;
+        const baseline=await waitFor(()=>{const c=readCurrent();return c?.model===want.model&&c.label?c:null;},deadline);
+        if(!baseline||!active())return false;
         const labels=effortLabels(modelButton(),baseline,baselineSlider);
         if(labels){efforts=labels;labels.forEach((label,i)=>aliases.set(label.toLowerCase(),i));}
-        if(!await openMenu())return false;
+        if(!await openMenu(deadline))return false;
         menu=openMenuEl();state=learnFromMenu(menu);
         if(state.model!==want.model)return fail();
       }
+      // Hold the intended label fixed before moving the slider. Learning later
+      // observations must never redefine a requested Light as another label.
+      const expectedLabel=want.effortIndex===undefined?null:efforts[want.effortIndex]||null;
       if(want.effortIndex!==undefined){
-        const slider=menu.querySelector('[role=slider]');
-        if(!slider||!state.slider||want.effortIndex<state.slider.min||want.effortIndex>state.slider.max)return fail();
-        const now=()=>Number(slider.getAttribute('aria-valuenow'));
-        const press=async(key,times)=>{slider.focus();for(let i=0;i<times;i++){slider.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));await wait(20);}await wait(60);};
-        if(now()!==want.effortIndex){
-          const delta=want.effortIndex-now();
-          await press(delta>0?'ArrowRight':'ArrowLeft',Math.abs(delta));
-          if(now()!==want.effortIndex){await press('Home',1);await press('ArrowRight',want.effortIndex);}
+        if(!state.slider||want.effortIndex<state.slider.min||want.effortIndex>state.slider.max)return fail();
+        for(let step=0;state.slider.now!==want.effortIndex&&step<10;step++){
+          if(!active())return fail();
+          const slider=openMenuEl()?.querySelector('[role=slider]');if(!slider)return fail();
+          const before=state.slider.now,delta=want.effortIndex>before?1:-1;
+          slider.focus();slider.dispatchEvent(new KeyboardEvent('keydown',{key:delta>0?'ArrowRight':'ArrowLeft',bubbles:true,cancelable:true}));
+          const changed=await waitFor(()=>{const m=openMenuEl(),v=m&&readMenu(m);return v?.slider?.now===before+delta?v:null;},deadline);
+          if(!changed||!active())return fail();
+          state=changed;
         }
-        if(now()!==want.effortIndex)return fail();
-        state=learnFromMenu(menu);
+        if(state.slider.now!==want.effortIndex)return fail();
       }
-      const finalSlider=state.slider?state.slider.now:null;
-      const statusLabel=state.status?state.status.label:'';
-      if(!await closeMenu())return false;
-      await wait(250);
-      // Verify through the composer button, the thing the page will send with.
-      const current=readCurrent();
-      if(!current)return false;
-      if(want.model!==undefined&&current.model!==want.model)return false;
-      if(want.effortIndex!==undefined){
-        if(finalSlider!==want.effortIndex||!current.label)return false;
-        const known=current.label?aliases.get(current.label.toLowerCase()):undefined;
-        if(known!==undefined&&known!==want.effortIndex)return false;
-        if(known===undefined&&current.label){
-          if(!statusLabel||current.label.toLowerCase()!==statusLabel.toLowerCase())return false;
-          aliases.set(current.label.toLowerCase(),want.effortIndex);
-        }
-      }
+      const finalSlider=state.slider?state.slider.now:null,statusLabel=state.status?.label||'';
+      if(!await closeMenu(deadline)||!active())return false;
+      // Observe the committed label, not an arbitrary animation delay.
+      const current=await waitFor(()=>{
+        const c=readCurrent();if(!c||(want.model!==undefined&&c.model!==want.model))return null;
+        if(want.effortIndex===undefined)return c;
+        if(finalSlider!==want.effortIndex||!c.label)return null;
+        const known=effortIndexOf(c.label);
+        if(expectedLabel&&c.label.toLowerCase()!==expectedLabel.toLowerCase()&&known!==want.effortIndex)return null;
+        if(known!==null&&known!==want.effortIndex)return null;
+        if(known===null&&c.label.toLowerCase()!==statusLabel.toLowerCase())return null;
+        return c;
+      },deadline);
+      if(!current||!active())return false;
+      if(want.effortIndex!==undefined&&effortIndexOf(current.label)===null)aliases.set(current.label.toLowerCase(),want.effortIndex);
       return true;
     }catch{return fail();}
   }
@@ -356,6 +367,7 @@
     const result=(outcome,message,messageId,nativeTurnId)=>({requestId:command.requestId,threadId:command.threadId,outcome,message,...(messageId?{messageId}:{}),...(nativeTurnId?{nativeTurnId}:{}),...((outcome==='accepted'||outcome==='uncertain')&&verifiedSelection?{verifiedSelection}:{})});
     if(command.url!==TARGET||command.documentId!==documentId||Date.now()>=command.expiresAt||blocked())return result('rejected','The browser chat changed or is unavailable.');
     if(learning)await learning;
+    if(Date.now()>=command.expiresAt)return result('rejected','The send request expired before editing the chat. Your Watch draft is kept.');
     if(sending||stopped())return result('rejected','The chat is busy. Wait for the current response.');
     const composer=editor();
     if(!composer||clean(composer))return result('rejected','The desktop composer has a draft or is unavailable. Your Watch draft is kept.');
@@ -371,14 +383,15 @@
       if(want.model!==undefined||want.effortIndex!==undefined){
         const current=readCurrent();
         const needs=!current||(want.model!==undefined&&current.model!==want.model)||(want.effortIndex!==undefined&&current.index!==want.effortIndex);
-        if(needs&&!await applySettings(want))return result('rejected',"Couldn't switch the cloud chat's model; nothing was sent. Your draft is kept.");
+        if(needs&&!await applySettings(want,command.expiresAt))return result('rejected',"Couldn't switch the cloud chat's model; nothing was sent. Your draft is kept.");
       }
+      if(Date.now()>=command.expiresAt)return result('rejected','The send request expired before typing. Your Watch draft is kept.');
       composer.focus({preventScroll:true});
       const selection=window.getSelection(),range=document.createRange();range.selectNodeContents(composer);selection.removeAllRanges();selection.addRange(range);
       if(!document.execCommand('insertText',false,command.text))return result('rejected','The browser editor did not accept text.');
       // Let ProseMirror and React commit the input transaction before reading
       // Send readiness. A synchronously enabled button can retain the old empty-draft handler.
-      await new Promise(resolve=>setTimeout(resolve,100));
+      await nextTask();
       const button=await waitFor(()=>{
         if(blocked()||editor()!==composer||clean(composer)!==command.text.trim())return null;
         const buttons=[...document.querySelectorAll('main button[aria-label="Send"]')].filter(b=>!b.disabled&&b.getAttribute('aria-disabled')!=='true');

@@ -1,3 +1,4 @@
+import {MessageChannel} from 'node:worker_threads';
 import {readFileSync} from 'node:fs';
 import {JSDOM} from 'jsdom';
 import {describe,it} from 'node:test';
@@ -65,6 +66,7 @@ it('extracts user prompts separately from response controls',async()=>{
 });
 async function senderHarness(draft=''){
  const dom=new JSDOM(`<main>${html}<div class="ProseMirror" contenteditable="true" data-codex-composer="true">${draft}</div><button aria-label="Send">Send</button></main>`,{url,runScripts:'outside-only'}),seen=[];let listener,clicks=0;
+ dom.window.MessageChannel=MessageChannel;
  Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
  dom.window.chrome={runtime:{id:'test-extension',sendMessage:x=>{seen.push(x);return Promise.resolve();},onMessage:{addListener:x=>{listener=x;}}}};
  dom.window.document.execCommand=(_name,_ui,text)=>{dom.window.document.querySelector('.ProseMirror').textContent=text;return true;};
