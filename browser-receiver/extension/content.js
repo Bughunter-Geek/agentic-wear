@@ -61,14 +61,20 @@
   }
   function blocked(){return location.href!==TARGET || (isDot&&!dotIdentity()) || [...document.querySelectorAll('button')].some(e=>/^(Log in|Sign in)$/.test(label(e))) || document.body.innerText.includes('Couldn’t load messages');}
   function inspect(){
-    scheduled=false;if(location.href!==TARGET)return;
+    scheduled=false;if(!chrome.runtime?.id){handle.stop();return;}
+    if(location.href!==TARGET)return;
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
       ...(isDot?{identity:NAMESPACE}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!stopped()&&!!composer&&!clean(composer),turns:unavailable?[]:readTurns()};
     const encoded=JSON.stringify(model),now=Date.now();
     if(encoded===last&&now-lastSent<3000)return;
     last=encoded;lastSent=now;
-    chrome.runtime.sendMessage({...model,observedAt:now,extractionMs:Math.round((performance.now()-started)*100)/100}).catch(()=>{last='';});
+    try{
+      Promise.resolve(chrome.runtime.sendMessage({...model,observedAt:now,extractionMs:Math.round((performance.now()-started)*100)/100})).catch(()=>{last='';});
+    }catch(error){
+      // sendMessage throws synchronously once the extension was reloaded.
+      if(/Extension context invalidated/i.test(String(error&&error.message)))handle.stop();else last='';
+    }
   }
   const userMessages=()=>readTurns().flatMap(t=>t.role==='user'?[{id:t.id,turnId:t.id,text:t.reply}]:(t.prompts||[]).map(p=>({...p,turnId:t.id})));
   function waitFor(predicate,deadline){return new Promise(resolve=>{

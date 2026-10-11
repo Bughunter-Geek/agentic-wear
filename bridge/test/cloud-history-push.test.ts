@@ -12,6 +12,14 @@ describe("cloud history delivery",()=>{
   expect(inline.messages.slice(-2)).toEqual(source.messages.slice(-2));
   expect(full.paragraphs).toEqual([]);expect(inline.generatedAt).toBe(full.generatedAt);
  });
+ it("marks only a trimmed inline snapshot as partial",()=>{
+  const small={...snapshot(),messages:snapshot().messages.slice(-2)};
+  const a=cloudHistoryPayloads(small,1);expect(a.inline).not.toHaveProperty("partial");expect(a.full).not.toHaveProperty("partial");
+  const dropped=cloudHistoryPayloads(snapshot("x".repeat(300)),1);
+  expect(dropped.inline.messages.length).toBeLessThan(dropped.full.messages.length);expect(dropped.inline.partial).toBe(true);expect(dropped.full).not.toHaveProperty("partial");
+  const shortened=cloudHistoryPayloads({...snapshot(),messages:[{...snapshot().messages[0]!,text:"y".repeat(4000)}]},1);
+  expect(shortened.inline.messages[0]!.text).not.toBe("y".repeat(4000));expect(shortened.inline.partial).toBe(true);
+ });
  it("fits real encrypted FCM envelopes including multibyte long replies, without altering full history",async()=>{
   const a=await generateBridgeKeyPair(),b=await generateBridgeKeyPair();
   const box=new CryptoBox("pair-test",a.privateKeyMaterial,a.publicKeyBase64,b.publicKeyBase64);

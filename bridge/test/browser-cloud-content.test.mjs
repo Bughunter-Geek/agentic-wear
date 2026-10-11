@@ -6,13 +6,13 @@ const script=readFileSync(new URL('../../browser-receiver/extension/content.js',
 const url='https://chatgpt.com/local/01a1188b-a850-755b-91ec-717f6182900a';
 const turn='01a12aea-c944-75a7-90d7-b3830bc61e4b';
 const html=`<div data-turn-key="history-content:turn:${turn}"><div class="group"><p>CLOUD WATCH TEST</p><span class="sr-only">Reply actions</span><div class="turn-action-controls"><button aria-label="Copy">Copy</button><button aria-label="Rate response">Like</button></div></div></div>`;
-async function run(body,href=url){const dom=new JSDOM(body,{url:href,runScripts:'outside-only'}),seen=[];dom.window.chrome={runtime:{sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
+async function run(body,href=url){const dom=new JSDOM(body,{url:href,runScripts:'outside-only'}),seen=[];dom.window.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
  Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});dom.window.eval(script);await new Promise(r=>setTimeout(r,130));dom.window.close();return seen;}
 describe('actual content script on synthetic browser DOM',()=>{
  it('observes newly completed content even when page timers never run',async()=>{
   const dom=new JSDOM('<main></main>',{url,runScripts:'outside-only'}),seen=[];
   try {
-   dom.window.chrome={runtime:{sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
+   dom.window.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
    Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
    dom.window.setTimeout=()=>1;dom.window.setInterval=()=>1;
    dom.window.eval(script);await new Promise(r=>setImmediate(r));
@@ -42,7 +42,7 @@ it('extracts Dot role and body without timestamps or quoted actions; refuses ano
 });
 async function runDotWithTops(body,tops){
  const dom=new JSDOM(body,{url:dotUrl,runScripts:'outside-only'}),seen=[];
- dom.window.chrome={runtime:{sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
+ dom.window.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
  Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
  dom.window.Element.prototype.getBoundingClientRect=function(){return {top:tops(this),bottom:0,left:0,right:0,width:0,height:0};};
  dom.window.eval(script);await new Promise(r=>setTimeout(r,130));dom.window.close();return seen;
@@ -120,4 +120,25 @@ describe('automatic cloud chat URLs, titles and double injection',()=>{
   dom.window.eval(script);assert.equal(listeners.length,1);
   dom.window.close();
  });
+});
+
+describe('extension reload',()=>{
+ const uuid='01a1188b-a850-755b-91ec-717f6182900b';
+ for(const mode of ['id-cleared','throws']){
+  it(`stops quietly when the context is invalidated (${mode})`,async()=>{
+   const dom=new JSDOM(`<!doctype html><title>x</title><body>${html}</body>`,{url:`https://chatgpt.com/local/${uuid}`,runScripts:'outside-only'});
+   let sent=0,cleared=0,errors=0;const runtime={id:'ext',sendMessage:()=>{sent++;if(mode==='throws'&&dead)throw new Error('Extension context invalidated.');return Promise.resolve();},onMessage:{addListener(){},removeListener(){}}};
+   let dead=false;dom.window.chrome={runtime};
+   Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
+   const clear=dom.window.clearInterval.bind(dom.window);dom.window.clearInterval=id=>{cleared++;clear(id);};
+   dom.window.addEventListener('error',()=>errors++);
+   dom.window.eval(script);await new Promise(r=>setTimeout(r,50));assert.ok(sent>0);
+   dead=true;if(mode==='id-cleared')runtime.id=undefined;
+   dom.window.document.body.appendChild(dom.window.document.createElement('p'));
+   await new Promise(r=>setTimeout(r,3300));
+   const after=sent;await new Promise(r=>setTimeout(r,1200));
+   assert.equal(errors,0);assert.equal(cleared,1);assert.equal(sent,after);assert.equal(dom.window.__agenticWearCloudReceiver.alive,false);
+   dom.window.close();
+  });
+ }
 });
