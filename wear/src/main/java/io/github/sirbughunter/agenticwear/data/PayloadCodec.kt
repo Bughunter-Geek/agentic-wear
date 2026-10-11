@@ -406,6 +406,7 @@ object PayloadCodec {
             generatedAtMillis = json.optLong("generatedAt", System.currentTimeMillis()),
             requestId = json.optString("requestId").takeIf(::isSafeId),
             messages = messages,
+            partial = json.optBoolean("partial", false),
         )
     }
 

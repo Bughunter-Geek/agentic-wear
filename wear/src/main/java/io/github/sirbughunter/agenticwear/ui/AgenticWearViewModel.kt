@@ -462,6 +462,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
         val draftText = transcript.text
         val targetThreadId = threadIdForDraftSubmission(current)
+        val modelChoiceApplies = io.github.sirbughunter.agenticwear.model.supportsModelSelection(
+            current.sessions.firstOrNull { it.id == targetThreadId }?.source)
         if (targetThreadId != null) {
             preferences.selectedThreadId = targetThreadId
         }
@@ -472,8 +474,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             val threadId = repository.submitTurn(
                 threadId = targetThreadId,
                 text = draftText,
-                model = current.selectedModel,
-                effort = current.reasoningEffort,
+                model = if (modelChoiceApplies) current.selectedModel else null,
+                effort = if (modelChoiceApplies) current.reasoningEffort else ReasoningEffortPolicy.DEFAULT,
                 followUpAction = followUpAction,
                 onPrepared = { _state.update { it.copy(submittedTurns = preferences.submittedTurns, sendingDraft = null) } },
             )

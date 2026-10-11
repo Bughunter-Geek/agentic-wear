@@ -56,6 +56,7 @@ import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.FollowUpAction
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
+import io.github.sirbughunter.agenticwear.model.supportsModelSelection
 import io.github.sirbughunter.agenticwear.model.SessionStatus
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
 import kotlinx.coroutines.delay
@@ -115,6 +116,8 @@ internal fun TranscriptScreen(
     }
     val actionsEnabled = !state.pending && !state.recording && !state.transcribing
     val selectedModel = state.models.firstOrNull { it.model == state.selectedModel }
+    val targetId = transcript?.threadId ?: state.selectedThreadId
+    val showModelChoice = supportsModelSelection(state.sessions.firstOrNull { it.id == targetId }?.source)
     val modelLabel = selectedModel?.displayName ?: state.selectedModel ?: "Auto"
     val effortLabel = ReasoningEffortPolicy.label(state.reasoningEffort)
     val engineLabel = when (state.transcriptionEngine) {
@@ -212,7 +215,7 @@ internal fun TranscriptScreen(
 
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                SettingChip(
+                if (showModelChoice) SettingChip(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Rounded.AutoAwesome,
                     label = modelLabel,

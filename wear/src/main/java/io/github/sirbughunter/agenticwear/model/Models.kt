@@ -196,7 +196,29 @@ data class ChatSnapshot(
             phase = paragraph.phase,
         )
     },
+    /** True for a trimmed inline snapshot that must be merged into, not replace, the stored chat. */
+    val partial: Boolean = false,
 )
+
+const val MAX_MERGED_CHAT_MESSAGES = 12
+
+/**
+ * Merges a partial snapshot into the stored chat of the same thread: keeps current messages up to
+ * the first incoming id already present, then appends all incoming ones; dedupes by id, newest 12.
+ * Non-partial snapshots (or a different thread) replace the current one.
+ */
+fun mergeChatSnapshot(current: ChatSnapshot?, incoming: ChatSnapshot): ChatSnapshot {
+    if (!incoming.partial || current == null || current.threadId != incoming.threadId) return incoming
+    val currentIds = current.messages.map { it.id }.toSet()
+    val firstOverlap = incoming.messages.firstOrNull { it.id in currentIds }?.id
+    val kept = if (firstOverlap == null) current.messages else current.messages.takeWhile { it.id != firstOverlap }
+    val merged = LinkedHashMap<String, ChatMessage>()
+    (kept + incoming.messages).forEach { merged[it.id] = it }
+    return incoming.copy(messages = merged.values.toList().takeLast(MAX_MERGED_CHAT_MESSAGES))
+}
+
+/** Dot and cloud chats run through the browser route, which cannot change model, effort or speed. */
+fun supportsModelSelection(source: String?): Boolean = source != "dot" && source != "cloud"
 
 sealed interface BridgePayload {
     val requestId: String

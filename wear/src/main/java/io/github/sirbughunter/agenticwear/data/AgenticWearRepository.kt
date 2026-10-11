@@ -8,6 +8,7 @@ import io.github.sirbughunter.agenticwear.model.BridgePayload
 import io.github.sirbughunter.agenticwear.model.QuestionAnswer
 import io.github.sirbughunter.agenticwear.model.QuestionAnswerGuard
 import io.github.sirbughunter.agenticwear.model.ReasoningEffortPolicy
+import io.github.sirbughunter.agenticwear.model.mergeChatSnapshot
 import io.github.sirbughunter.agenticwear.model.optimisticQuestionReplyText
 import io.github.sirbughunter.agenticwear.model.ChatSnapshot
 import io.github.sirbughunter.agenticwear.model.FeedbackRating
@@ -742,8 +743,9 @@ class AgenticWearRepository(private val context: Context) {
                             incomingGeneratedAtMillis = snapshot.generatedAtMillis,
                         )
                     ) {
-                        preferences.chatSnapshot = snapshot
-                        preferences.changeSubmittedTurns { items -> items.map { it.reconcile(snapshot) } }
+                        val stored = mergeChatSnapshot(preferences.chatSnapshot, snapshot).copy(partial = false)
+                        preferences.chatSnapshot = stored
+                        preferences.changeSubmittedTurns { items -> items.map { it.reconcile(stored) } }
                         if (snapshot.requestId != null && snapshot.requestId == preferences.pendingChatRequestId) {
                             preferences.lastReadyChatRequestId = snapshot.requestId
                             preferences.lastError = null
