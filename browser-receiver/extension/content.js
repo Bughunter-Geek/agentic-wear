@@ -353,7 +353,7 @@
   });}
   async function send(command){
     let verifiedSelection;
-    const result=(outcome,message,messageId,nativeTurnId)=>({requestId:command.requestId,threadId:command.threadId,outcome,message,...(messageId?{messageId}:{}),...(nativeTurnId?{nativeTurnId}:{}),...(outcome==='accepted'&&verifiedSelection?{verifiedSelection}:{})});
+    const result=(outcome,message,messageId,nativeTurnId)=>({requestId:command.requestId,threadId:command.threadId,outcome,message,...(messageId?{messageId}:{}),...(nativeTurnId?{nativeTurnId}:{}),...((outcome==='accepted'||outcome==='uncertain')&&verifiedSelection?{verifiedSelection}:{})});
     if(command.url!==TARGET||command.documentId!==documentId||Date.now()>=command.expiresAt||blocked())return result('rejected','The browser chat changed or is unavailable.');
     if(learning)await learning;
     if(sending||stopped())return result('rejected','The chat is busy. Wait for the current response.');

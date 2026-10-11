@@ -8,7 +8,7 @@ const dotUrl='https://chatgpt.com/dots/home',ns='fa24ed5a57dc8199b97f68f7d0098d1
 const MODELS=['GPT-6.1 Sol','GPT-6 Astra','GPT-6 Sol','Daybreak Blue'],LABELS=['Minimal','Low','Medium','High','Max'];
 const tick=ms=>new Promise(r=>setTimeout(r,ms));
 // A fake Radix-like model menu built from the structure observed on the real page.
-function harness({openButtonLabel=false,noPopupAttribute=false,outsideMain=false,realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
+function harness({postMissing=false,openButtonLabel=false,noPopupAttribute=false,outsideMain=false,realButton=false,longButton=false,hidden=false,focused=true,interact=false,dot=false,stuck=false,buttonStuck=false,model='GPT-6.1 Sol',effort=2}={}){
  const state={model,effort,opens:0,clicks:0,sliderKeys:[]};
  const composerHtml=dot?'<div class="ProseMirror" contenteditable="true" aria-label="Message"></div>':'<div class="ProseMirror" contenteditable="true" data-codex-composer="true"></div>';
  const dotRow=(id,role,text)=>`<article class="message-row ${role==='user'?'self':''}" data-message-id="${ns}~${ns}~CalpicoMessage~Sentinel_${id}"><div class="message-body">${text}<div class="message-inline-actions"><button data-action="reply">Reply</button></div></div></article>`;
@@ -52,7 +52,7 @@ function harness({openButtonLabel=false,noPopupAttribute=false,outsideMain=false
  button.addEventListener('pointerdown',open);
  d.addEventListener('keydown',e=>{if(e.key==='Escape')close();});
  d.querySelector('[aria-label=Send]').onclick=()=>{
-  state.clicks++;const editor=d.querySelector('.ProseMirror'),text=editor.textContent;editor.textContent='';
+  state.clicks++;if(postMissing)return;const editor=d.querySelector('.ProseMirror'),text=editor.textContent;editor.textContent='';
   const main=d.querySelector('main');
   if(dot){main.insertAdjacentHTML('beforeend',dotRow('b'.repeat(32),'user',text));}
   else{const t=d.createElement('div');t.dataset.turnKey=`history-content:turn:01a1188b-a850-755b-91ec-71790000000${state.clicks}`;const b=d.createElement('div');b.dataset.userMessageBubble='true';b.textContent=text;t.append(b);main.prepend(t);}
@@ -64,6 +64,16 @@ function harness({openButtonLabel=false,noPopupAttribute=false,outsideMain=false
   stop:()=>w.close()};
 }
 describe('cloud model and reasoning selection',()=>{
+ it('retains verified UI settings when Send is clicked but delivery cannot be confirmed',async()=>{
+  const h=harness({postMissing:true});try{
+   await tick(120);
+   const r=await h.send({model:'GPT-6.1 Sol',expiresAt:Date.now()+600});
+   assert.equal(r.outcome,'uncertain');assert.equal(h.state.clicks,1);
+   assert.equal(r.verifiedSelection.model,'GPT-6.1 Sol');
+   assert.equal(r.verifiedSelection.effortLabel,'Medium');
+  }finally{h.stop();}
+ });
+
  it('reads the current model and effort from the composer button without opening the menu',async()=>{
   const h=harness();try{await tick(120);
    assert.equal(h.last().model,'GPT-6.1 Sol');assert.equal(h.last().effort.label,'Medium');

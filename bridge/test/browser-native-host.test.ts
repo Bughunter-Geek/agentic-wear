@@ -21,7 +21,7 @@ it('native host persists send identity, checks uncertainty without resending, an
  const launch=()=>{
   child=spawn(process.execPath,[resolve('../browser-receiver/native-host.bundle.mjs'),`chrome-extension://${id}/`],{env:{...process.env,HOME:home}});
   const owned=child;cleanup.push(async()=>{if(owned.exitCode===null&&owned.signalCode===null){owned.kill();await new Promise<void>(r=>owned.once('exit',()=>r()));}});
-  let bytes=Buffer.alloc(0);child.stdout.on('data',(b:Buffer)=>{bytes=Buffer.concat([bytes,b]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);if(bytes.length<n+4)return;const value=JSON.parse(bytes.subarray(4,n+4).toString()) as Record<string,unknown>;bytes=bytes.subarray(n+4);if(value.kind==='send'){commands.push(value);write({kind:'send-result',result:{requestId:value.requestId,threadId:value.threadId,outcome:'uncertain',message:'Test lost acknowledgement'}});}}});
+  let bytes=Buffer.alloc(0);child.stdout.on('data',(b:Buffer)=>{bytes=Buffer.concat([bytes,b]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);if(bytes.length<n+4)return;const value=JSON.parse(bytes.subarray(4,n+4).toString()) as Record<string,unknown>;bytes=bytes.subarray(n+4);if(value.kind==='send'){commands.push(value);write({kind:'send-result',result:{requestId:value.requestId,threadId:value.threadId,outcome:'uncertain',message:'Test lost acknowledgement',verifiedSelection:{model:'GPT-6.1 Sol',effortIndex:2,effortLabel:'Medium'}}});}}});
  };
  const page={version:1,kind:'observation',url:`https://chatgpt.com/local/${threadId}`,documentId:randomUUID(),observedAt:Date.now(),extractionMs:1,visibility:'hidden',blocked:false,inputReady:true,turns:[{id:randomUUID(),prompts:[{id:'old',text:'old prompt'}],reply:'old reply',completed:true,evidence:'response-actions-without-stop'}]};
  launch();write(page);await vi.waitFor(()=>expect(receiver.sessions()[0]?.watchReady).toBe(true));
@@ -29,12 +29,29 @@ it('native host persists send identity, checks uncertainty without resending, an
  await expect(receiver.submitText(threadId,'not-seen','Hello',true)).rejects.toThrow('uncertain');expect(commands).toHaveLength(1);
  write({...page,observedAt:Date.now(),turns:[...page.turns,{...page.turns[0],id:randomUUID(),prompts:[{id:'new',text:'Hello'}]}]});
  await vi.waitFor(()=>expect(receiver.snapshot(threadId).messages.some(m=>m.id==='user:new')).toBe(true));
- await expect(receiver.submitText(threadId,'request-one','Hello',true)).resolves.toMatchObject({outcome:'accepted',messageId:'new'});expect(commands).toHaveLength(1);
+ await expect(receiver.submitText(threadId,'request-one','Hello',true)).resolves.toMatchObject({outcome:'accepted',messageId:'new',verifiedSelection:{model:'GPT-6.1 Sol',effortIndex:2,effortLabel:'Medium'}});expect(commands).toHaveLength(1);
  const previous=child!;previous.kill();await new Promise<void>(r=>previous.once('exit',()=>r()));
  await vi.waitFor(()=>expect(receiver.sessions()[0]?.watchReady).toBe(false));launch();write({...page,observedAt:Date.now()});
  await vi.waitFor(()=>expect(receiver.sessions()[0]?.watchReady).toBe(true));
  await expect(receiver.submitText(threadId,'request-one','Hello')).resolves.toMatchObject({outcome:'accepted'});expect(commands).toHaveLength(1);
  await expect(receiver.submitText(threadId,'request-one','Different')).rejects.toThrow('different content');expect(commands).toHaveLength(1);
+ // Simulate a result arriving after the first uncertain response removed the
+ // in-flight waiter. Never redispatch, create unsolicited receipts, or downgrade.
+ await expect(receiver.submitText(threadId,'late-result','Hello late',false,{model:'GPT-6.1 Sol',effortIndex:2})).rejects.toThrow('uncertain');
+ const late={requestId:'late-result',threadId,outcome:'accepted',messageId:'late-message',nativeTurnId:'late-turn',message:'Confirmed late'};
+ write({kind:'send-result',result:{...late,threadId:'wrong-thread'}});
+ write({kind:'send-result',result:{...late,requestId:'unsolicited'}});
+ write({kind:'send-result',result:late});
+ write({kind:'send-result',result:{...late,outcome:'uncertain',message:'Stale timeout'}});
+ const receiptFile=join(dir,'browser-send-receipts.json');
+ await vi.waitFor(async()=>{
+  const entries=new Map<string,Record<string,unknown>>((JSON.parse(await readFile(receiptFile,'utf8')) as {entries:[string,Record<string,unknown>][]}).entries);
+  expect(entries.has('unsolicited')).toBe(false);
+  expect(entries.get('late-result')).toMatchObject({requestedSelection:{model:'GPT-6.1 Sol',effortIndex:2},result:{...late,verifiedSelection:{model:'GPT-6.1 Sol',effortIndex:2,effortLabel:'Medium'}}});
+ });
+ await expect(receiver.submitText(threadId,'late-result','Hello late',true)).resolves.toMatchObject({outcome:'accepted',messageId:'late-message'});
+ expect(commands).toHaveLength(2);
+
 });
 
 it('native host ignores unknown pages without exiting and creates dynamic cloud chats from local/<uuid> URLs',async()=>{

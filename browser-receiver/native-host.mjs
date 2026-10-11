@@ -26,6 +26,13 @@ const stored=await readPrivateJson(receiptPath);
 const receipts=new Map(stored?.pairBinding===config.pairBinding?stored.entries:[]),waiting=new Map(),pages=new Map();
 let persistChain=Promise.resolve();
 function persist(){const value={pairBinding:config.pairBinding,entries:[...receipts].slice(-1024)};persistChain=persistChain.then(()=>writePrivateJson(receiptPath,value));return persistChain;}
+// A delayed response still belongs to its persisted request after the timer
+// expires. Keep terminal outcomes monotonic and retain pre-Send UI evidence.
+function settleReceipt(receipt,result){
+ if(receipt.result.outcome==='accepted'||receipt.result.outcome==='rejected')return receipt.result;
+ receipt.result={...result,...(result.verifiedSelection?{}:receipt.result.verifiedSelection?{verifiedSelection:receipt.result.verifiedSelection}:{})};
+ receipt.resultAt=Date.now();return receipt.result;
+}
 function status(fields){const tmp=logPath+'.'+process.pid+'.tmp';writeFileSync(tmp,JSON.stringify({pid:process.pid,at:Date.now(),...fields}),{mode:0o600});renameSync(tmp,logPath);}
 function reply(x){const b=Buffer.from(JSON.stringify(x)),h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));}
 async function send(command){
@@ -37,7 +44,7 @@ async function send(command){
   if(old.result.outcome==='uncertain' && old.baseline && page && !page.blocked && Date.now()-page.observedAt<60000){
    const messages=page.turns.flatMap(t=>t.role==='user'?[{id:t.id,turnId:t.id,text:t.reply}]:(t.prompts||[]).map(p=>({...p,turnId:t.id})));
    const found=messages.find(m=>!old.baseline.includes(m.id)&&createHash('sha256').update(JSON.stringify([command.threadId,m.text])).digest('hex')===hash);
-   if(found){old.result={...base,outcome:'accepted',messageId:found.id,nativeTurnId:found.turnId,message:'Previously submitted message found in browser history.'};await persist();}
+   if(found){old.result={...old.result,...base,outcome:'accepted',messageId:found.id,nativeTurnId:found.turnId,message:'Previously submitted message found in browser history.'};await persist();}
   }
   return old.result;
  }
@@ -46,13 +53,14 @@ async function send(command){
  if(!sendEnabled||!page||page.blocked||!page.inputReady||Date.now()-page.observedAt>60000||Date.now()>=command.expiresAt)return {...base,outcome:'rejected',message:'The browser chat is unavailable or its composer is busy.'};
  const uncertain={...base,outcome:'uncertain',message:'A prior send may have happened. Check the chat before retrying.'};
  const baseline=page.turns.flatMap(t=>t.role==='user'?[t.id]:(t.prompts||[]).map(p=>p.id));
- receipts.set(command.requestId,{hash,baseline,result:uncertain});await persist();
+ const receipt={hash,baseline,result:uncertain,issuedAt:Date.now(),requestedSelection:{...(command.model!==undefined?{model:command.model}:{}),...(command.effortIndex!==undefined?{effortIndex:command.effortIndex}:{})}};
+ receipts.set(command.requestId,receipt);await persist();
  const result=await new Promise(resolve=>{
   const timer=setTimeout(()=>{waiting.delete(command.requestId);resolve(uncertain);},Math.max(1,command.expiresAt-Date.now()+500));
   waiting.set(command.requestId,{resolve,timer,threadId:command.threadId});
   reply({...command,url,documentId:page.documentId});
  });
- receipts.set(command.requestId,{hash,baseline,result});await persist();return result;
+ const settled=settleReceipt(receipt,result);await persist();return settled;
 }
 const transport=new DesktopCloudTransport(config,desktopCloudSocketPath(desktopCloudConfigPath()),(event,fields)=>{
  process.stderr.write(JSON.stringify({event,at:Date.now(),...fields})+'\n');
@@ -73,7 +81,11 @@ process.stdin.on('data',b=>{
     const parsed=cloudSendResultSchema.safeParse(raw.result);
     if(!parsed.success){hostLog('send-result',issueSummary(parsed.error));continue;}
     const result=parsed.data,pending=waiting.get(result.requestId);
-    if(pending&&pending.threadId===result.threadId){clearTimeout(pending.timer);waiting.delete(result.requestId);pending.resolve(result);}continue;
+    const receipt=receipts.get(result.requestId);
+    if(!receipt||receipt.result.threadId!==result.threadId)continue;
+    const settled=settleReceipt(receipt,result);
+    void persist().catch(()=>hostLog('receipt','persist_failed'));
+    if(pending&&pending.threadId===result.threadId){clearTimeout(pending.timer);waiting.delete(result.requestId);pending.resolve(settled);}continue;
    }
    // A bad observation is never fatal: drop optional model fields and retry, else ignore it.
    let parsed=browserObservationSchema.safeParse(raw);
