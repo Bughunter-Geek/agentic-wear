@@ -100,6 +100,16 @@ object PayloadCodec {
      * Metadata-only notification timing for the bridge (`notify.trace`): epoch milliseconds on the
      * Watch clock plus per-alert decisions. Never carries titles, details or message text.
      */
+    /** Value-free voice loop trace (`voice.loop.trace`): phase and reason names plus epoch ms. No audio or text. */
+    internal fun encodeVoiceLoopTrace(requestId: String, phase: String, reason: String?, at: Long): String = JSONObject()
+        .put("version", 1)
+        .put("kind", "voice.loop.trace")
+        .put("requestId", requestId)
+        .put("phase", phase)
+        .apply { if (reason != null) put("reason", reason) }
+        .put("at", at)
+        .toString()
+
     internal fun encodeNotifyTrace(requestId: String, trace: NotifyTrace): String = JSONObject()
         .put("version", 1)
         .put("kind", "notify.trace")

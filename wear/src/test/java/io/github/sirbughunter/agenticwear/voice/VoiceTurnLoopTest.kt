@@ -16,7 +16,9 @@ class VoiceTurnLoopTest {
     @Test
     fun `full turn cycles listen send wait speak listen`() {
         var step = reduceVoiceLoop(VoiceLoopPhase.IDLE, VoiceLoopEvent.Start)
-        assertEquals(VoiceLoopStep(VoiceLoopPhase.LISTENING, VoiceLoopEffect.Listen), step)
+        assertEquals(VoiceLoopStep(VoiceLoopPhase.STARTING, VoiceLoopEffect.Listen), step)
+        step = reduceVoiceLoop(step.phase, VoiceLoopEvent.RecordingStarted)
+        assertEquals(VoiceLoopStep(VoiceLoopPhase.LISTENING, VoiceLoopEffect.None), step)
         step = reduceVoiceLoop(step.phase, VoiceLoopEvent.Heard(" hello "))
         assertEquals(VoiceLoopStep(VoiceLoopPhase.SENDING, VoiceLoopEffect.Submit("hello")), step)
         step = reduceVoiceLoop(step.phase, VoiceLoopEvent.Submitted)
@@ -24,7 +26,7 @@ class VoiceTurnLoopTest {
         step = reduceVoiceLoop(step.phase, VoiceLoopEvent.Reply("answer", quiet = false))
         assertEquals(VoiceLoopStep(VoiceLoopPhase.SPEAKING, VoiceLoopEffect.Speak("answer")), step)
         step = reduceVoiceLoop(step.phase, VoiceLoopEvent.SpeechDone)
-        assertEquals(VoiceLoopStep(VoiceLoopPhase.LISTENING, VoiceLoopEffect.Listen), step)
+        assertEquals(VoiceLoopStep(VoiceLoopPhase.STARTING, VoiceLoopEffect.Listen), step)
     }
 
     @Test
@@ -80,5 +82,64 @@ class VoiceTurnLoopTest {
         assertTrue(spoken.startsWith("Title"))
         val long = speechPlainText("word ".repeat(1000))
         assertTrue(long.length <= MAX_SPOKEN_CHARS + 1)
+    }
+
+    @Test
+    fun `starting only becomes listening when recording started`() {
+        for (e in listOf(VoiceLoopEvent.Start, VoiceLoopEvent.Heard("x"), VoiceLoopEvent.EndOfSpeech(), VoiceLoopEvent.SpeechDone)) {
+            assertEquals(VoiceLoopStep(VoiceLoopPhase.STARTING, VoiceLoopEffect.None), reduceVoiceLoop(VoiceLoopPhase.STARTING, e))
+        }
+        assertEquals(VoiceLoopPhase.LISTENING, reduceVoiceLoop(VoiceLoopPhase.STARTING, VoiceLoopEvent.RecordingStarted).phase)
+        assertEquals("Starting microphone…", voiceLoopLabel(VoiceLoopPhase.STARTING))
+    }
+
+    @Test
+    fun `start timeout fails with a clear message only while starting`() {
+        assertEquals(
+            VoiceLoopStep(VoiceLoopPhase.IDLE, VoiceLoopEffect.Fail(LOOP_START_FAILED_MESSAGE)),
+            reduceVoiceLoop(VoiceLoopPhase.STARTING, VoiceLoopEvent.StartTimeout),
+        )
+        assertEquals(VoiceLoopPhase.LISTENING, reduceVoiceLoop(VoiceLoopPhase.LISTENING, VoiceLoopEvent.StartTimeout).phase)
+        assertEquals(VoiceLoopPhase.IDLE, reduceVoiceLoop(VoiceLoopPhase.IDLE, VoiceLoopEvent.StartTimeout).phase)
+    }
+
+    @Test
+    fun `end of speech while listening finishes the turn like a tap`() {
+        assertEquals(
+            VoiceLoopStep(VoiceLoopPhase.LISTENING, VoiceLoopEffect.FinishListening),
+            reduceVoiceLoop(VoiceLoopPhase.LISTENING, VoiceLoopEvent.EndOfSpeech()),
+        )
+        assertEquals(VoiceLoopEffect.None, reduceVoiceLoop(VoiceLoopPhase.WAITING, VoiceLoopEvent.EndOfSpeech(true)).effect)
+    }
+
+    @Test
+    fun `detector ends after speech then silence`() {
+        val d = SpeechEndpointDetector(0)
+        var t = 0L
+        var last = EndpointDecision.CONTINUE
+        while (t < 400) { t += 100; last = d.update(0.6f, t); assertEquals(EndpointDecision.CONTINUE, last) }
+        var ended = -1L
+        while (t < 3_000 && ended < 0) { t += 100; if (d.update(0.02f, t) == EndpointDecision.END_OF_SPEECH) ended = t }
+        assertEquals(500L + LOOP_SILENCE_END_MS, ended)
+    }
+
+    @Test
+    fun `detector never ends on silence without speech or on a short blip`() {
+        val d = SpeechEndpointDetector(0)
+        var t = 0L
+        while (t < 10_000) { t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.0f, t)) }
+        val blip = SpeechEndpointDetector(0)
+        t = 0
+        blip.update(0.6f, 100)
+        t = 100
+        while (t < 5_000) { t += 100; assertEquals(EndpointDecision.CONTINUE, blip.update(0.0f, t)) }
+    }
+
+    @Test
+    fun `continuous speech is cut at the max turn length`() {
+        val d = SpeechEndpointDetector(0)
+        var t = 0L
+        while (t < LOOP_MAX_TURN_MS - 100) { t += 100; assertEquals(EndpointDecision.CONTINUE, d.update(0.7f, t)) }
+        assertEquals(EndpointDecision.MAX_LENGTH, d.update(0.7f, LOOP_MAX_TURN_MS))
     }
 }

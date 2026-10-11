@@ -214,3 +214,15 @@ describe("Watch relay failure log", () => {
     expect(watchPayloadSchema.safeParse({ ...base, requestId: "bad id with spaces", failures: [] }).success).toBe(false);
   });
 });
+
+describe("Watch voice loop trace", () => {
+  const base = { version: 1, kind: "voice.loop.trace", requestId: "r1", phase: "starting", at: 1_787_900_001_000 };
+  it("accepts value-free phase traces and rejects text or unknown fields", () => {
+    expect(watchPayloadSchema.safeParse(base).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, phase: "idle", reason: "start_timeout" }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, phase: "recording" }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, reason: "Hello there, free text" }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, text: "hi" }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, at: -1 }).success).toBe(false);
+  });
+});

@@ -31,6 +31,9 @@ import io.github.sirbughunter.agenticwear.model.MAX_TRANSCRIPT_CHARS
 import io.github.sirbughunter.agenticwear.model.ModelOption
 import io.github.sirbughunter.agenticwear.model.CloudModelInfo
 import io.github.sirbughunter.agenticwear.voice.ReplySpeaker
+import io.github.sirbughunter.agenticwear.voice.EndpointDecision
+import io.github.sirbughunter.agenticwear.voice.LOOP_START_TIMEOUT_MS
+import io.github.sirbughunter.agenticwear.voice.SpeechEndpointDetector
 import io.github.sirbughunter.agenticwear.voice.VoiceLoopEffect
 import io.github.sirbughunter.agenticwear.voice.VoiceLoopEvent
 import io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase
@@ -68,6 +71,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class WearScreen { HOME, PAIR, SESSIONS, TRANSCRIPT, REPLY, CHAT, ALERT, SETTINGS, ACTIVITY }
 
@@ -346,15 +351,26 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
 
     @Synchronized
     private fun dispatchVoiceLoop(event: VoiceLoopEvent) {
-        val step = reduceVoiceLoop(_state.value.voiceLoop, event)
-        if (step.phase == _state.value.voiceLoop && step.effect == VoiceLoopEffect.None) return
+        val before = _state.value.voiceLoop
+        val step = reduceVoiceLoop(before, event)
+        if (step.phase == before && step.effect == VoiceLoopEffect.None) return
+        if (step.phase != VoiceLoopPhase.STARTING && step.phase != VoiceLoopPhase.LISTENING) {
+            loopJob?.cancel()
+            loopJob = null
+        }
         _state.update { it.copy(voiceLoop = step.phase) }
+        if (step.phase != before || step.effect is VoiceLoopEffect.Fail) {
+            sendLoopTrace(step.phase, loopTraceReason(before, event))
+        }
         when (val effect = step.effect) {
             VoiceLoopEffect.None -> Unit
             VoiceLoopEffect.Listen -> {
                 _state.update { it.copy(speakingMessageId = null, error = null) }
-                beginPushToTalk()
+                beginPushToTalk(fromLoop = true)
+                loopJob?.cancel()
+                loopJob = viewModelScope.launch { runLoopListening() }
             }
+            VoiceLoopEffect.FinishListening -> finishPushToTalk(measureLatency = true)
             is VoiceLoopEffect.Submit -> {
                 submitTranscript()
                 dispatchVoiceLoop(VoiceLoopEvent.Submitted)
@@ -368,6 +384,51 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             is VoiceLoopEffect.Fail -> {
                 stopVoiceLoopWork()
                 effect.message?.let(::showError)
+            }
+        }
+    }
+
+    private var loopJob: Job? = null
+
+    private fun loopTraceReason(before: VoiceLoopPhase, event: VoiceLoopEvent): String? = when (event) {
+        VoiceLoopEvent.Start -> "start"
+        VoiceLoopEvent.RecordingStarted -> "recording"
+        VoiceLoopEvent.StartTimeout -> "start_timeout"
+        is VoiceLoopEvent.EndOfSpeech -> if (event.maxLength) "max_length" else "end_of_speech"
+        is VoiceLoopEvent.Heard -> "heard"
+        VoiceLoopEvent.Submitted -> "submitted"
+        is VoiceLoopEvent.Reply -> "reply"
+        VoiceLoopEvent.SpeechDone -> "speech_done"
+        VoiceLoopEvent.Stop -> "stopped"
+        is VoiceLoopEvent.Fail -> if (before == VoiceLoopPhase.STARTING) "start_failed" else "failed"
+    }
+
+    /** Value-free diagnostics (phase and reason names only); never blocks the loop. */
+    private fun sendLoopTrace(phase: VoiceLoopPhase, reason: String?) {
+        if (_state.value.demo) return
+        val at = System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.sendVoiceLoopTraceBestEffort(phase.name.lowercase(), reason, at) }
+        }
+    }
+
+    /** STARTING -> LISTENING only once recording is real; then ends the turn on silence or max length. */
+    private suspend fun runLoopListening() {
+        val started = withTimeoutOrNull(LOOP_START_TIMEOUT_MS) { _state.first { it.recording } }
+        if (started == null) {
+            dispatchVoiceLoop(VoiceLoopEvent.StartTimeout)
+            return
+        }
+        dispatchVoiceLoop(VoiceLoopEvent.RecordingStarted)
+        val detector = SpeechEndpointDetector(SystemClock.elapsedRealtime())
+        while (_state.value.voiceLoop == VoiceLoopPhase.LISTENING && _state.value.recording) {
+            delay(100)
+            when (val decision = detector.update(_state.value.voiceLevel, SystemClock.elapsedRealtime())) {
+                EndpointDecision.CONTINUE -> Unit
+                else -> {
+                    dispatchVoiceLoop(VoiceLoopEvent.EndOfSpeech(maxLength = decision == EndpointDecision.MAX_LENGTH))
+                    return
+                }
             }
         }
     }
@@ -410,8 +471,14 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun beginPushToTalk() {
-        if (_state.value.recording || _state.value.pending) return
+    fun beginPushToTalk() = beginPushToTalk(fromLoop = false)
+
+    /** The voice loop ignores the shared [WearUiState.pending] busy flag; only real recording/transcribing blocks it. */
+    private fun beginPushToTalk(fromLoop: Boolean) {
+        if (_state.value.recording) return
+        if (fromLoop) {
+            if (_state.value.transcribing) return
+        } else if (_state.value.pending) return
         if (io.github.sirbughunter.agenticwear.live.LiveVoiceService.state.value.phase in setOf("creating", "connecting", "live", "reconnecting")) {
             _state.update { it.copy(error = "End live voice before starting dictation. Your draft is retained.") }
             return
@@ -1203,7 +1270,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 transcriptionElapsedMillis = elapsedMillis ?: it.transcriptionElapsedMillis,
                 voiceLevel = 0f,
                 transcript = transcript,
-                screen = WearScreen.TRANSCRIPT,
+                screen = if (it.voiceLoop != VoiceLoopPhase.IDLE) it.screen else WearScreen.TRANSCRIPT,
             )
         }
     }
@@ -1586,6 +1653,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             transcribing = current.transcribing && !transcriptReady && !transcriptionFailed,
             transcriptionElapsedMillis = elapsedMillis,
             voiceLevel = if (transcriptReady || transcriptionFailed) 0f else current.voiceLevel,
+            voiceLoop = current.voiceLoop,
+            screen = if (current.voiceLoop != VoiceLoopPhase.IDLE) current.screen else restored.screen,
         )
     }
 

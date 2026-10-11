@@ -46,6 +46,11 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
       callHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(), threadHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(),
       state: z.string().regex(/^[A-Z_]{1,32}$/u).optional(), count: z.number().int().min(0).max(65_536).optional() }).strict()).max(80),
   }).strict(),
+  // Value-free voice loop diagnostics from the Watch (Dot/cloud turn-based voice): phase and reason names only.
+  z.object({ version: z.literal(1), kind: z.literal("voice.loop.trace"), requestId: safeId,
+    phase: z.enum(["idle", "starting", "listening", "sending", "waiting", "speaking"]),
+    reason: z.string().regex(/^[a-z_]{1,48}$/u).optional(),
+    at: z.number().int().nonnegative() }).strict(),
   // Metadata-only notification timing from the Watch: epoch milliseconds on the Watch clock and
   // per-alert decisions. Never message text, titles or details.
   z.object({ version: z.literal(1), kind: z.literal("notify.trace"), requestId: safeId,

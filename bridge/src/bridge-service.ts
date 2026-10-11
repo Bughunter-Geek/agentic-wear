@@ -399,6 +399,10 @@ export class BridgeService {
             fetchCompletedAt: payload.fetchCompletedAt, fetchAttempt: payload.fetchAttempt,
             deliveredVia: payload.deliveredVia, alerts: payload.alerts }));
           return;
+        case "voice.loop.trace":
+          console.log(JSON.stringify({ level: "info", message: "watch.voice.loop.trace", receivedAt: Date.now(),
+            phase: payload.phase, reason: payload.reason, at: payload.at }));
+          return;
         case "relay.failures":
           // Watch-side relay request failures (operation, HTTP status, exception class, epoch ms). No text.
           console.log(JSON.stringify({ level: "info", message: "watch.relay.failures", receivedAt: Date.now(),

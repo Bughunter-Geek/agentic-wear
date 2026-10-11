@@ -656,6 +656,18 @@ class AgenticWearRepository(private val context: Context) {
     }
 
     /** Diagnostics only: any failure or delay here is dropped and never reaches inbox handling or notifications. */
+    suspend fun sendVoiceLoopTraceBestEffort(phase: String, reason: String?, at: Long) {
+        try {
+            withTimeoutOrNull(NOTIFY_TRACE_SEND_TIMEOUT_MS) {
+                sendEncoded(PayloadCodec.encodeVoiceLoopTrace(UUID.randomUUID().toString(), phase, reason, at))
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Diagnostics only.
+        }
+    }
+
     private suspend fun sendNotifyTraceBestEffort(trace: NotifyTrace) {
         try {
             withTimeoutOrNull(NOTIFY_TRACE_SEND_TIMEOUT_MS) {
