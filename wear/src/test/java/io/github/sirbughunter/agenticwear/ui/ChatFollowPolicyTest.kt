@@ -50,3 +50,34 @@ class ChatFollowPolicyTest {
         sendNotice = null,
     )
 }
+
+class ChatFollowIntentTest {
+    private fun rev(vararg ids: String, status: String? = null) = ChatFollowRevision(
+        ids.map { ChatMessage(it, "t", ChatRole.ASSISTANT, it, ChatPhase.FINAL_ANSWER) }, true, null, null, status)
+
+    @Test
+    fun `several rows appended at once still follow while following`() {
+        val follow = nextFollowLatest(true, userScrollEnded = false, atBottom = false, tappedNewest = false)
+        assertTrue(shouldFollowChatRevision(false, follow, rev("a"), rev("a", "b", "c", status = "Working")))
+    }
+
+    @Test
+    fun `user scroll up stops following and returning to bottom resumes`() {
+        var follow = nextFollowLatest(true, userScrollEnded = true, atBottom = false, tappedNewest = false)
+        assertFalse(follow)
+        assertFalse(shouldFollowChatRevision(false, follow, rev("a"), rev("a", "b")))
+        follow = nextFollowLatest(follow, userScrollEnded = true, atBottom = true, tappedNewest = false)
+        assertTrue(shouldFollowChatRevision(false, follow, rev("a"), rev("a", "b")))
+    }
+
+    @Test
+    fun `tapping jump to newest follows again`() {
+        val follow = nextFollowLatest(false, userScrollEnded = false, atBottom = false, tappedNewest = true)
+        assertTrue(shouldFollowChatRevision(false, follow, rev("a"), rev("a", "b")))
+    }
+
+    @Test
+    fun `no user scroll keeps the current intent`() {
+        assertFalse(nextFollowLatest(false, userScrollEnded = false, atBottom = true, tappedNewest = false))
+    }
+}

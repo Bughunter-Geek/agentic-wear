@@ -105,21 +105,33 @@ internal fun ChatScreen(
             (if (agentThinking) 1 else 0)
             + (if (submissionLabel != null) 1 else 0)
         ) - 1
-    val nearLatest by remember {
-        derivedStateOf {
-            val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
-            visible >= listState.layoutInfo.totalItemsCount - 2
-        }
-    }
     // Re-entering a chat must position its current content again.
     var positionedThreadId by remember { mutableStateOf<String?>(null) }
     val displayThreadId = state.selectedThreadId ?: state.sendingDraft?.requestId ?: "new-chat"
     var previousFollowRevision by remember(displayThreadId) { mutableStateOf<ChatFollowRevision?>(null) }
+    // The reader's intent, not post-layout geometry: only a user scroll can change it (or the jump button).
+    var followLatest by remember(displayThreadId) { mutableStateOf(true) }
+    val programmaticScroll = remember { booleanArrayOf(false) }
+    LaunchedEffect(displayThreadId) {
+        var userScroll = false
+        var wasScrolling = false
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling && !wasScrolling) userScroll = !programmaticScroll[0]
+            if (!scrolling && wasScrolling && userScroll) {
+                val info = listState.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()
+                val atBottom = last == null || (last.index >= info.totalItemsCount - 1 &&
+                    last.offset + last.size <= info.viewportEndOffset - info.afterContentPadding + CHAT_BOTTOM_TOLERANCE_PX)
+                followLatest = nextFollowLatest(followLatest, userScrollEnded = true, atBottom = atBottom, tappedNewest = false)
+            }
+            wasScrolling = scrolling
+        }
+    }
     LaunchedEffect(displayThreadId, followRevision) {
         val currentThreadId = displayThreadId
         val shouldFollow = shouldFollowChatRevision(
             firstPosition = positionedThreadId != currentThreadId,
-            nearLatest = nearLatest,
+            nearLatest = followLatest,
             previous = previousFollowRevision,
             current = followRevision,
         )
@@ -127,7 +139,8 @@ internal fun ChatScreen(
         if (shouldFollow) {
             snapshotFlow { listState.layoutInfo.totalItemsCount to listState.layoutInfo.viewportSize.height }
                 .first { (count, height) -> count > lastContentIndex && height > 0 }
-            listState.scrollChatToBottom(lastContentIndex, animated = false)
+            programmaticScroll[0] = true
+            try { listState.scrollChatToBottom(lastContentIndex, animated = false) } finally { programmaticScroll[0] = false }
             positionedThreadId = currentThreadId
         }
     }
@@ -229,14 +242,18 @@ internal fun ChatScreen(
         }
 
         AnimatedVisibility(
-            visible = !nearLatest,
+            visible = !followLatest,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (hasActionablePermission) 14.dp else 60.dp),
             enter = fadeIn(tween(220)) + slideInVertically(tween(260, easing = AwEase)) { it / 3 },
             exit = fadeOut(tween(160)),
         ) {
             AwCircleButton(Icons.Rounded.KeyboardArrowDown, "Jump to latest message", onClick = {
+                followLatest = nextFollowLatest(followLatest, userScrollEnded = false, atBottom = false, tappedNewest = true)
                 scope.launch {
-                    listState.scrollChatToBottom(listState.layoutInfo.totalItemsCount - 1, animated = ValueAnimator.areAnimatorsEnabled())
+                    programmaticScroll[0] = true
+                    try {
+                        listState.scrollChatToBottom(listState.layoutInfo.totalItemsCount - 1, animated = ValueAnimator.areAnimatorsEnabled())
+                    } finally { programmaticScroll[0] = false }
                 }
             }, size = 34.dp)
         }
@@ -263,6 +280,13 @@ internal data class ChatFollowRevision(
     val submissionStatus: String? = null,
 )
 
+internal const val CHAT_BOTTOM_TOLERANCE_PX = 24
+
+/** Reader intent: a finished user scroll sets it from the bottom position; the jump button sets it. */
+internal fun nextFollowLatest(current: Boolean, userScrollEnded: Boolean, atBottom: Boolean, tappedNewest: Boolean): Boolean =
+    if (tappedNewest) true else if (userScrollEnded) atBottom else current
+
+/** [nearLatest] is the reader's follow intent ([nextFollowLatest]), not measured geometry. */
 internal fun shouldFollowChatRevision(
     firstPosition: Boolean,
     nearLatest: Boolean,
