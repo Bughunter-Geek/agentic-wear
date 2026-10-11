@@ -12,6 +12,8 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Tune
@@ -177,23 +179,36 @@ private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (St
         append(reason?.label ?: session.status.label)
         if (session.status != SessionStatus.ERROR && session.updatedAtMillis > 0) append(" · ").append(ago)
         if (session.ownedByWear) append(" · Watch")
-        sourceLabel(session.source)?.let { append(" · ").append(it) }
     }
     AwRowCard(
         onClick = { onSelect(session.id) },
         selected = session.id == selectedId,
-        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "${session.title}, $meta" },
+        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "${session.title}, $meta${sourceLabel(session.source)?.let { ", $it chat" }.orEmpty()}" },
     ) {
         StatusIndicator(session.status.kind())
         Column(Modifier.weight(1f)) {
             Text(session.title, style = AwType.Row, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Icon(Icons.Rounded.Laptop, contentDescription = null, tint = Aw.TextTertiary, modifier = Modifier.size(11.dp))
+                Icon(sessionSourceIcon(session.source), contentDescription = null, tint = Aw.TextTertiary, modifier = Modifier.size(11.dp))
                 Text(meta, color = session.status.textColor, fontSize = 10.5.sp, lineHeight = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
+}
+
+internal enum class SessionSourceGlyph { MAC, CLOUD, DOT }
+
+internal fun sessionSourceGlyph(source: String?): SessionSourceGlyph = when (source) {
+    "cloud" -> SessionSourceGlyph.CLOUD
+    "dot" -> SessionSourceGlyph.DOT
+    else -> SessionSourceGlyph.MAC
+}
+
+private fun sessionSourceIcon(source: String?) = when (sessionSourceGlyph(source)) {
+    SessionSourceGlyph.CLOUD -> Icons.Rounded.Cloud
+    SessionSourceGlyph.DOT -> Icons.Rounded.AutoAwesome
+    SessionSourceGlyph.MAC -> Icons.Rounded.Laptop
 }
 
 /** Compact relative time for list rows: now, 5m, 3h, 2d. */
