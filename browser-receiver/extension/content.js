@@ -25,7 +25,10 @@
   function readTurns(){
     if(isDot){
       if(!dotIdentity())return [];
-      return [...document.querySelectorAll('main article.message-row[data-message-id]')].flatMap(row=>{
+      // Dot keeps newest-first DOM order and flips it visually; order by on-screen top (oldest first) so the newest 20 are kept oldest->newest. Ties keep DOM order.
+      const rows=[...document.querySelectorAll('main article.message-row[data-message-id]')].map((row,i)=>({row,i,top:row.getBoundingClientRect().top}))
+        .sort((a,b)=>(a.top-b.top)||(a.i-b.i)).map(x=>x.row);
+      return rows.flatMap(row=>{
         const match=/~Sentinel_([a-f0-9]{32})$/.exec(row.dataset.messageId);
         if(!match)return [];
         const body=row.querySelector('.message-body'), user=row.classList.contains('self');

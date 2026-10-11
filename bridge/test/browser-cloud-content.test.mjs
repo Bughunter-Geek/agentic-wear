@@ -40,6 +40,25 @@ it('extracts Dot role and body without timestamps or quoted actions; refuses ano
  const out=(await run(body,dotUrl)).at(-1);assert.deepEqual(out.turns.map(t=>[t.role,t.reply]),[['user','My prompt'],['assistant','Lumen reply']]);
  assert.equal((await run(body.replaceAll(ns,'c'.repeat(32)),dotUrl)).at(-1).blocked,true);
 });
+async function runDotWithTops(body,tops){
+ const dom=new JSDOM(body,{url:dotUrl,runScripts:'outside-only'}),seen=[];
+ dom.window.chrome={runtime:{sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();}}};
+ Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
+ dom.window.Element.prototype.getBoundingClientRect=function(){return {top:tops(this),bottom:0,left:0,right:0,width:0,height:0};};
+ dom.window.eval(script);await new Promise(r=>setTimeout(r,130));dom.window.close();return seen;
+}
+const dotPage=rows=>`<main><button data-orbit-profile-trigger="true" aria-label="Open Lumen’s profile"></button>${rows.join('')}</main>`;
+it('orders Dot rows oldest-first by on-screen position when the DOM is newest-first',async()=>{
+ const body=dotPage([dotRow('d'.repeat(32),'assistant','reply 2'),dotRow('c'.repeat(32),'user','prompt 2'),dotRow('b'.repeat(32),'assistant','reply 1'),dotRow('a'.repeat(32),'user','prompt 1')]);
+ const top=el=>({['d'.repeat(32)]:300,['c'.repeat(32)]:200,['b'.repeat(32)]:100,['a'.repeat(32)]:0})[/Sentinel_([a-f0-9]{32})$/.exec(el.dataset.messageId)[1]];
+ const out=(await runDotWithTops(body,top)).at(-1);
+ assert.deepEqual(out.turns.map(t=>[t.role,t.reply]),[['user','prompt 1'],['assistant','reply 1'],['user','prompt 2'],['assistant','reply 2']]);
+});
+it('keeps Dot DOM order when every row rect is zero',async()=>{
+ const body=dotPage([dotRow('a'.repeat(32),'user','first'),dotRow('b'.repeat(32),'assistant','second'),dotRow('c'.repeat(32),'user','third')]);
+ const out=(await runDotWithTops(body,()=>0)).at(-1);
+ assert.deepEqual(out.turns.map(t=>t.reply),['first','second','third']);
+});
 it('extracts user prompts separately from response controls',async()=>{
  const out=(await run(html.replace('<div class="group">','<div data-content-search-unit-key="p1"><div data-user-message-bubble="true">My prompt</div></div><div class="group">'))).at(-1);
  assert.deepEqual(out.turns[0].prompts,[{id:'p1',text:'My prompt'}]);assert.equal(out.turns[0].reply,'CLOUD WATCH TEST');
