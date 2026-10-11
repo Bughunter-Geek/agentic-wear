@@ -1,0 +1,38 @@
+import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
+import {createHash,randomUUID} from 'node:crypto';
+import {chmod,mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {afterEach,it,expect,vi} from 'vitest';
+import {DesktopCloudReceiver} from '../src/desktop-cloud-receiver.js';
+import {desktopCloudPairBinding} from '../src/desktop-cloud-protocol.js';
+const cleanup:(()=>Promise<void>)[]=[];
+afterEach(async()=>{for(const f of cleanup.reverse())await f();cleanup.length=0;});
+it('native host persists send identity, checks uncertainty without resending, and isolates request content',async()=>{
+ const home=await mkdtemp('/tmp/aw-native-');cleanup.push(()=>rm(home,{recursive:true,force:true}));
+ const dir=join(home,'.agentic-wear');await mkdir(dir,{mode:0o700});await chmod(home,0o700);
+ const pairing={pairId:'test',bridgePublicKey:'test',watchPublicKey:'test'},threadId='01a1188b-a850-755b-91ec-717f6182900a';
+ const config={version:1,enabled:true,capability:'a'.repeat(64),pairBinding:desktopCloudPairBinding(pairing),targets:[{hostId:'durable',threadId,title:'Test',sendEnabled:true}],reconcileMs:2000};
+ const path=join(dir,'desktop-cloud.json');await writeFile(path,JSON.stringify(config),{mode:0o600});
+ const receiver=new DesktopCloudReceiver(pairing,vi.fn(),vi.fn(),path,vi.fn());await receiver.start();cleanup.push(()=>receiver.close());
+ const key=JSON.parse(await readFile('../browser-receiver/extension/manifest.json','utf8')).key as string;
+ const id=createHash('sha256').update(Buffer.from(key,'base64')).digest('hex').slice(0,32).split('').map(c=>String.fromCharCode(97+parseInt(c,16))).join('');
+ const commands:Record<string,unknown>[]=[];let child:ChildProcessWithoutNullStreams;
+ const write=(value:unknown)=>{const b=Buffer.from(JSON.stringify(value)),h=Buffer.alloc(4);h.writeUInt32LE(b.length);child.stdin.write(Buffer.concat([h,b]));};
+ const launch=()=>{
+  child=spawn(process.execPath,[resolve('../browser-receiver/native-host.bundle.mjs'),`chrome-extension://${id}/`],{env:{...process.env,HOME:home}});
+  const owned=child;cleanup.push(async()=>{if(owned.exitCode===null&&owned.signalCode===null){owned.kill();await new Promise<void>(r=>owned.once('exit',()=>r()));}});
+  let bytes=Buffer.alloc(0);child.stdout.on('data',(b:Buffer)=>{bytes=Buffer.concat([bytes,b]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);if(bytes.length<n+4)return;const value=JSON.parse(bytes.subarray(4,n+4).toString()) as Record<string,unknown>;bytes=bytes.subarray(n+4);if(value.kind==='send'){commands.push(value);write({kind:'send-result',result:{requestId:value.requestId,threadId:value.threadId,outcome:'uncertain',message:'Test lost acknowledgement'}});}}});
+ };
+ const page={version:1,kind:'observation',url:`https://chatgpt.com/local/${threadId}`,documentId:randomUUID(),observedAt:Date.now(),extractionMs:1,visibility:'hidden',blocked:false,inputReady:true,turns:[{id:randomUUID(),prompts:[{id:'old',text:'old prompt'}],reply:'old reply',completed:true,evidence:'response-actions-without-stop'}]};
+ launch();write(page);await vi.waitFor(()=>expect(receiver.sessions()[0]?.watchReady).toBe(true));
+ await expect(receiver.submitText(threadId,'request-one','Hello')).rejects.toThrow('uncertain');expect(commands).toHaveLength(1);
+ await expect(receiver.submitText(threadId,'not-seen','Hello',true)).rejects.toThrow('uncertain');expect(commands).toHaveLength(1);
+ write({...page,observedAt:Date.now(),turns:[...page.turns,{...page.turns[0],id:randomUUID(),prompts:[{id:'new',text:'Hello'}]}]});
+ await vi.waitFor(()=>expect(receiver.snapshot(threadId).messages.some(m=>m.id==='user:new')).toBe(true));
+ await expect(receiver.submitText(threadId,'request-one','Hello',true)).resolves.toMatchObject({outcome:'accepted',messageId:'new'});expect(commands).toHaveLength(1);
+ const previous=child!;previous.kill();await new Promise<void>(r=>previous.once('exit',()=>r()));
+ await vi.waitFor(()=>expect(receiver.sessions()[0]?.watchReady).toBe(false));launch();write({...page,observedAt:Date.now()});
+ await vi.waitFor(()=>expect(receiver.sessions()[0]?.watchReady).toBe(true));
+ await expect(receiver.submitText(threadId,'request-one','Hello')).resolves.toMatchObject({outcome:'accepted'});expect(commands).toHaveLength(1);
+ await expect(receiver.submitText(threadId,'request-one','Different')).rejects.toThrow('different content');expect(commands).toHaveLength(1);
+});

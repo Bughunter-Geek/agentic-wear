@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Agentic Wear Cloud Receiver",
+  "version": "0.2.0",
+  "description": "Text replies and message history for your selected cloud chat and Lumen.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAltGroWHoTDC1poQMHvmxH5pjxU7pSP0QE8eYgYd4GouhzI4CTXEGCEiuG05I86GFD6PKRdKz2o1ZGmDLuX18dX8xGrWp3u/OAw1PDizh/Ttitu8sq2fO1xb30C9YgHluQsoOXxZb+W2T97MKwqxJX9MxItv6/+yYgxYZXhC1dFaoj6QJbq9+/cXArfdALJweWEgJB/Jplgsb6rRUzp+5awHShNU4OHedgPU42Y+LPONnTz6xtIW7eHQV5MmvFnpdoTeOEyUT0XZfK6ep/rFLQE8g2To1jSiqXNzg2Lepkie7Zkb9NbKXGqA/Xt/il+AuFe8sqDDOCbrnZ+917K92pQIDAQAB",
+  "permissions": [
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "action": {
+    "default_title": "Agentic Wear Cloud Receiver"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/local/01a1188b-a850-755b-91ec-717f6182900a*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/dots/home"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

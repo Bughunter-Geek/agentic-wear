@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { ForeignThreadSelectionError, type TerminalEvent } from "../src/app-server-client.js";
 import { BridgeService, publicError, publicRequestError } from "../src/bridge-service.js";
 
+function cloudThrottleState() {
+  return { cloudHistorySignatures: new Map(), cloudInlineLastAt: new Map(), cloudInlineTimers: new Map(), cloudTerminalAt: new Map(),
+    watchedThreadId: null, watchExpiresAt: 0 };
+}
+
 describe("BridgeService App Server transport", () => {
   it("keeps a live call's chat updating past the watch window and refreshes it when the call stops", async () => {
     vi.useFakeTimers();
@@ -209,6 +214,7 @@ describe("BridgeService App Server transport", () => {
         runSocket: vi.fn().mockResolvedValue(undefined),
       },
       appServer: { connect, close: vi.fn() },
+      desktopCloud: { close: vi.fn().mockResolvedValue(undefined) }, cloudInlineTimers: new Map(),
       liveVoice: { close: vi.fn().mockResolvedValue(undefined) },
       controller: new AbortController(),
       transcriber: {},
@@ -217,6 +223,39 @@ describe("BridgeService App Server transport", () => {
 
     await expect((service as unknown as BridgeService).run()).rejects.toBe(stopAfterConnect);
     expect(connect).toHaveBeenCalledWith("daemon");
+  });
+
+  it("routes Watch text through the browser adapter and never the legacy controller", async () => {
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    const send = vi.fn().mockResolvedValue(undefined), cloudTextRoute = vi.fn(), submitTurn = vi.fn();
+    Object.assign(service, { desktopCloud: { owns: (id: unknown) => id === "cloud", submitText:vi.fn().mockResolvedValue({outcome:"accepted"}) }, cloudTextRoute,
+      sendChatSnapshot:vi.fn().mockResolvedValue(undefined),
+      appServer: { submitTurn }, send, sendSessions: vi.fn().mockResolvedValue(undefined) });
+    await (service.handleWatchPayload as (value: unknown) => Promise<void>).call(service,
+      { version: 1, kind: "turn.submit", requestId: "r", threadId: "cloud", text: "Keep draft", effort: "high" });
+    expect(cloudTextRoute).not.toHaveBeenCalled(); expect(submitTurn).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: "turn.accepted", requestId: "r", selectionApplied:false, state:"running" }));
+  });
+
+  it("gives desktop cloud history precedence over stale controller snapshots", async () => {
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    const send = vi.fn().mockResolvedValue(undefined), cloudTextRoute = vi.fn();
+    const snapshot = { threadId: "cloud", title: "Fresh", status: "idle", messages: [], paragraphs: [] };
+    Object.assign(service, { desktopCloud: { owns: () => true, snapshot: () => snapshot }, cloudTextRoute, send, ...cloudThrottleState() });
+    await (service.sendChatSnapshot as (id: string, requestId: string) => Promise<void>).call(service, "cloud", "read");
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ ...snapshot, requestId: "read", kind: "chat.snapshot" }), "request");
+    expect(cloudTextRoute).not.toHaveBeenCalled();
+  });
+
+  it("does not revive a persisted prompt for a newly receive-only cloud chat", async () => {
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    const reportBlockedPendingTurn = vi.fn().mockResolvedValue(undefined), submitTurn = vi.fn();
+    Object.assign(service, { desktopCloud: { owns: () => true },
+      pendingTurns: new Map([["r", { payload: { requestId: "r", threadId: "cloud", text: "Kept draft" } }]]),
+      appServer: { submitTurn }, reportBlockedPendingTurn });
+    await (service.processPendingTurnsNow as () => Promise<void>).call(service);
+    expect(submitTurn).not.toHaveBeenCalled();
+    expect(reportBlockedPendingTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "Kept draft", blockedReason: expect.stringContaining("receives messages only") }));
   });
 
   it("acknowledges an owner-blocked prompt as waiting after durable persistence", async () => {
@@ -789,4 +828,85 @@ describe("new local draft protocol versus legacy watch", () => {
   expect(reviseDraft).toHaveBeenCalledOnce();
   expect(rewrite).not.toHaveBeenCalled();
  });
+});
+
+describe("cloud history push throttling", () => {
+  function setup() {
+    let n = 0;
+    const send = vi.fn().mockResolvedValue(undefined);
+    const snapshot = () => ({ threadId: "cloud", title: "T", status: "running", paragraphs: [],
+      messages: [{ id: "m", turnId: "t", role: "assistant", kind: "message", text: `reply ${n}`, phase: "unknown", approvalId: null, canControl: false, resolved: true }] });
+    const service = Object.create(BridgeService.prototype) as Record<string, unknown>;
+    Object.assign(service, cloudThrottleState(), { desktopCloud: { owns: () => true, snapshot: () => snapshot() }, send });
+    const push = async (requestId?: string) => {
+      n += 1;
+      await (service.sendChatSnapshot as (id: string, requestId?: string) => Promise<void>).call(service, "cloud", requestId);
+    };
+    const wakes = () => send.mock.calls.filter((call) => call[1] !== undefined);
+    const quiet = () => send.mock.calls.filter((call) => call[1] === undefined);
+    return { service, send, push, wakes, quiet };
+  }
+  const run = async (body: () => Promise<void>) => {
+    vi.useFakeTimers(); vi.setSystemTime(1_000_000);
+    try { await body(); } finally { vi.useRealTimers(); }
+  };
+
+  it("sends only the quiet snapshot when unwatched, with no request and no recent terminal", () => run(async () => {
+    const { push, wakes, quiet } = setup();
+    await push(); await push();
+    expect(wakes()).toHaveLength(0);
+    expect(quiet()).toHaveLength(2);
+    expect(quiet()[0]?.[0]).toMatchObject({ kind: "chat.snapshot" });
+  }));
+
+  it("wakes immediately for an explicit request", () => run(async () => {
+    const { push, wakes } = setup();
+    await push("req-1");
+    expect(wakes()).toHaveLength(1);
+    expect(wakes()[0]?.[1]).toBe("request");
+  }));
+
+  it("wakes for a watched thread until the watch expires", () => run(async () => {
+    const { service, push, wakes } = setup();
+    Object.assign(service, { watchedThreadId: "cloud", watchExpiresAt: Date.now() + 90_000 });
+    await push();
+    expect(wakes().map((call) => call[1])).toEqual(["watched"]);
+    await vi.advanceTimersByTimeAsync(91_000);
+    await push();
+    expect(wakes()).toHaveLength(1);
+  }));
+
+  it("wakes within 15 s after a relayed terminal event, not after", () => run(async () => {
+    const { service, push, wakes } = setup();
+    (service.cloudTerminalAt as Map<string, number>).set("cloud", Date.now());
+    await vi.advanceTimersByTimeAsync(14_000);
+    await push();
+    expect(wakes().map((call) => call[1])).toEqual(["terminal"]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await push();
+    expect(wakes()).toHaveLength(1);
+  }));
+
+  it("coalesces five rapid changes while watched into one immediate and one trailing push", () => run(async () => {
+    const { service, push, wakes, quiet, send } = setup();
+    Object.assign(service, { watchedThreadId: "cloud", watchExpiresAt: Date.now() + 90_000 });
+    for (let i = 0; i < 5; i++) { await push(); await vi.advanceTimersByTimeAsync(500); }
+    expect(wakes()).toHaveLength(1);
+    expect(quiet()).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(wakes()).toHaveLength(2);
+    const trailing = wakes()[1]?.[0] as { messages: Array<{ text: string }> };
+    expect(trailing.messages[0]?.text).toBe("reply 5");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(send.mock.calls.filter((call) => call[1] !== undefined)).toHaveLength(2);
+    expect((service.cloudInlineTimers as Map<string, unknown>).size).toBe(0);
+  }));
+
+  it("drops the trailing push when the thread stops being eligible", () => run(async () => {
+    const { service, push, wakes } = setup();
+    Object.assign(service, { watchedThreadId: "cloud", watchExpiresAt: Date.now() + 2_000 });
+    await push(); await push();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(wakes()).toHaveLength(1);
+  }));
 });

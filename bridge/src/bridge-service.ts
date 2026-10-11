@@ -1,7 +1,9 @@
+import { cloudHistoryPayloads } from "./cloud-history-push.js";
 import { TurnTiming } from "./turn-timing.js";
 import { LiveVoice } from "./live-voice.js";
 import { CloudTextProof } from "./cloud-text-proof.js";
 import { CloudTextSession } from "./cloud-text-session.js";
+import { DesktopCloudReceiver } from "./desktop-cloud-receiver.js";
 import type { BridgeConfig } from "./config.js";
 import { TurnReceipts } from "./turn-receipts.js";
 import { configPath, writeConfig } from "./config.js";
@@ -75,6 +77,12 @@ export class BridgeService {
   private readonly pendingTurns = new Map<string, StoredPendingTurn>();
   private readonly cloudTextProof = new CloudTextProof();
   private readonly cloudTextSession = new CloudTextSession();
+  private readonly desktopCloud: DesktopCloudReceiver;
+  private readonly cloudHistorySignatures = new Map<string,string>();
+  // High-priority (wake) history pushes are throttled per thread. See sendCloudHistory.
+  private readonly cloudInlineLastAt = new Map<string,number>();
+  private readonly cloudInlineTimers = new Map<string,NodeJS.Timeout>();
+  private readonly cloudTerminalAt = new Map<string,number>();
 
   constructor(
     private readonly config: BridgeConfig,
@@ -86,6 +94,15 @@ export class BridgeService {
     this.ownedThreads = new Set(config.watchOwnedThreadIds);
     this.crypto = new CryptoBox(config.pairId, privateKey, config.bridgePublicKey, config.watchPublicKey);
     this.turnReceipts = new TurnReceipts(`${configPath()}.turn-receipts-v1`, this.crypto);
+    this.desktopCloud = new DesktopCloudReceiver(config,
+      async ({ eventId, kind, turnScope, threadId, title, detail, occurredAt, requestId }) => {
+        this.cloudTerminalAt.set(threadId, Date.now());
+        await this.send({ version: 1, eventId, kind, turnScope, threadId, title, detail, occurredAt, requestId });
+      }, (threadId) => {
+        void this.sendChatSnapshot(threadId).catch((error:unknown) => {
+          console.error(JSON.stringify({level:"error",message:"Could not push cloud history",error:publicError(error)}));
+        });
+      });
     this.appServer = new AppServerClient(
       this.ownedThreads,
       (event) => this.onTerminal(event),
@@ -125,6 +142,7 @@ export class BridgeService {
       // watch. Connect through the control socket so ownership and idle state
       // are evaluated by the same App Server as Desktop.
       await this.appServer.connect("daemon");
+      await this.desktopCloud.start();
       await this.loadPendingTurns();
       await this.processPendingTurns();
       let nextCallbackAt = performance.now() + PENDING_TURN_RETRY_MS;
@@ -134,11 +152,13 @@ export class BridgeService {
         nextCallbackAt = callbackAt + PENDING_TURN_RETRY_MS;
         if (callbackLatenessMs > 500) console.log(JSON.stringify({ level: "info",
           message: "cloud.history.callback_late", at: Date.now(), callbackLatenessMs }));
-        void this.cloudTextSession?.publish((payload) => this.send(payload),
+        const legacyDelivery = (payload: SendablePayload) => this.desktopCloud?.owns(payload.threadId)
+          ? Promise.resolve() : this.send(payload);
+        void this.cloudTextSession?.publish(legacyDelivery,
           this.cloudTextSession.owns(this.watchedThreadId) && Date.now() <= this.watchExpiresAt,
           { trigger: "periodic", subscriptionAcceptedAt: this.watchAcceptedAt, subscriptionExpiresAt: this.watchExpiresAt, callbackLatenessMs })
           .catch(() => undefined);
-        void this.cloudTextProof?.publish((payload) => this.send(payload),
+        void this.cloudTextProof?.publish(legacyDelivery,
           this.cloudTextProof.owns(this.watchedThreadId) && Date.now() <= this.watchExpiresAt)
           .catch(() => undefined);
         void this.processPendingTurns().catch((error: unknown) => {
@@ -167,6 +187,9 @@ export class BridgeService {
     } finally {
       if (this.liveTimer) clearInterval(this.liveTimer);
       await this.liveVoice.close().catch(() => undefined);
+      for (const timer of this.cloudInlineTimers.values()) clearTimeout(timer);
+      this.cloudInlineTimers.clear();
+      await this.desktopCloud.close();
       await this.appServer.close();
       if (this.chatSyncTimer) clearTimeout(this.chatSyncTimer);
       this.chatSyncTimer = null;
@@ -196,10 +219,13 @@ export class BridgeService {
       this.replayGuard,
       (payload) => {
         if ((payload.kind === "turn.submit" || payload.kind === "question.answer") && !(payload.threadId !== null &&
-            (this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)))) {
+            (this.desktopCloud?.owns(payload.threadId) || this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)))) {
           this.turnTiming.begin(payload.requestId, payload.threadId, envelope.sentAt);
         }
         if (payload.kind === "transcription.create") console.log(JSON.stringify({ level: "info", message: "transcription.ingress.timing", localQueueMs: Math.round(localQueueMs * 1000) / 1000, decryptAndReplayMs: Math.round((performance.now() - receivedAt) * 1000) / 1000 }));
+        if (payload.kind === "notify.trace") console.log(JSON.stringify({ level: "info", message: "watch.notify.trace.ingress",
+          receivedAt: Date.now(), watchSentAt: envelope.sentAt, envelopeId: envelope.messageId,
+          eventIds: payload.alerts.map((alert) => alert.eventId) }));
         if (payload.kind === "chat.watch" && this.cloudTextSession?.owns(payload.threadId)) console.log(JSON.stringify({ level: "info",
           message: "cloud.history.ingress", at: Date.now(), threadId: payload.threadId, requestId: payload.requestId,
           localQueueMs, decryptAndReplayMs: Math.max(0, performance.now() - receivedAt) }));
@@ -240,6 +266,16 @@ export class BridgeService {
     // A replay claim may predate receipt support or survive a crash before
     // receipt creation. Absence is never permission to dispatch it again.
     const receipt = await this.turnReceipts.get(payload.requestId, payload);
+    if(!receipt?.response && payload.kind==="turn.submit" && payload.threadId && this.desktopCloud?.owns(payload.threadId)) {
+      try {
+        const browserResult=await this.desktopCloud.submitText(payload.threadId,payload.requestId,payload.text,true);
+        await this.send({version:1,kind:"turn.accepted",requestId:payload.requestId,threadId:payload.threadId,
+          state:"running",selectionApplied:false,message:"Delivery confirmed from the existing browser receipt. No second copy was sent."});
+        if(browserResult.nativeTurnId)await this.send({version:1,kind:"turn.started",requestId:payload.requestId,threadId:payload.threadId,
+          nativeTurnId:browserResult.nativeTurnId,deliveryState:"running",selectionApplied:false});
+        await this.sendChatSnapshot(payload.threadId); return;
+      } catch { /* Unconfirmed stays uncertain; a status check must never dispatch text. */ }
+    }
     await this.send(receipt?.response ? receipt.response as SendablePayload : {
       version: 1,
       kind: "turn.error",
@@ -295,6 +331,10 @@ export class BridgeService {
   private async handleWatchPayload(payload: WatchPayload): Promise<void> {
     let resolvedSubmit: Extract<WatchPayload, { kind: "turn.submit" }> | null = payload.kind === "turn.submit" ? payload : null;
     try {
+      if ("threadId" in payload && this.desktopCloud?.owns(payload.threadId) &&
+          ["live.start", "live.capability", "feedback.submit"].includes(payload.kind)) {
+        throw new Error("This browser cloud connection supports text replies and history. Live voice and feedback are not connected.");
+      }
       if ("threadId" in payload && (this.cloudTextProof?.owns(payload.threadId) || this.cloudTextSession?.owns(payload.threadId)) &&
           (payload.kind === "live.start" || payload.kind === "live.capability" || payload.kind === "feedback.submit")) {
         throw new Error("This cloud connection supports text and chat history. Native cloud voice and feedback are not connected.");
@@ -456,6 +496,7 @@ export class BridgeService {
         resolvedSubmit.threadId !== null &&
         !this.cloudTextProof?.owns(resolvedSubmit.threadId) &&
         !this.cloudTextSession?.owns(resolvedSubmit.threadId) &&
+        !this.desktopCloud?.owns(resolvedSubmit.threadId) &&
         isRetryablePendingTurnError(error)
       ) {
         // A Watch prompt already carries a stable idempotency key. If Codex's
@@ -512,6 +553,17 @@ export class BridgeService {
 
   /** Shared by turn.submit and question.answer: one dispatch path, one receipt/idempotency key. */
   private async submitTurn(payload: Extract<WatchPayload, { kind: "turn.submit" }>): Promise<void> {
+          if(payload.threadId && this.desktopCloud?.owns(payload.threadId)) {
+            const browserResult=await this.desktopCloud.submitText(payload.threadId,payload.requestId,payload.text);
+            this.watchedThreadId=payload.threadId;
+            this.watchAcceptedAt=Date.now(); this.watchExpiresAt=this.watchAcceptedAt+CHAT_WATCH_TTL_MS;
+            await this.send({version:1,kind:"turn.accepted",requestId:payload.requestId,threadId:payload.threadId,
+              state:"running",selectionApplied:false,message:"Message appeared in the connected browser chat. Its current model settings are kept."});
+            if(browserResult.nativeTurnId)await this.send({version:1,kind:"turn.started",requestId:payload.requestId,threadId:payload.threadId,
+              nativeTurnId:browserResult.nativeTurnId,deliveryState:"running",selectionApplied:false});
+            await this.sendChatSnapshot(payload.threadId);
+            return;
+          }
     const cloudRoute = await this.cloudTextRoute(payload.threadId);
     if (cloudRoute) {
       await cloudRoute.enqueue(payload.requestId, payload.text);
@@ -697,10 +749,15 @@ export class BridgeService {
   private async sendSessions(requestId?: string): Promise<void> {
     const sessions: SessionView[] = await this.appServer.listSessions();
     const cloudSession = await this.cloudTextSession?.session() ?? await this.cloudTextProof?.session();
-    if (cloudSession) {
+    if (cloudSession && !this.desktopCloud?.owns(cloudSession.id)) {
       const duplicate = sessions.findIndex((session) => session.id === cloudSession.id);
       if (duplicate >= 0) sessions.splice(duplicate, 1);
       sessions.unshift(cloudSession);
+    }
+    for (const session of this.desktopCloud?.sessions() ?? []) {
+      const duplicate = sessions.findIndex((existing) => existing.id === session.id);
+      if (duplicate >= 0) sessions.splice(duplicate, 1);
+      sessions.unshift(session);
     }
     let models: ModelView[] = [];
     try {
@@ -733,6 +790,44 @@ export class BridgeService {
     requestId?: string,
     forceRefresh = false,
   ): Promise<void> {
+    if (this.desktopCloud?.owns(threadId)) {
+      const snapshot=this.desktopCloud.snapshot(threadId);
+      const signature=JSON.stringify(snapshot);
+      if(!requestId && this.cloudHistorySignatures.get(threadId)===signature)return;
+      this.cloudHistorySignatures.set(threadId,signature);
+      try {
+        const {full,inline}=cloudHistoryPayloads(snapshot,Date.now(),requestId);
+        // The complete supported window always reaches the inbox quietly. The
+        // high-priority inline push (latest history inside the encrypted push,
+        // independent of an inbox DNS lookup) is limited to moments where the
+        // Watch is plausibly looking, and coalesced to one per 3 s per thread.
+        // Unthrottled wake pushes with no visible notification risk FCM
+        // deprioritising the app and drain the Watch battery.
+        const reason=requestId?"request" as const:this.cloudInlineReason(threadId);
+        const sameAsFull=JSON.stringify(full)===JSON.stringify(inline);
+        if(reason==="request"){
+          this.clearCloudInlineTimer(threadId);
+          this.cloudInlineLastAt.set(threadId,Date.now());
+          await this.send(inline,reason);
+          if(!sameAsFull)await this.send(full);
+        } else if(reason){
+          const wait=(this.cloudInlineLastAt.get(threadId)??0)+CLOUD_INLINE_MIN_INTERVAL_MS-Date.now();
+          if(wait<=0){
+            this.clearCloudInlineTimer(threadId);
+            this.cloudInlineLastAt.set(threadId,Date.now());
+            await this.send(inline,reason);
+            if(!sameAsFull)await this.send(full);
+          } else {
+            await this.send(full);
+            this.scheduleCloudInline(threadId,wait);
+          }
+        } else await this.send(full);
+      } catch(error) {
+        if(this.cloudHistorySignatures.get(threadId)===signature)this.cloudHistorySignatures.delete(threadId);
+        throw error;
+      }
+      return;
+    }
     const cloudRoute = await this.cloudTextRoute(threadId);
     if (cloudRoute && cloudRoute === this.cloudTextSession) {
       // A direct refresh also carries durable request progress, without waiting
@@ -775,7 +870,39 @@ export class BridgeService {
     return Promise.resolve();
   }
 
-  private async send(payload: SendablePayload): Promise<void> {
+  private cloudInlineReason(threadId: string): "watched" | "terminal" | null {
+    const now = Date.now();
+    if (this.watchedThreadId === threadId && now <= this.watchExpiresAt) return "watched";
+    const terminalAt = this.cloudTerminalAt.get(threadId);
+    if (terminalAt !== undefined && now - terminalAt <= CLOUD_INLINE_TERMINAL_WINDOW_MS) return "terminal";
+    return null;
+  }
+
+  private clearCloudInlineTimer(threadId: string): void {
+    const timer = this.cloudInlineTimers.get(threadId);
+    if (timer) clearTimeout(timer);
+    this.cloudInlineTimers.delete(threadId);
+  }
+
+  // One trailing inline push per window, carrying the latest snapshot.
+  private scheduleCloudInline(threadId: string, delayMs: number): void {
+    if (this.cloudInlineTimers.has(threadId)) return;
+    const timer = setTimeout(() => {
+      this.cloudInlineTimers.delete(threadId);
+      const reason = this.cloudInlineReason(threadId);
+      if (!reason || !this.desktopCloud?.owns(threadId)) return;
+      this.cloudInlineLastAt.set(threadId, Date.now());
+      const { inline } = cloudHistoryPayloads(this.desktopCloud.snapshot(threadId), Date.now());
+      void this.send(inline, reason).catch((error: unknown) => {
+        console.error(JSON.stringify({ level: "error", message: "Could not push cloud history", error: publicError(error) }));
+      });
+    }, Math.max(0, delayMs));
+    timer.unref();
+    this.cloudInlineTimers.set(threadId, timer);
+  }
+
+  private async send(payload: SendablePayload, inlineReason?: "request" | "watched" | "terminal"): Promise<void> {
+    const inlineHistory = inlineReason !== undefined;
     if ((payload.kind === "turn.accepted" || payload.kind === "turn.error" || payload.kind === "live.taskCreated" ||
         (payload.kind === "live.error" && payload.callId === undefined)) &&
         typeof payload.requestId === "string") {
@@ -784,7 +911,10 @@ export class BridgeService {
       ) as SendablePayload;
     }
     const envelope = await this.crypto.encrypt(payload);
-    await this.relay.sendToWatch(shouldWakeWatch(payload.kind) ? envelope : { ...envelope, wake: false });
+    if(inlineHistory && JSON.stringify(envelope).length>3000)throw new Error("Cloud history exceeded the inline push limit");
+    await this.relay.sendToWatch(inlineHistory || shouldWakeWatch(payload.kind) ? envelope : { ...envelope, wake: false });
+    if(inlineHistory)console.info(JSON.stringify({level:"info",message:"desktop.cloud.history_pushed",threadId:payload.threadId,
+      reason:inlineReason,generatedAt:payload.generatedAt,relayAcceptedAt:Date.now(),envelopeChars:JSON.stringify(envelope).length}));
   }
 
   private async persistOwnedThreads(): Promise<void> {
@@ -856,6 +986,11 @@ export class BridgeService {
 
   private async processPendingTurnsNow(): Promise<void> {
     for (const [requestId, pending] of this.pendingTurns) {
+      if (this.desktopCloud?.owns(pending.payload.threadId)) {
+        await this.reportBlockedPendingTurn({ ...pending.payload,
+          blockedReason: "This cloud chat now receives messages only. This adapter will not resend the saved prompt. Check Codex for any earlier attempt before sending your draft there." });
+        continue;
+      }
       if (pending.payload.blockedReason) {
         await this.reportBlockedPendingTurn(pending.payload);
         continue;
@@ -1036,6 +1171,8 @@ export function publicRequestError(error: unknown, kind: WatchPayload["kind"]): 
 
 const CHAT_SYNC_DEBOUNCE_MS = 700;
 const CHAT_WATCH_TTL_MS = 90_000;
+const CLOUD_INLINE_MIN_INTERVAL_MS = 3_000;
+const CLOUD_INLINE_TERMINAL_WINDOW_MS = 15_000;
 const POST_CALL_REFRESH_DELAY_MS = 750;
 const LIVE_CAPABILITY_CACHE_MS = 60_000;
 const PENDING_TURN_RETRY_MS = 2_000;
