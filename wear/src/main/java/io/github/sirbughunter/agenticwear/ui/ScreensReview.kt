@@ -39,6 +39,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -511,26 +513,21 @@ private fun BoxScope.CloudModelDialog(
         AwScreenTitle("Model")
         if (info.efforts.isNotEmpty()) {
             AwSectionLabel("Reasoning effort")
-            info.efforts.withIndex().toList().chunked(4).forEach { row ->
-                Row(
-                    Modifier.fillMaxWidth().clip(Aw.PillShape).background(Aw.Surface).border(1.dp, Aw.Line, Aw.PillShape).padding(3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    row.forEach { (index, label) ->
-                        val on = index == effortIndex
-                        Box(
-                            Modifier.weight(1f).heightIn(min = 36.dp).clip(Aw.PillShape)
-                                .background(if (on) Aw.Text else androidx.compose.ui.graphics.Color.Transparent)
-                                .clickable(role = Role.RadioButton) { onEffort(index) }
-                                .semantics { this.selected = on; contentDescription = "$label effort"; stateDescription = if (on) "Selected" else "Not selected" },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(shortEffort(label), color = if (on) Aw.OnPrimary else Aw.TextSecondary, fontSize = 11.sp,
-                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
-                        }
-                    }
-                }
+            val count = info.efforts.size
+            val at = effortIndex?.coerceIn(0, count - 1) ?: 0
+            val label = info.efforts.getOrElse(at) { "Level ${at + 1}" }
+            Row(
+                Modifier.fillMaxWidth().clip(Aw.PillShape).background(Aw.Surface).border(1.dp, Aw.Line, Aw.PillShape).padding(3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                EffortStepButton("‹", "Lower reasoning effort", enabled = at > 0) { onEffort(stepEffortIndex(at, -1, count)) }
+                Text(label, color = Aw.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
+                        .semantics { contentDescription = "$label effort, ${effortPositionLabel(at, count)}"; liveRegion = LiveRegionMode.Polite })
+                EffortStepButton("›", "Higher reasoning effort", enabled = at < count - 1) { onEffort(stepEffortIndex(at, 1, count)) }
             }
+            Text(effortPositionLabel(at, count), style = AwType.Micro, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 3.dp))
         }
         AwSectionLabel("Model · next turn")
         info.models.forEach { name ->
@@ -539,6 +536,24 @@ private fun BoxScope.CloudModelDialog(
     }
     AwEdgeButton("Done", onClick = onDone)
 }
+
+@Composable
+private fun EffortStepButton(glyph: String, description: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.size(48.dp).clip(Aw.PillShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(glyph, color = if (enabled) Aw.Text else Aw.TextTertiary, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** Moves one level, clamped to 0 until [count]. */
+internal fun stepEffortIndex(current: Int, delta: Int, count: Int): Int =
+    if (count <= 0) 0 else (current + delta).coerceIn(0, count - 1)
+
+internal fun effortPositionLabel(index: Int, count: Int): String = "${index + 1} of $count"
 
 private fun shortEffort(label: String): String = when (label) {
     "Medium" -> "Med"

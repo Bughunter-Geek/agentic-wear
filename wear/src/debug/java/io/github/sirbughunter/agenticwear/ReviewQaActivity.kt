@@ -106,6 +106,11 @@ class ReviewQaActivity : ComponentActivity() {
                             rawText = "So yesterday I bought red flowers. No, wait, green flowers.",
                             undoText = "Yesterday I bought blue flowers.",
                             editChoices = if (scenario == "ambiguous") listOf("Change the first flower.", "Change the second flower.") else emptyList()),
+                        selectedThreadId = if (scenario == "cloud-model") "qa-cloud" else null,
+                        sessions = if (scenario == "cloud-model") listOf(AgentSession(
+                            "qa-cloud", "Cloud model fixture", 1, SessionStatus.IDLE, false, true,
+                            source = "cloud", cloud = CloudModelInfo("GPT-6.1 Sol", listOf("GPT-6.1 Sol", "GPT-6 Astra"),
+                                0, "Light", listOf("Light", "Medium", "High", "Extra High", "Max")))) else emptyList(),
                         transcriptionEngine = TranscriptionEngine.BRIDGE_PHONON,
                         transcriptionElapsedMillis = 4200,
                     )) }
@@ -119,6 +124,8 @@ class ReviewQaActivity : ComponentActivity() {
                             onUndo = { state = state.copy(transcript = state.transcript?.undoDraft()) },
                             onRetry = { state = state.copy(error = "QA only: no recording replayed") },
                             onModel = {}, onEffort = {}, onApprovalMode = {},
+                            onCloudModel = { id, name -> state = state.copy(cloudChoiceThreadId = id, cloudModelChoice = name) },
+                            onCloudEffort = { id, index -> state = state.copy(cloudChoiceThreadId = id, cloudEffortChoice = index) },
                             onRefreshSessions = {}, onStartNewSession = {},
                         )
                     }

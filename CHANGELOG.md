@@ -2,6 +2,14 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.65-cloud-model-private — 2026-10-11
+
+- Reads all cloud effort labels from the browser model control before any selection; labels are scoped to that model.
+- Completes the full-label reasoning stepper with 48 dp previous/next actions and bounded endpoints.
+- Preserves explicit Watch model/effort choices even when cached settings already match, then verifies the browser selection immediately before sending.
+- Includes verified UI model/effort in accepted delivery receipts; model self-descriptions are not configuration evidence.
+- 305 Watch unit tests, signed minified release assembly and release lint pass. Picker verified on the 454 × 454 round Wear OS emulator. Physical Watch acceptance pending.
+
 ## Private live-voice UI revision2 — unreleased
 
 - Keeps round-screen labels and48dp actions in a safe scrolling viewport; compacts task-view selection and preserves its visible selection after changing scope.

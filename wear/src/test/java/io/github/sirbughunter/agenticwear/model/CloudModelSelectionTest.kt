@@ -36,13 +36,23 @@ class CloudModelSelectionTest {
     }
 
     @Test
-    fun `only changed advertised values are sent`() {
+    fun `explicit advertised values are sent even when cached settings match`() {
         assertEquals(CloudSelection(null, null), cloudSelectionToSend(info, null, null))
-        assertEquals(CloudSelection(null, null), cloudSelectionToSend(info, "GPT-6.1 Sol", 2))
+        assertEquals(CloudSelection("GPT-6.1 Sol", 2), cloudSelectionToSend(info, "GPT-6.1 Sol", 2))
         assertEquals(CloudSelection("GPT-6 Astra", 4), cloudSelectionToSend(info, "GPT-6 Astra", 4))
         assertEquals(CloudSelection(null, 0), cloudSelectionToSend(info, "Unknown", 0))
         assertEquals(CloudSelection(null, null), cloudSelectionToSend(info, null, 9))
         assertEquals(CloudSelection(null, null), cloudSelectionToSend(null, "x", 1))
+    }
+
+    @Test
+    fun `explicit cached selection reaches the browser request`() {
+        val selection = cloudSelectionToSend(info, info.model, info.effortIndex)
+        val payload = JSONObject(PayloadCodec.encode(BridgePayload.SubmitTurn(
+            "r-cached", "c1", "hi", selection.model,
+            cloudEffortIndex = selection.effortIndex, cloudModel = true)))
+        assertEquals("GPT-6.1 Sol", payload.getString("model"))
+        assertEquals(2, payload.getInt("cloudEffortIndex"))
     }
 
     @Test

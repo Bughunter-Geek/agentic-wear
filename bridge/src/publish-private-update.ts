@@ -14,7 +14,7 @@ async function main(): Promise<void> {
   const config = await readConfig(); const relay = new URL(config.relayUrl);
   if (relay.protocol !== "https:" || relay.username || relay.password || relay.search || relay.hash) throw new Error("HTTPS relay required");
   const endpoint = `${config.relayUrl.replace(/\/$/u, "")}/v1/pairs/${config.pairId}/private-update`;
-  const headers: Record<string, string> = {}; let body: Buffer | undefined;
+  const headers: Record<string, string> = { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" }; let body: Buffer | undefined;
   if (args[0] !== "--revoke") {
     const path = resolve(args[0]!);
     // Keep in sync with relay MAX_PRIVATE_APK_BYTES (16 MiB).

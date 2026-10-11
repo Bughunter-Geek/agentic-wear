@@ -41,12 +41,12 @@ fun modelPickerFor(source: String?, cloud: CloudModelInfo?): ModelPicker = when 
 
 data class CloudSelection(val model: String?, val effortIndex: Int?)
 
-/** Only values the user changed (and the bridge advertised) are sent. */
+/** Preserve explicit advertised choices so the browser verifies them even if cached settings match. */
 fun cloudSelectionToSend(info: CloudModelInfo?, chosenModel: String?, chosenEffortIndex: Int?): CloudSelection {
     if (info == null) return CloudSelection(null, null)
-    val model = chosenModel?.takeIf { it != info.model && it in info.models }
+    val model = chosenModel?.takeIf { it in info.models }
     val limit = if (info.efforts.isEmpty()) 0 else info.efforts.size
-    val effort = chosenEffortIndex?.takeIf { it != info.effortIndex && it in 0 until limit }
+    val effort = chosenEffortIndex?.takeIf { it in 0 until limit }
     return CloudSelection(model, effort)
 }
 
