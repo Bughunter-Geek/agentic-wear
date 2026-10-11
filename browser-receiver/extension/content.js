@@ -63,7 +63,11 @@
   // ---- Model / reasoning selection (Codex cloud pages only; Dot never uses any of this) ----
   // Radix menu structure observed on the real page; see the build 89 contract.
   const MODEL_NAME=/^[A-Za-z0-9_.:/ -]{1,128}$/;
-  let models=[],efforts=[],maxEffort=null,learnStarted=false,learning=null;
+  let models=[],efforts=[],maxEffort=null,lastLearnAt=0,lastInteraction=0,selfDriving=false,learning=null;
+  const LEARN_REFRESH_MS=30*60*1000,LEARN_QUIET_MS=10000;
+  // Real user activity in the page (our own synthetic events are ignored via selfDriving).
+  for(const type of ['pointerdown','pointermove','mousedown','keydown','wheel','touchstart'])
+    document.addEventListener(type,()=>{if(!selfDriving)lastInteraction=Date.now();},{capture:true,passive:true});
   const aliases=new Map();
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   const norm=s=>(s||'').replace(/\s+/g,' ').trim();
@@ -140,8 +144,9 @@
   }
   // One read-only pass while the tab is hidden: learn the model list, effort range and label.
   function learn(){
-    learnStarted=true;
+    lastLearnAt=Date.now();
     learning=(async()=>{
+      selfDriving=true;
       try{
         if(!await openMenu())return;
         let menu=openMenuEl();
@@ -150,10 +155,14 @@
           if(toggle){toggle.click();await wait(150);menu=openMenuEl()||menu;}
         }
         if(menu)learnFromMenu(menu);
-      }catch{}finally{await closeMenu();learning=null;scheduled=false;lastSent=0;schedule();}
+      }catch{}finally{await closeMenu();selfDriving=false;learning=null;scheduled=false;lastSent=0;schedule();}
     })();
   }
   async function applySettings(want){
+    selfDriving=true;
+    try{return await applySettingsInner(want);}finally{selfDriving=false;}
+  }
+  async function applySettingsInner(want){
     const fail=async()=>{await closeMenu();return false;};
     try{
       if(!await openMenu())return fail();
@@ -212,10 +221,19 @@
       ...(maxEffort!==null?{efforts:Array.from({length:maxEffort+1},(_,i)=>efforts[i]||'')}:{}),
     };
   }
+  // Read-only learning pass: only when nobody is looking at or using this page.
+  function canLearn(){
+    if(isDot||sending||learning||selfDriving||openMenuEl())return false;
+    const now=Date.now();
+    if(lastLearnAt&&now-lastLearnAt<LEARN_REFRESH_MS)return false;
+    if(!(document.visibilityState==='hidden'||!document.hasFocus()))return false;
+    if(now-lastInteraction<LEARN_QUIET_MS)return false;
+    return !blocked()&&!!modelButton()&&!!readCurrent();
+  }
   function inspect(){
     scheduled=false;if(!chrome.runtime?.id){handle.stop();return;}
     if(location.href!==TARGET)return;
-    if(!isDot&&!learnStarted&&!sending&&document.visibilityState==='hidden'&&!blocked()&&modelButton()&&readCurrent())learn();
+    if(canLearn())learn();
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
       ...(isDot?{identity:NAMESPACE}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
