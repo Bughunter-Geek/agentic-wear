@@ -42,6 +42,17 @@
     }
   }
   if (available) {
+    const nativeTimeout = window.setTimeout;
+    window.setTimeout = function (callback, delay, ...args) {
+      const call = owner;
+      // Native negotiation includes allocation, attachment and the delegated
+      // endpoint round trip. Its 20 s budget can expire after Watch ICE already
+      // connected. Match only this owned native watchdog; retain a finite
+      // deadline and the Watch's existing 30 s startup/cancellation contract.
+      if (call?.peer && !call.ended && !call.active && delay === 20000 && typeof callback === 'function' &&
+          Function.prototype.toString.call(callback).includes('Your dot’s voice connection timed out')) delay = 30000;
+      return nativeTimeout.call(this, callback, delay, ...args);
+    };
     // The native client's local input graph is unused for delegated media.
     // Only graphs fed by this call's placeholder are marked. Other contexts
     // retain normal browser playback/permission behavior.

@@ -33,7 +33,7 @@ playback or open the Mac microphone.
 
 ## Validation and delivery
 
-Completed: bridge checks, 585 bridge tests, 45 browser-script tests, the additional
+Completed: bridge checks, 585 bridge tests, 48 browser-script tests, the additional
 authenticated native-host exchange regression, 44 relay tests, Watch unit tests,
 native Kotlin compilation, signed minified release assembly and release lint.
 The exact candidate keeps signer `bc70f367781d453b8dd22eb4daf5b735c291656a0d64137f974094aefdb6cda8`,
@@ -172,6 +172,26 @@ the native error and never retries allocation. Fixed bridge end-reason codes
 distinguish a Watch stop, native close/failure, receiver loss, lease expiry and
 bridge shutdown. These diagnostics contain no page text or response bodies.
 Actual first-attempt startup and the latency target remain unverified for 0.3.8.
+
+The resumed 0.3.8 test reached native capture and peer creation within 405 ms
+of Mac dispatch. Native instant creation then waited 16.847 seconds for a
+response. The Watch's media connected, but the browser closed the call at
+20.454 seconds. The inspected native client sets a 20-second watchdog around
+allocation, attachment and media activation. A second attempt connected;
+the user measured 19 seconds, with 10.601 seconds waiting for creation and
+3.963 seconds waiting for attachment. The first voice query did not receive
+an immediate reply; its conversational delay is not yet measured separately.
+
+Adapter 0.3.9 aligns that exact native watchdog with the Watch's existing
+30-second startup window. It matches the known native timeout callback only
+while an owned Watch call has a native peer and has not become active. Personal
+calls, reservations without media, other delays and unrelated callbacks retain
+native timer behavior. Native errors and cancellation still propagate, and
+Watch input still requires media connection and successful attachment. A
+regression completes attachment at 21 seconds; a second verifies that an
+uncompleted startup still times out. This is a reliability fix, not a reduction
+in the measured service response wait. Runtime and physical acceptance of the
+new adapter remain pending.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and

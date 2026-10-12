@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 
 async function fixture() {
-  const handlers = new Map(), events = [], tracks = [], requests = [], responses = [], controls = [];
+  const handlers = new Map(), events = [], tracks = [], requests = [], responses = [], controls = [], timers = [];
   let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
   const observers = [];
   class Observer {
@@ -28,6 +28,8 @@ async function fixture() {
   }
   const response = { ok: true, status: 200, privateBody: 'PRIVATE_RESPONSE' };
   const window = { RTCPeerConnection: Peer, AudioContext: Context, Request, PerformanceObserver: Observer, performance: { now: () => now },
+    setTimeout(callback, delay, ...args) { const timer = { callback, delay, args, due: now + delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimeout(timer) { timer.cleared = true; },
     addEventListener(name, handler) { handlers.set(name, handler); }, postMessage(message) { events.push(message.event); },
     async fetch(...args) { fetches++; requests.push(args); const next = responses.shift();
       if (next instanceof Error) throw next;
@@ -36,7 +38,7 @@ async function fixture() {
   const sandbox = { window, location, Event, EventTarget, DOMException, URL, TextDecoder, navigator: { mediaDevices: {
     getUserMedia() { microphoneRequests++; return Promise.resolve('physical'); } } },
     document: { body: null, querySelectorAll: () => controls }, Date,
-    setInterval: () => 1, clearInterval() {}, setTimeout: () => 2, clearTimeout() {} };
+    setInterval: () => 1, clearInterval() {}, setTimeout: window.setTimeout, clearTimeout: window.clearTimeout };
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/remote-peer.js', import.meta.url), 'utf8'), sandbox);
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-timing.js', import.meta.url), 'utf8'), sandbox);
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/native-allocation.js', import.meta.url), 'utf8'), sandbox);
@@ -44,7 +46,10 @@ async function fixture() {
   const command = value => handlers.get('message')({ source: window, origin: location.origin,
     data: { type: 'aw.native.voice.command', command: value } });
   return { window, sandbox, command, events, tracks, response, requests, responses, controls, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
-    fetches: () => fetches, advance: ms => { now += ms; }, observers,
+    fetches: () => fetches, advance: ms => { now += ms; }, observers, timers,
+    tick(ms) { now += ms; for (const timer of timers.filter(t => !t.cleared && t.due <= now).sort((a, b) => a.due - b.due)) {
+      timer.cleared = true; timer.callback(...timer.args);
+    } },
     resource(entry, observer = observers.at(-1)) { observer.callback({ getEntries: () => [entry] }); } };
 }
 const offer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111';
@@ -161,6 +166,48 @@ test('an observer completion before fetch resolves waits for the response metada
 });
 
 const startOwned = f => f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+test('native startup can attach after 20 seconds without prematurely ending the connected Watch media', async () => {
+  const f = await fixture(); startOwned(f);
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  let complete, timer;
+  const startup = Promise.race([new Promise(resolve => { complete = resolve; }), new Promise((_, reject) => {
+    timer = f.window.setTimeout(() => reject(Error('Your dot’s voice connection timed out')), 20000);
+  })]).finally(() => f.window.clearTimeout(timer));
+  f.tick(17000); await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  f.tick(4000);
+  assert.equal(f.events.some(e => e.state === 'active'), false, 'media alone still cannot release Watch input');
+  await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  complete(); await startup;
+  assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+  assert.equal(peer.connectionState, 'connected');
+  f.tick(15000); assert.equal(peer.connectionState, 'connected');
+  f.command({ action: 'stop', callId: 'owned' }); assert.equal(peer.connectionState, 'closed');
+  assert.equal(f.microphoneRequests(), 0);
+});
+test('an owned native startup that never completes still fails at a finite deadline', async () => {
+  const f = await fixture(); startOwned(f); new f.window.RTCPeerConnection();
+  const startup = new Promise((_, reject) => {
+    f.window.setTimeout(() => reject(Error('Your dot’s voice connection timed out')), 20000);
+  });
+  f.tick(30000);
+  await assert.rejects(startup, /Your dot’s voice connection timed out/);
+  f.command({ action: 'stop', callId: 'owned' }); assert.ok(f.tracks.every(track => track.stopped));
+});
+test('personal calls and unrelated browser timers keep their native deadline and arguments', async () => {
+  const f = await fixture(); const timeout = () => Error('Your dot’s voice connection timed out');
+  assert.equal(f.window.setTimeout(timeout, 20000).delay, 20000);
+  startOwned(f);
+  assert.equal(f.window.setTimeout(timeout, 20000).delay, 20000, 'a reservation without native media is insufficient');
+  new f.window.RTCPeerConnection();
+  const unrelated = () => Error('An unrelated operation timed out');
+  const timer = f.window.setTimeout(unrelated, 20000, 'argument');
+  assert.equal(timer.delay, 20000); assert.deepEqual(timer.args, ['argument']);
+  assert.equal(f.window.setTimeout(timeout, 5000).delay, 5000);
+  f.command({ action: 'stop', callId: 'owned' });
+  assert.equal(f.window.setTimeout(timeout, 20000).delay, 20000);
+});
 test('an ended native startup is cancelled before a peer exists and recursive closure is harmless', async () => {
   const f = await fixture(); let cancelled = 0;
   f.controls.push({ isConnected: true, disabled: false, getAttribute: () => 'Hang up', click() {
