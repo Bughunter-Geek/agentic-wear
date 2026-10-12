@@ -268,33 +268,41 @@ test('failed previous-call cleanup is reported instead of silently waiting for c
 });
 const createInit = () => ({ method: 'POST', body: JSON.stringify({ sdp: offer, debug_prompt_overrides: { fixture: true } }),
   headers: { Authorization: 'PRIVATE_CREDENTIAL', 'ChatGPT-Account-Id': 'PRIVATE_ACCOUNT' }, credentials: 'include' });
-test('the requested Watch allocation uses the native instant mode while preserving SDP and authentication', async () => {
+test('the requested Watch allocation preserves the native direct-call mode, SDP and authentication', async () => {
   const f = await fixture(); startOwned(f);
   const init = createInit(), originalBody = init.body;
   const response = await f.window.fetch(createUrl, init);
   assert.equal(response, f.response); assert.equal(f.requests.length, 1);
   const body = JSON.parse(f.requests[0][1].body);
-  assert.deepEqual(body, { ...JSON.parse(originalBody), instant_connect: true });
+  assert.deepEqual(body, JSON.parse(originalBody));
+  assert.equal(f.requests[0][1], init);
   assert.equal(f.requests[0][1].headers, init.headers);
   assert.equal(f.requests[0][1].credentials, init.credentials); assert.equal(init.body, originalBody);
   f.resource(resource());
-  assert.equal(f.events.find(e => e.state === 'timing').httpTiming.allocationMode, 'instant');
+  assert.equal(f.events.find(e => e.state === 'timing').httpTiming.allocationMode, 'standard');
   assert.equal(f.events.some(e => e.state === 'active'), false);
   assert.equal(f.microphoneRequests(), 0);
   assert.equal(JSON.stringify(f.events).includes('PRIVATE_'), false);
 });
-test('only a documented 409 denial without allocation permits the native standard mode, with Request bodies intact', async () => {
+test('Request bodies stay unconsumed and native direct-call errors cannot cause another allocation', async () => {
+  const f = await fixture(); startOwned(f);
+  const input = new Request(createUrl, createInit());
+  const denied = new Response(JSON.stringify({ detail: "Your dot's voice task is still active" }), { status: 409 });
+  f.responses.push(denied);
+  assert.equal(await f.window.fetch(input), denied);
+  assert.equal(f.requests.length, 1); assert.equal(input.bodyUsed, false);
+  assert.equal(f.requests[0][0], input);
+  assert.deepEqual(JSON.parse(await input.clone().text()), JSON.parse(createInit().body));
+  assert.equal(f.requests[0][0].headers.get('Authorization'), 'PRIVATE_CREDENTIAL');
+  assert.equal(f.events.at(-1).state, 'failed');
+  assert.equal(f.events.at(-1).statusCode, 409);
+});
+test('an explicitly selected native preparation mode is preserved without rewriting or fallback', async () => {
   const f = await fixture(); startOwned(f);
   const native = await nativeInput(f);
-  const input = new Request(createUrl, createInit());
-  f.responses.push(new Response(JSON.stringify({ detail: "Your dot's voice task is still active" }), { status: 409 }));
-  await f.window.fetch(input);
-  assert.equal(f.requests.length, 2); assert.equal(input.bodyUsed, false);
-  assert.equal(JSON.parse(f.requests[0][1].body).instant_connect, true);
-  assert.deepEqual(JSON.parse(await f.requests[1][0].text()), JSON.parse(createInit().body));
-  assert.equal(f.requests[0][0].headers.get('Authorization'), 'PRIVATE_CREDENTIAL');
-  assert.equal(f.requests[1][0].headers.get('Authorization'), 'PRIVATE_CREDENTIAL');
-  assert.equal(f.events.some(e => e.state === 'failed'), false);
+  const init = { ...createInit(), body: JSON.stringify({ sdp: offer, instant_connect: true }) };
+  await f.window.fetch(createUrl, init);
+  assert.equal(f.requests[0][1], init);
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
   await peer.setLocalDescription(await peer.createOffer());
   await peer.setRemoteDescription({ type: 'answer', sdp: offer });
@@ -302,7 +310,7 @@ test('only a documented 409 denial without allocation permits the native standar
   assert.equal(f.events.some(e => e.state === 'active'), false);
   await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
   native.port.postMessage({ type: 'release' });
-  assert.equal(f.events.find(e => e.state === 'active').allocationMode, 'standard');
+  assert.equal(f.events.find(e => e.state === 'active').allocationMode, 'instant');
 });
 
 async function endpoint(f, channelState = 'open') {
@@ -432,16 +440,17 @@ test('cancelling during Request body preparation prevents even the first allocat
   await assert.rejects(pending, { name: 'AbortError' });
   assert.equal(f.requests.length, 0);
 });
-test('an ended call cannot perform normal allocation after reading a safe denial', async () => {
+test('a native denial response is returned untouched, without inspecting or retrying its body', async () => {
   const f = await fixture(); startOwned(f); let controller;
   const body = new ReadableStream({ start(value) { controller = value; } });
-  f.responses.push(new Response(body, { status: 409 }));
-  const pending = f.window.fetch(createUrl, createInit());
-  await new Promise(resolve => setImmediate(resolve));
+  const response = new Response(body, { status: 409 });
+  f.responses.push(response);
+  assert.equal(await f.window.fetch(createUrl, createInit()), response);
   assert.equal(f.requests.length, 1);
+  assert.equal(response.bodyUsed, false);
   f.command({ action: 'stop', callId: 'owned' });
   controller.enqueue(new TextEncoder().encode(JSON.stringify({ detail: 'Another voice call is closing' }))); controller.close();
-  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(response.bodyUsed, false);
   assert.equal(f.requests.length, 1);
 });
 test('other browser requests and mismatched offers retain their native behavior', async () => {

@@ -168,12 +168,7 @@
           if (owner === call) call?.timing?.response(timingRequest, response);
           return response;
         };
-        let response = await fetchOnce(prepared.args, prepared.allocationMode);
-        if (prepared.standardArgs && await window.AgenticWearNativeAllocation.declined(response)) {
-          if (owner !== call) throw new DOMException('The delegated call ended before normal allocation', 'AbortError');
-          call.allocationMode = 'standard';
-          response = await fetchOnce(prepared.standardArgs, 'standard');
-        }
+        const response = await fetchOnce(prepared.args, prepared.allocationMode);
         if (owner === call && phase && phase !== 'stop') {
           stamp(call, phase === 'create' ? 'createEndMs' : 'attachEndMs');
           if (!response.ok) event(call, 'failed', { statusCode: response.status });
@@ -187,6 +182,7 @@
       }
     };
     window.__agenticWearNativeVoiceReadiness = 'native-client-input-release';
+    window.__agenticWearNativeVoiceAllocationPolicy = 'native-client-default';
   }
   window.addEventListener('message', message => {
     if (message.source !== window || message.origin !== location.origin || message.data?.type !== 'aw.native.voice.command') return;

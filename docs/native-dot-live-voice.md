@@ -271,7 +271,34 @@ remained unmet by that stopwatch result.
 The follow-up investigation found Disable cache enabled in the Dot page's open
 Chrome DevTools. Normal caching was restored and DevTools closed before a second
 physical timing test. This is a browser diagnostic-state correction; Watch build
-97 and receiver 0.3.10 are unchanged. Its timing effect remains unverified.
+97 and receiver 0.3.10 are unchanged.
+
+The normal-cache retest took 22–23 seconds according to the user. Chrome peer
+setup improved from browser 748 ms to 81 ms, but creation response wait grew
+from 15.833 to 18.064 seconds. Answer relay acknowledgement took 912 ms and
+readiness acknowledgement 1.364 seconds. Native input release still preceded
+successful attachment by 2.076 seconds; attachment returned HTTP 200 and the
+Watch ended the call normally. No end-to-end cache gain or under-20-second
+startup was established. Response waits include network time, and these samples
+do not isolate upstream computation.
+
+## Native direct-allocation comparison
+
+Receiver 0.3.11 is prepared locally. It preserves the native client's original
+allocation request instead of forcing `instant_connect: true`. The public `jMD`
+module uses instant mode for preparation but standard mode for an unprepared
+direct call (`prepareForCall` invokes `allocate` with false). Earlier instant
+calls ranged from about 10 to 18 seconds of creation response wait, so the
+preparation flag has not established a consistent latency advantage.
+
+The candidate leaves the native SDP, body, headers, identity, credentials and
+cancellation signal unchanged. It records the client's chosen mode for timing;
+explicit native preparation requests remain instant. No response body is read
+to trigger a fallback, and no second allocation is issued on a denial or error.
+Native input-release readiness, real media/channel checks, attachment failure
+handling and the finite deadline are unchanged from 0.3.10. All 55 browser tests
+pass. This extension-only candidate needs no Watch update or bridge rebuild.
+Its relative speed and the under-20-second target remain physically unverified.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and
