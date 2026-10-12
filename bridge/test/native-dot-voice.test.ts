@@ -93,7 +93,7 @@ describe("native Dot media delegation", () => {
   });
   it("records native control and media checkpoints without treating them as readiness", async () => {
     const f = fixture(); f.voice.start("first", "dot", sdp);
-    for (const progressStage of ["control-clicked", "capture", "peer"] as const) {
+    for (const progressStage of ["control-clicked", "cleanup", "capture", "peer"] as const) {
       await f.voice.event(nativeVoiceEventSchema.parse({ callId: "first", threadId: "dot", state: "progress", progressStage }));
       expect(f.timing.at(-1)?.stage).toBe(`browser.startup.${progressStage}`);
     }
@@ -101,5 +101,13 @@ describe("native Dot media delegation", () => {
     expect(nativeVoiceEventSchema.safeParse({ callId: "first", threadId: "dot", state: "progress" }).success).toBe(false);
     expect(nativeVoiceEventSchema.safeParse({ callId: "first", threadId: "dot", state: "progress", progressStage: "PRIVATE_ERROR" }).success).toBe(false);
     expect(nativeVoiceEventSchema.safeParse({ callId: "first", threadId: "dot", state: "accepted", progressStage: "capture" }).success).toBe(false);
+  });
+  it("distinguishes previous-call cleanup failures and the actor that ended a call", async () => {
+    const f = fixture(); f.voice.start("first", "dot", sdp);
+    await f.voice.event({ callId: "first", threadId: "dot", state: "failed", statusCode: 503, setupTiming: { cleanupStartMs: 1 } });
+    expect(f.delivered.at(-1)).toMatchObject({ kind: "live.closed", reason: "Chrome could not finish closing the previous Lumen call. Retry after it has closed." });
+    expect(f.timing.at(-1)).toMatchObject({ stage: "call.closed", endReason: "native" });
+    f.voice.start("second", "dot", sdp); await f.voice.stop("second");
+    expect(f.timing.at(-1)).toMatchObject({ endReason: "watch" });
   });
 });

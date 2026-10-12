@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 
 async function fixture() {
-  const handlers = new Map(), events = [], tracks = [], requests = [], responses = [];
+  const handlers = new Map(), events = [], tracks = [], requests = [], responses = [], controls = [];
   let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
   const observers = [];
   class Observer {
@@ -35,7 +35,7 @@ async function fixture() {
   const location = { href: 'https://chatgpt.com/dots/home', origin: 'https://chatgpt.com' };
   const sandbox = { window, location, Event, EventTarget, DOMException, URL, TextDecoder, navigator: { mediaDevices: {
     getUserMedia() { microphoneRequests++; return Promise.resolve('physical'); } } },
-    document: { body: null }, Date,
+    document: { body: null, querySelectorAll: () => controls }, Date,
     setInterval: () => 1, clearInterval() {}, setTimeout: () => 2, clearTimeout() {} };
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/remote-peer.js', import.meta.url), 'utf8'), sandbox);
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-timing.js', import.meta.url), 'utf8'), sandbox);
@@ -43,7 +43,7 @@ async function fixture() {
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-hook.js', import.meta.url), 'utf8'), sandbox);
   const command = value => handlers.get('message')({ source: window, origin: location.origin,
     data: { type: 'aw.native.voice.command', command: value } });
-  return { window, sandbox, command, events, tracks, response, requests, responses, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
+  return { window, sandbox, command, events, tracks, response, requests, responses, controls, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
     fetches: () => fetches, advance: ms => { now += ms; }, observers,
     resource(entry, observer = observers.at(-1)) { observer.callback({ getEntries: () => [entry] }); } };
 }
@@ -161,6 +161,45 @@ test('an observer completion before fetch resolves waits for the response metada
 });
 
 const startOwned = f => f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+test('an ended native startup is cancelled before a peer exists and recursive closure is harmless', async () => {
+  const f = await fixture(); let cancelled = 0;
+  f.controls.push({ isConnected: true, disabled: false, getAttribute: () => 'Hang up', click() {
+    cancelled++; f.command({ action: 'stop', callId: 'owned' });
+  } });
+  startOwned(f); f.command({ action: 'control', callId: 'owned' });
+  f.command({ action: 'stop', callId: 'owned' });
+  assert.equal(cancelled, 1); assert.equal(f.events.filter(e => e.state === 'closed').length, 1);
+  assert.equal(f.microphoneRequests(), 0); assert.ok(f.tracks.every(track => track.stopped));
+});
+test('a stale stop cannot click the native control of a newer call', async () => {
+  const f = await fixture(); let cancelled = 0;
+  const hangup = { isConnected: true, disabled: false, getAttribute: () => 'Hang up', click() { cancelled++; } };
+  f.controls.push(hangup);
+  startOwned(f); f.command({ action: 'stop', callId: 'owned' });
+  assert.equal(cancelled, 0, 'reservation alone must not cancel a native call');
+  f.command({ action: 'start', callId: 'next', sdp: offer, expiresAt: Date.now() + 45000 });
+  f.command({ action: 'control', callId: 'next' });
+  f.command({ action: 'stop', callId: 'owned' });
+  assert.equal(cancelled, 0);
+  f.command({ action: 'stop', callId: 'next' }); assert.equal(cancelled, 1);
+});
+test('native cancellation exceptions still release every owned media resource', async () => {
+  const f = await fixture(); startOwned(f);
+  await f.sandbox.navigator.mediaDevices.getUserMedia({ audio: true });
+  const peer = new f.window.RTCPeerConnection();
+  f.controls.push({ isConnected: true, disabled: false, getAttribute: () => 'Hang up', click() { throw new Error('fixture native stop failure'); } });
+  assert.throws(() => f.command({ action: 'stop', callId: 'owned' }), /fixture native stop failure/);
+  assert.equal(peer.connectionState, 'closed'); assert.ok(f.tracks.every(track => track.stopped));
+  assert.equal(f.events.filter(e => e.state === 'closed').length, 1);
+});
+test('failed previous-call cleanup is reported instead of silently waiting for capture', async () => {
+  const f = await fixture(); startOwned(f);
+  const response = new Response('', { status: 503 }); f.responses.push(response);
+  assert.equal(await f.window.fetch(createUrl + '/PRIVATE_CALL/stop', { method: 'POST' }), response);
+  assert.equal(f.events.find(e => e.state === 'progress').progressStage, 'cleanup');
+  assert.equal(f.events.at(-1).statusCode, 503);
+  assert.equal(f.fetches(), 1); assert.equal(f.microphoneRequests(), 0);
+});
 const createInit = () => ({ method: 'POST', body: JSON.stringify({ sdp: offer, debug_prompt_overrides: { fixture: true } }),
   headers: { Authorization: 'PRIVATE_CREDENTIAL', 'ChatGPT-Account-Id': 'PRIVATE_ACCOUNT' }, credentials: 'include' });
 test('the requested Watch allocation uses the native instant mode while preserving SDP and authentication', async () => {

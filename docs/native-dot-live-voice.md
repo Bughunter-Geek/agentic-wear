@@ -33,7 +33,7 @@ playback or open the Mac microphone.
 
 ## Validation and delivery
 
-Completed: bridge checks, 583 bridge tests, 37 browser-script tests, the additional
+Completed: bridge checks, 585 bridge tests, 45 browser-script tests, the additional
 authenticated native-host exchange regression, 44 relay tests, Watch unit tests,
 native Kotlin compilation, signed minified release assembly and release lint.
 The exact candidate keeps signer `bc70f367781d453b8dd22eb4daf5b735c291656a0d64137f974094aefdb6cda8`,
@@ -151,6 +151,27 @@ The bridge/native host accept the optional instant-mode timing fields from 0.3.6
 as well as older receiver events, so an idle recovery cannot break signaling while
 Chrome still has an earlier hook loaded. Receiver activation still requires an
 idle Dot page reload to replace the existing main-world hook.
+
+The physical 0.3.7 test did not connect. One attempt ended during capture before
+a peer existed; the next never reached capture and timed out at 31.6 seconds on
+the Watch. Chrome also reported HTTP 503 for a native call stop request. The
+control-race fix alone therefore did not establish reliable startup.
+
+Adapter 0.3.8 explicitly cancels the native startup through its Hang up control
+before releasing the matching main-world Watch ownership token. This covers a
+stop before peer creation, when closing a nonexistent media peer cannot notify
+the native client. Cancellation runs synchronously; a stale token cannot click
+the control of a newer call. Reentrant close callbacks are harmless, and native
+control exceptions still release every owned media resource. An unclicked
+reservation cannot cancel a native call. Delegated captures use placeholder
+tracks, and an ended owned capture rejects during cancellation.
+
+Previous-call cleanup requests now have a fixed startup checkpoint, and a failed
+cleanup response is reported without waiting silently for capture. It propagates
+the native error and never retries allocation. Fixed bridge end-reason codes
+distinguish a Watch stop, native close/failure, receiver loss, lease expiry and
+bridge shutdown. These diagnostics contain no page text or response bodies.
+Actual first-attempt startup and the latency target remain unverified for 0.3.8.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and

@@ -7,9 +7,10 @@ export interface NativeDotConnection {
   voiceCommand(command: NativeVoiceCommand): void;
 }
 type Call = { id: string; threadId: string; startedAt: number; expiresAt: number; accepted: boolean; answer: boolean; active: boolean; transportSeq: number };
+type EndReason = "watch" | "native" | "receiver-lost" | "expired" | "bridge-stop";
 type TimingLog = (fields: { callId: string; stage: string; at: number; sinceStartMs: number;
   browserElapsedMs?: number; setupTiming?: NativeVoiceEvent["setupTiming"]; httpTiming?: NativeVoiceEvent["httpTiming"];
-  allocationMode?: NativeVoiceEvent["allocationMode"]; statusCode?: number }) => void;
+  allocationMode?: NativeVoiceEvent["allocationMode"]; statusCode?: number; endReason?: EndReason }) => void;
 
 /** Account/call control stays in the native browser client; Watch WebRTC owns media. */
 export class NativeDotVoice {
@@ -51,11 +52,11 @@ export class NativeDotVoice {
     call.expiresAt = this.now() + 45_000;
     this.command(call, { action: "heartbeat" });
   }
-  async stop(callId: string, reason = "Call ended"): Promise<void> {
+  async stop(callId: string, reason = "Call ended", endReason: EndReason = "watch"): Promise<void> {
     const call = this.call;
     if (!call || call.id !== callId) return;
     this.call = null;
-    this.timing(call, "call.closed");
+    this.timing(call, "call.closed", undefined, endReason);
     // Browser commands carry the call id. A delayed stop cannot close a later
     // call, and loss of the browser socket is handled by its own ownership lease.
     try { this.command(call, { action: "stop" }); }
@@ -80,20 +81,24 @@ export class NativeDotVoice {
       this.timing(call, "relay.ready.accepted");
     } else if (value.state === "failed" || value.state === "closed") {
       this.timing(call, `browser.${value.state}`, value);
-      await this.stop(call.id, value.state === "closed" ? "Lumen ended the call" : "Lumen could not connect its native call. Reconnect when it is available.");
+      const cleanupFailed = value.setupTiming?.cleanupStartMs !== undefined && value.setupTiming.captureMs === undefined;
+      await this.stop(call.id, value.state === "closed" ? "Lumen ended the call" : cleanupFailed
+        ? "Chrome could not finish closing the previous Lumen call. Retry after it has closed."
+        : "Lumen could not connect its native call. Reconnect when it is available.", "native");
     }
   }
-  async disconnected(): Promise<void> { if (this.call) await this.stop(this.call.id, "The native Dot browser disconnected. Reconnect when it is available."); }
-  async expire(): Promise<void> { if (this.call && this.now() >= this.call.expiresAt) await this.stop(this.call.id, "Watch voice connection expired"); }
-  async close(): Promise<void> { if (this.call) await this.stop(this.call.id); }
+  async disconnected(): Promise<void> { if (this.call) await this.stop(this.call.id, "The native Dot browser disconnected. Reconnect when it is available.", "receiver-lost"); }
+  async expire(): Promise<void> { if (this.call && this.now() >= this.call.expiresAt) await this.stop(this.call.id, "Watch voice connection expired", "expired"); }
+  async close(): Promise<void> { if (this.call) await this.stop(this.call.id, "Call ended", "bridge-stop"); }
 
-  private timing(call: Call, stage: string, event?: NativeVoiceEvent): void {
+  private timing(call: Call, stage: string, event?: NativeVoiceEvent, endReason?: EndReason): void {
     const at = this.now();
     this.log({ callId: call.id, stage, at, sinceStartMs: Math.max(0, at - call.startedAt),
       ...(event?.elapsedMs !== undefined ? { browserElapsedMs: event.elapsedMs } : {}),
       ...(event?.setupTiming ? { setupTiming: event.setupTiming } : {}),
       ...(event?.httpTiming ? { httpTiming: event.httpTiming } : {}),
       ...(event?.allocationMode ? { allocationMode: event.allocationMode } : {}),
+      ...(endReason ? { endReason } : {}),
       ...(event?.statusCode !== undefined ? { statusCode: event.statusCode } : {}) });
   }
 

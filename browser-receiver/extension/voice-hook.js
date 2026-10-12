@@ -19,17 +19,27 @@
     if (owner === call && call.connected && call.attached && !call.active) { call.active = true; event(call, 'active'); }
   }
   function stop(call) {
-    if (owner !== call) return;
+    if (owner !== call || call.ended) return;
     call.ended = true;
-    owner = null;
-    clearInterval(call.timer); clearTimeout(call.startup);
-    call.timing?.close();
-    call.remote?.close();
-    for (const track of call.clones) track.stop();
-    call.placeholder.stream.getTracks().forEach(track => track.stop());
-    void call.context.close();
-    call.banner?.remove();
-    emit({ callId: call.id, state: 'closed' });
+    try {
+      // Media may not exist yet. Cancel the native startup while its matching
+      // main-world ownership token is still held; never schedule a later click.
+      if (call.nativeStarted) {
+        const hangup = [...document.querySelectorAll('button')].find(button => button.isConnected && !button.disabled &&
+          (button.getAttribute('aria-label') || (button.innerText || button.textContent || '').trim()) === 'Hang up');
+        hangup?.click();
+      }
+    } finally {
+      owner = null;
+      clearInterval(call.timer); clearTimeout(call.startup);
+      call.timing?.close();
+      call.remote?.close();
+      for (const track of call.clones) track.stop();
+      call.placeholder.stream.getTracks().forEach(track => track.stop());
+      void call.context.close();
+      call.banner?.remove();
+      emit({ callId: call.id, state: 'closed' });
+    }
   }
   if (available) {
     // The native client's local input graph is unused for delegated media.
@@ -57,8 +67,10 @@
     navigator.mediaDevices.getUserMedia = async constraints => {
       const call = owner;
       if (!call) return gum(constraints);
+      if (call.ended) throw new DOMException('The delegated input setup was cancelled', 'AbortError');
       if (!constraints?.audio || constraints.video) throw new DOMException('This call delegates audio only to the Watch', 'NotAllowedError');
       stamp(call, 'captureMs');
+      call.nativeStarted = true;
       event(call, 'progress', { progressStage: 'capture' });
       const stream = call.placeholder.stream.clone(); call.clones.push(...stream.getTracks());
       for (const track of stream.getAudioTracks()) trackOwners.set(track, call);
@@ -107,6 +119,8 @@
         } catch { /* Unknown request shapes retain native fetch behavior. */ }
       }
       if (call && phase && phase !== 'stop') stamp(call, phase === 'create' ? 'createStartMs' : 'attachStartMs');
+      const cleanup = call && phase === 'stop' && !call.peer;
+      if (cleanup) { stamp(call, 'cleanupStartMs'); event(call, 'progress', { progressStage: 'cleanup' }); }
       try {
         const prepared = call && phase === 'create' && window.AgenticWearNativeAllocation
           ? await window.AgenticWearNativeAllocation.prefer(args, call.sdp) : { args };
@@ -129,9 +143,10 @@
           if (!response.ok) event(call, 'failed', { statusCode: response.status });
           else if (phase === 'attach') { call.attached = true; active(call); }
         }
+        if (owner === call && cleanup && !response.ok) event(call, 'failed', { statusCode: response.status });
         return response;
       } catch (error) {
-        if (owner === call && phase && phase !== 'stop') event(call, 'failed', { statusCode: 0 });
+        if (owner === call && phase && (phase !== 'stop' || cleanup)) event(call, 'failed', { statusCode: 0 });
         throw error;
       }
     };
@@ -147,7 +162,7 @@
           Date.now() >= command.expiresAt || command.expiresAt > Date.now() + 60000) { emit({ callId: command.callId, state: 'failed' }); return; }
       const context = new Context({ sampleRate: 48000 });
       const call = { id: command.callId, sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
-        clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, active: false, ended: false };
+        clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, active: false, ended: false, nativeStarted: false };
       owner = call;
       call.timing = window.AgenticWearVoiceTiming?.create({ current: () => owner === call,
         record: httpTiming => event(call, 'timing', { httpTiming }) });
@@ -164,6 +179,7 @@
       const call = owner;
       if (command.action === 'transport' && command.transport?.seq > call.seq) { call.seq = command.transport.seq; call.remote?.update(command.transport); }
       if (command.action === 'heartbeat') call.lastPing = Date.now();
+      if (command.action === 'control') call.nativeStarted = true;
       if (command.action === 'stop') stop(call);
     }
   });

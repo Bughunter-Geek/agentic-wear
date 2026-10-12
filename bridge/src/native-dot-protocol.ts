@@ -20,12 +20,13 @@ export type NativeVoiceCommand = z.infer<typeof nativeVoiceCommandSchema>;
 export const nativeVoiceEventSchema = z.object({
   callId: id, threadId: id,
   state: z.enum(["accepted", "answer", "active", "closed", "failed", "timing", "progress"]),
-  progressStage: z.enum(["control-clicked", "capture", "peer"]).optional(),
+  progressStage: z.enum(["control-clicked", "cleanup", "capture", "peer"]).optional(),
   sdp: z.string().min(10).max(65_536).optional(),
   statusCode: z.number().int().min(0).max(599).optional(),
   elapsedMs: z.number().int().min(0).max(10_000_000).optional(),
   allocationMode: z.enum(["instant", "standard", "unchanged"]).optional(),
   setupTiming: z.object({
+    cleanupStartMs: z.number().int().min(0).max(120_000).optional(),
     captureMs: z.number().int().min(0).max(120_000).optional(),
     peerMs: z.number().int().min(0).max(120_000).optional(),
     createStartMs: z.number().int().min(0).max(120_000).optional(),

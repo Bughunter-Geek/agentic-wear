@@ -86,6 +86,7 @@
             post({ action: 'stop', callId: call.callId }); release(call); return false;
           }
           start.click();
+          post({ action: 'control', callId: call.callId });
           report({ callId: call.callId, state: 'progress', progressStage: 'control-clicked' });
           protectMicControls();
           changed(); return true;
