@@ -24,8 +24,11 @@ between the Watch and the native voice endpoint, avoiding a second media hop on
 the Mac. Account credentials stay in Chrome.
 
 The adapter must mirror peer/data-channel state to the native browser client,
-hold Watch input until both media connection and native call attachment succeed,
-and scope cancellation, mute and cleanup to the current call. It must refuse to
+hold Watch input until media and the data channel are connected and the native
+client actually releases its own input, and scope cancellation, mute and cleanup
+to the current call. The native attachment request must still complete
+successfully within the finite startup deadline; failure closes the call.
+It must refuse to
 replace somebody else's active browser call. Receiver disconnection, stale
 commands, expiry and stop during startup must release the owned call. The
 browser's own call sounds and placeholder media must not produce duplicate
@@ -221,7 +224,7 @@ does not justify changing allocation.
 
 ## Candidate to follow native activation
 
-Receiver 0.3.10 is prepared locally and has not been activated. Further inspection
+Receiver 0.3.10 is activated. Further inspection
 of the public native client found that `D.activate` waits for both actual media
 connection and the open data channel, and includes the attachment promise only
 when `activateOnWebRtcConnection` is false. It then checks native identity, calls
@@ -251,7 +254,24 @@ evaluation of the unmodified native `activate` method confirms both configuratio
 paths and its media/channel requirements. The previous Watch trace suggests
 potential to overlap about 3.1 seconds of attachment wait; actual startup and
 first-response timing require another physical Watch test. No under-20-second
-result is claimed for this unactivated candidate.
+result was claimed before the physical test.
+
+The first actual 0.3.10 Watch call worked, and the user measured approximately
+20.8 seconds with noticeably better perceived responsiveness. Creation response
+wait was 15.833 seconds, comparable with 0.3.9's 15.921 seconds. Attachment response
+wait was longer at 3.858 seconds. Native input release occurred at browser
+17.852 seconds, while attachment completed at 20.470 seconds: 2.618 seconds of
+attachment wait overlapped real native activation. Relay readiness was accepted
+18.061 seconds after Mac dispatch. The Watch's offer was ready at 1.093 seconds,
+media connected at 18.838 seconds and its channel opened at 18.959 seconds.
+Attachment succeeded with HTTP 200 and the call ended normally from the Watch.
+The user did not supply an exact first-reply duration. The under-20-second target
+remained unmet by that stopwatch result.
+
+The follow-up investigation found Disable cache enabled in the Dot page's open
+Chrome DevTools. Normal caching was restored and DevTools closed before a second
+physical timing test. This is a browser diagnostic-state correction; Watch build
+97 and receiver 0.3.10 are unchanged. Its timing effect remains unverified.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and
