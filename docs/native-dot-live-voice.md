@@ -284,7 +284,7 @@ do not isolate upstream computation.
 
 ## Native direct-allocation comparison
 
-Receiver 0.3.11 is prepared locally. It preserves the native client's original
+Receiver 0.3.11 is activated, with physical comparison pending. It preserves the native client's original
 allocation request instead of forcing `instant_connect: true`. The public `jMD`
 module uses instant mode for preparation but standard mode for an unprepared
 direct call (`prepareForCall` invokes `allocate` with false). Earlier instant
