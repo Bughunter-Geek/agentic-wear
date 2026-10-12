@@ -284,7 +284,7 @@ do not isolate upstream computation.
 
 ## Native direct-allocation comparison
 
-Receiver 0.3.11 is activated, with physical comparison pending. It preserves the native client's original
+Receiver 0.3.11 is activated and physically tested. It preserves the native client's original
 allocation request instead of forcing `instant_connect: true`. The public `jMD`
 module uses instant mode for preparation but standard mode for an unprepared
 direct call (`prepareForCall` invokes `allocate` with false). Earlier instant
@@ -298,12 +298,60 @@ to trigger a fallback, and no second allocation is issued on a denial or error.
 Native input-release readiness, real media/channel checks, attachment failure
 handling and the finite deadline are unchanged from 0.3.10. All 55 browser tests
 pass. This extension-only candidate needs no Watch update or bridge rebuild.
-Its relative speed and the under-20-second target remain physically unverified.
 
-Use the next actual Watch call to separate those waits before choosing an
-optimization. Keep the existing parallel network/offer/capability setup and
-native attachment gate. Do not allocate hidden calls, reuse expired SDP, release
-input before attachment or change VPN routing to improve a displayed number.
+The user measured 23 seconds to usable voice and a separate one-second delay
+before the first spoken reply. Creation used standard allocation and returned
+HTTP 201: response wait was 18.750 seconds, with 3 ms of browser queueing, reused
+connections and 79 ms of download time. Attachment returned HTTP 200 after a
+3.505-second response wait. Native input release occurred at browser 20.160
+seconds; attachment completed at 22.508 seconds, preserving 2.348 seconds of
+overlap. The Watch applied the answer at 21.755 seconds, connected media at
+21.892 seconds and opened its data channel at 21.967 seconds. The call ended
+normally from the Watch. The reply delay is the user's observation, not a
+captured audio timestamp.
+
+This standard-mode sample did not improve the observed startup. Earlier
+instant-mode creation waits varied substantially; samples taken at different
+times do not isolate an allocation-mode effect. Response wait includes network
+time, and no upstream-compute duration was provided. The under-20-second target
+remains unmet.
+
+Further inspection of the native `HSv` and `Up` modules found that the browser
+sends its original offer after setting the local description, without awaiting
+candidate gathering. That difference does not establish a useful optimization
+for the latest Watch call: gathering began at 1.626 seconds and the complete
+offer was ready at 1.671 seconds. Offer and capability preparation already
+overlap, and the browser peer existed by 155 ms. Connected media and the open data
+channel followed receipt of the answer by 461 ms. No SDP change or Watch update
+was made on the basis of this small gathering interval.
+
+The [official WARP guidance](https://developers.openai.com/api/docs/guides/realtime-webrtc-warp)
+describes transport field trials and an explicitly signaled pre-negotiated data
+channel for the public Live and Realtime APIs. The inspected native Dot client
+uses a standard `oai-events` channel and does not expose their `dcid` signaling
+in its allocation request. Compatibility with native Dot allocation is unknown.
+Transport acceleration would target the short post-answer handshake; these
+documents do not establish a reduction of the observed creation response wait.
+No unsupported allocation parameter, data-channel change, field trial or
+background call was activated. Receiver 0.3.11 retains the native allocation
+choice and the proven input-release readiness improvement.
+
+The next prepared physical test keeps receiver 0.3.11, Watch build 97, browser
+cache and routing unchanged. After the user has slept, compare the first call
+with a second explicit call about 30 seconds after ending the first. Time each
+from Start to usable voice, ask the same short question, record the first-reply
+delay and end it. Correlate both calls with creation response wait, native input
+release, attachment completion and Watch media/channel timings. This tests
+whether recent use correlates with a shorter creation wait; two calls alone
+cannot establish cause or reliable under-20-second acceptance. No call or
+allocation is started between tests. Work and physical testing are paused at
+the user's request once this test is prepared.
+
+Use measured stage evidence before choosing another optimization. Keep the
+existing parallel network/offer/capability setup, actual native input-release
+gate and bounded attachment completion. Do not allocate hidden calls, reuse
+expired SDP, release input before the native client does, or change VPN routing
+to improve a displayed number.
 
 1. Verify the SDP delegation and native-client lifecycle with focused browser
    adapter tests and a synthetic endpoint. Never record personal audio.
