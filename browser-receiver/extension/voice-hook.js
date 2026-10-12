@@ -2,9 +2,9 @@
   'use strict';
   if (window.__agenticWearNativeVoiceInstalled || location.href !== 'https://chatgpt.com/dots/home') return;
   window.__agenticWearNativeVoiceInstalled = true;
-  const Peer = window.RTCPeerConnection, Context = window.AudioContext;
+  const Peer = window.RTCPeerConnection, Context = window.AudioContext, Worklet = window.AudioWorkletNode;
   const gum = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
-  const available = Boolean(Peer && Context && gum && window.AgenticWearRemotePeer);
+  const available = Boolean(Peer && Context && Worklet && gum && window.AgenticWearRemotePeer);
   const peers = new Set();
   const trackOwners = new WeakMap(), graphOwners = new WeakMap();
   let owner = null;
@@ -16,7 +16,8 @@
       ...(call.allocationMode ? { allocationMode: call.allocationMode } : {}), ...extra });
   }
   function active(call) {
-    if (owner === call && call.connected && call.attached && !call.active) { call.active = true; event(call, 'active'); }
+    if (owner === call && !call.ended && call.connected && call.remote?.channelOpen &&
+        call.attachStarted && call.nativeReleased && !call.active) { call.active = true; event(call, 'active'); }
   }
   function stop(call) {
     if (owner !== call || call.ended) return;
@@ -42,6 +43,25 @@
     }
   }
   if (available) {
+    window.AudioWorkletNode = new Proxy(Worklet, {
+      construct(target, args, newTarget) {
+        const node = Reflect.construct(target, args, newTarget), call = graphOwners.get(args[0]);
+        // Observe the native client's own permission to release input. Its
+        // activation policy can wait for attachment or activate on connected
+        // media/channel; do not infer that policy or fabricate a release.
+        if (call && args[1] === 'codex-realtime-buffered-audio') {
+          const post = node.port.postMessage;
+          node.port.postMessage = function (...values) {
+            const result = post.apply(this, values);
+            if (this === node.port && owner === call && !call.ended && values[0]?.type === 'release' && Object.keys(values[0]).length === 1) {
+              call.nativeReleased = true; active(call);
+            }
+            return result;
+          };
+        }
+        return node;
+      },
+    });
     const nativeTimeout = window.setTimeout;
     window.setTimeout = function (callback, delay, ...args) {
       const call = owner;
@@ -139,7 +159,12 @@
         if (call && phase === 'create') call.allocationMode = prepared.allocationMode || 'unchanged';
         const fetchOnce = async (values, allocationMode) => {
           const timingRequest = requestUrl ? call?.timing?.request(requestUrl, phase, allocationMode) : null;
-          const response = await originalFetch.apply(this, values);
+          const pending = originalFetch.apply(this, values);
+          const input = values[0], request = typeof window.Request === 'function' && input instanceof window.Request;
+          if (owner === call && phase === 'attach' && (values[1]?.method || (request ? input.method : 'GET')).toUpperCase() === 'POST') {
+            call.attachStarted = true; active(call);
+          }
+          const response = await pending;
           if (owner === call) call?.timing?.response(timingRequest, response);
           return response;
         };
@@ -161,6 +186,7 @@
         throw error;
       }
     };
+    window.__agenticWearNativeVoiceReadiness = 'native-client-input-release';
   }
   window.addEventListener('message', message => {
     if (message.source !== window || message.origin !== location.origin || message.data?.type !== 'aw.native.voice.command') return;
@@ -173,7 +199,8 @@
           Date.now() >= command.expiresAt || command.expiresAt > Date.now() + 60000) { emit({ callId: command.callId, state: 'failed' }); return; }
       const context = new Context({ sampleRate: 48000 });
       const call = { id: command.callId, sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
-        clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, active: false, ended: false, nativeStarted: false };
+        clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, attachStarted: false,
+        nativeReleased: false, active: false, ended: false, nativeStarted: false };
       owner = call;
       call.timing = window.AgenticWearVoiceTiming?.create({ current: () => owner === call,
         record: httpTiming => event(call, 'timing', { httpTiming }) });
@@ -184,11 +211,13 @@
         document.body.append(banner); call.banner = banner;
       }
       call.timer = setInterval(() => { if (location.href !== 'https://chatgpt.com/dots/home' || Date.now() - call.lastPing > 45000) stop(call); }, 1000);
-      call.startup = setTimeout(() => { if (owner === call && !call.active) { event(call, 'failed'); stop(call); } }, 60000);
+      call.startup = setTimeout(() => { if (owner === call && (!call.active || !call.attached)) { event(call, 'failed'); stop(call); } }, 30000);
       event(call, 'accepted');
     } else if (owner?.id === command.callId) {
       const call = owner;
-      if (command.action === 'transport' && command.transport?.seq > call.seq) { call.seq = command.transport.seq; call.remote?.update(command.transport); }
+      if (command.action === 'transport' && command.transport?.seq > call.seq) {
+        call.seq = command.transport.seq; call.remote?.update(command.transport); active(call);
+      }
       if (command.action === 'heartbeat') call.lastPing = Date.now();
       if (command.action === 'control') call.nativeStarted = true;
       if (command.action === 'stop') stop(call);

@@ -217,7 +217,41 @@ target remains unmet. The receiver already requests the native client's
 instant allocation mode; allocation must finish before applying its real answer
 and attaching, while attachment already runs alongside media activation. No
 additional supported faster allocation path was found, so the timing evidence
-does not justify another runtime change.
+does not justify changing allocation.
+
+## Candidate to follow native activation
+
+Receiver 0.3.10 is prepared locally and has not been activated. Further inspection
+of the public native client found that `D.activate` waits for both actual media
+connection and the open data channel, and includes the attachment promise only
+when `activateOnWebRtcConnection` is false. It then checks native identity, calls
+`releaseInputAudio` and publishes its active state. The current caller enables
+activation on WebRTC by default, subject to its runtime configuration.
+The microphone implementation sends `{type: "release"}` to its
+`codex-realtime-buffered-audio` worklet at that exact point. Source: the inspected
+`lfL` module in `155568.f4345aafa0.js` and `V3`/`HzP` modules in
+`731863.574ec9e40d.js`.
+
+The candidate observes that native release only on the current call's owned
+placeholder graph and known processor. Readiness also requires actual connected
+Watch media, an open endpoint data channel and a dispatched attachment POST.
+An unknown processor, another graph, a stopped call, a failed port message, or
+media/channel state alone cannot release input. If the native client waits for
+attachment, the adapter waits too. The adapter does not change the native policy.
+
+This differs from 0.3.9's requirement to await a successful attachment HTTP
+response before releasing Watch input. Attachment still runs normally; its
+HTTP/network errors still propagate through native failure handling and close
+the owned call. A pending attachment remains bounded by a 30-second deadline,
+even when native audio has already become active. No idle calls, fabricated
+transport state, Mac microphone capture or account-policy overrides are added.
+
+All 54 browser tests and nine focused native bridge tests pass. A synthetic
+evaluation of the unmodified native `activate` method confirms both configuration
+paths and its media/channel requirements. The previous Watch trace suggests
+potential to overlap about 3.1 seconds of attachment wait; actual startup and
+first-response timing require another physical Watch test. No under-20-second
+result is claimed for this unactivated candidate.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and

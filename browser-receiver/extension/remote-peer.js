@@ -63,6 +63,7 @@
       closed();
     };
     return {
+      get channelOpen() { return !ended && channelState === 'open'; },
       update(value) {
         if (ended || !current() || !remote) return false;
         if (!['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed'].includes(value.peerState) ||

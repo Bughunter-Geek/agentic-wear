@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 
-async function fixture() {
+async function fixture({ workletPostFailure = false } = {}) {
   const handlers = new Map(), events = [], tracks = [], requests = [], responses = [], controls = [], timers = [];
   let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
   const observers = [];
@@ -21,13 +21,22 @@ async function fixture() {
     resume() { localResumes++; return Promise.resolve(); }
     close() { return Promise.resolve(); }
   }
+  class Worklet {
+    constructor(context, name) {
+      this.context = context; this.name = name; this.messages = [];
+      this.port = { postMessage: (...values) => {
+        if (workletPostFailure && values[0]?.type === 'release') throw new DOMException('Port rejected the message', 'DataCloneError');
+        this.messages.push(values);
+      } };
+    }
+  }
   class Peer extends EventTarget {
     state = 'new';
     get connectionState() { return this.state; }
     close() { this.state = 'closed'; }
   }
   const response = { ok: true, status: 200, privateBody: 'PRIVATE_RESPONSE' };
-  const window = { RTCPeerConnection: Peer, AudioContext: Context, Request, PerformanceObserver: Observer, performance: { now: () => now },
+  const window = { RTCPeerConnection: Peer, AudioContext: Context, AudioWorkletNode: Worklet, Request, PerformanceObserver: Observer, performance: { now: () => now },
     setTimeout(callback, delay, ...args) { const timer = { callback, delay, args, due: now + delay, cleared: false }; timers.push(timer); return timer; },
     clearTimeout(timer) { timer.cleared = true; },
     addEventListener(name, handler) { handlers.set(name, handler); }, postMessage(message) { events.push(message.event); },
@@ -53,6 +62,11 @@ async function fixture() {
     resource(entry, observer = observers.at(-1)) { observer.callback({ getEntries: () => [entry] }); } };
 }
 const offer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111';
+async function nativeInput(f, name = 'codex-realtime-buffered-audio') {
+  const input = await f.sandbox.navigator.mediaDevices.getUserMedia({ audio: true });
+  const graph = new f.window.AudioContext(); graph.createMediaStreamSource(input);
+  return new f.window.AudioWorkletNode(graph, name);
+}
 
 test('delegated capture never opens the Mac mic and only its unused input graph is virtualized', async () => {
   const f = await fixture();
@@ -76,17 +90,20 @@ test('delegated capture never opens the Mac mic and only its unused input graph 
   assert.equal(f.microphoneRequests(), 2);
 });
 
-test('native acceptance needs endpoint media and HTTP attachment; stale transport cannot change it', async () => {
+test('native acceptance follows the native input release after real media/channel and attachment dispatch', async () => {
   const f = await fixture();
   f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+  const input = await nativeInput(f);
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
   assert.equal(f.events.find(e => e.progressStage === 'peer').state, 'progress');
   await peer.setLocalDescription(await peer.createOffer());
   await peer.setRemoteDescription({ type: 'answer', sdp: offer });
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
   assert.equal(f.events.some(e => e.state === 'active'), false);
-  const response = await f.window.fetch('/backend-api/tbo/PRIVATE_OWNER/voice/calls/PRIVATE_CALL/attach', { headers: { Authorization: 'PRIVATE_CREDENTIAL' } });
+  const response = await f.window.fetch('/backend-api/tbo/PRIVATE_OWNER/voice/calls/PRIVATE_CALL/attach', { method: 'POST', headers: { Authorization: 'PRIVATE_CREDENTIAL' } });
   assert.equal(response, f.response);
+  assert.equal(f.events.some(e => e.state === 'active'), false, 'HTTP success does not replace native input release');
+  input.port.postMessage({ type: 'release' });
   assert.equal(f.events.filter(e => e.state === 'active').length, 1);
   const timing = f.events.find(e => e.state === 'active');
   assert.equal(Number.isInteger(timing.elapsedMs), true);
@@ -168,6 +185,7 @@ test('an observer completion before fetch resolves waits for the response metada
 const startOwned = f => f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
 test('native startup can attach after 20 seconds without prematurely ending the connected Watch media', async () => {
   const f = await fixture(); startOwned(f);
+  const input = await nativeInput(f);
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
   await peer.setLocalDescription(await peer.createOffer());
   let complete, timer;
@@ -179,6 +197,7 @@ test('native startup can attach after 20 seconds without prematurely ending the 
   f.tick(4000);
   assert.equal(f.events.some(e => e.state === 'active'), false, 'media alone still cannot release Watch input');
   await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  input.port.postMessage({ type: 'release' });
   complete(); await startup;
   assert.equal(f.events.filter(e => e.state === 'active').length, 1);
   assert.equal(peer.connectionState, 'connected');
@@ -266,6 +285,7 @@ test('the requested Watch allocation uses the native instant mode while preservi
 });
 test('only a documented 409 denial without allocation permits the native standard mode, with Request bodies intact', async () => {
   const f = await fixture(); startOwned(f);
+  const native = await nativeInput(f);
   const input = new Request(createUrl, createInit());
   f.responses.push(new Response(JSON.stringify({ detail: "Your dot's voice task is still active" }), { status: 409 }));
   await f.window.fetch(input);
@@ -281,7 +301,102 @@ test('only a documented 409 denial without allocation permits the native standar
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
   assert.equal(f.events.some(e => e.state === 'active'), false);
   await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  native.port.postMessage({ type: 'release' });
   assert.equal(f.events.find(e => e.state === 'active').allocationMode, 'standard');
+});
+
+async function endpoint(f, channelState = 'open') {
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState } });
+  return peer;
+}
+test('native input release overlaps pending attachment without inventing media or channel readiness', async () => {
+  const f = await fixture(); startOwned(f);
+  const input = await nativeInput(f); await endpoint(f, 'connecting');
+  let finish;
+  f.responses.push(() => new Promise(resolve => { finish = resolve; }));
+  const pending = f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  input.port.postMessage({ type: 'release' });
+  assert.equal(f.events.some(e => e.state === 'active'), false, 'connected media does not prove channel readiness');
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connected', iceState: 'completed', channelState: 'open' } });
+  const ready = f.events.filter(e => e.state === 'active');
+  assert.equal(ready.length, 1);
+  assert.equal(Number.isInteger(ready[0].setupTiming.attachStartMs), true);
+  assert.equal(ready[0].setupTiming.attachEndMs, undefined, 'attachment HTTP result remains pending');
+  assert.equal(f.requests.length, 1); assert.equal(f.microphoneRequests(), 0);
+  f.advance(3119); finish(f.response); assert.equal(await pending, f.response);
+  input.port.postMessage({ type: 'release' });
+  assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+  f.tick(30000); assert.equal(f.events.some(e => e.state === 'failed'), false);
+});
+test('native policy that withholds input until attachment remains authoritative', async () => {
+  const f = await fixture(); startOwned(f);
+  const input = await nativeInput(f); await endpoint(f);
+  let finish;
+  f.responses.push(() => new Promise(resolve => { finish = resolve; }));
+  const pending = f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  f.advance(3119); assert.equal(f.events.some(e => e.state === 'active'), false);
+  finish(f.response); await pending;
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+  input.port.postMessage({ type: 'release' });
+  assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+});
+test('personal graphs, unknown processors, non-release messages and stale owned releases cannot activate a call', async () => {
+  const f = await fixture();
+  const personal = new f.window.AudioWorkletNode(new f.window.AudioContext(), 'codex-realtime-buffered-audio');
+  startOwned(f); const input = await nativeInput(f), unknown = await nativeInput(f, 'another-processor');
+  await endpoint(f); await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  personal.port.postMessage({ type: 'release' }); unknown.port.postMessage({ type: 'release' });
+  input.port.postMessage.call(personal.port, { type: 'release' });
+  input.port.postMessage({ type: 'mute', muted: false }); input.port.postMessage({ type: 'release', extra: true });
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+  f.command({ action: 'stop', callId: 'owned' });
+  startOwned(f); const current = await nativeInput(f); await endpoint(f);
+  await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  input.port.postMessage({ type: 'release' }); assert.equal(f.events.some(e => e.state === 'active'), false);
+  current.port.postMessage({ type: 'release' }); assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+});
+test('a native release rejected by its port cannot announce readiness', async () => {
+  const f = await fixture({ workletPostFailure: true }); startOwned(f);
+  const input = await nativeInput(f); await endpoint(f);
+  await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  assert.throws(() => input.port.postMessage({ type: 'release' }), { name: 'DataCloneError' });
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+});
+test('attachment failure after native activation still propagates and cannot release a later call', async () => {
+  for (const result of [new Response('', { status: 503 }), new TypeError('network unavailable')]) {
+    const f = await fixture(); startOwned(f);
+    const input = await nativeInput(f); await endpoint(f);
+    let finish, fail;
+    f.responses.push(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+    const pending = f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+    input.port.postMessage({ type: 'release' }); assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+    if (result instanceof Error) { fail(result); await assert.rejects(pending, error => error === result); }
+    else { finish(result); assert.equal(await pending, result); }
+    assert.equal(f.events.at(-1).state, 'failed');
+    assert.equal(f.events.at(-1).statusCode, result instanceof Error ? 0 : 503);
+    f.command({ action: 'stop', callId: 'owned' });
+    const active = f.events.filter(e => e.state === 'active').length;
+    startOwned(f); input.port.postMessage({ type: 'release' });
+    assert.equal(f.events.filter(e => e.state === 'active').length, active);
+    assert.equal(f.microphoneRequests(), 0);
+  }
+});
+test('attachment that hangs after native activation still closes at the finite deadline', async () => {
+  const f = await fixture(); startOwned(f);
+  const input = await nativeInput(f), peer = await endpoint(f);
+  let finish;
+  f.responses.push(() => new Promise(resolve => { finish = resolve; }));
+  const pending = f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  input.port.postMessage({ type: 'release' }); assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+  f.tick(30000);
+  assert.equal(f.events.some(e => e.state === 'failed'), true); assert.equal(peer.connectionState, 'closed');
+  assert.ok(f.tracks.every(track => track.stopped));
+  const active = f.events.filter(e => e.state === 'active').length;
+  startOwned(f); finish(f.response); await pending; input.port.postMessage({ type: 'release' });
+  assert.equal(f.events.filter(e => e.state === 'active').length, active);
 });
 test('unknown conflicts, allocated responses, rate limits and server errors never issue another allocation', async () => {
   for (const [status, detail, headers] of [[409, 'Unknown conflict', {}], [409, 'Another voice call is active', { Location: '/PRIVATE_CALL' }],
