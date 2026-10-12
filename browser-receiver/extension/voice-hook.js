@@ -22,6 +22,7 @@
     call.ended = true;
     owner = null;
     clearInterval(call.timer); clearTimeout(call.startup);
+    call.timing?.close();
     call.remote?.close();
     for (const track of call.clones) track.stop();
     call.placeholder.stream.getTracks().forEach(track => track.stop());
@@ -94,18 +95,20 @@
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
       const call = owner;
-      let phase = null;
+      let phase = null, requestUrl = null;
       if (call) {
         try {
           const input = args[0], url = new URL(typeof input === 'string' ? input : input.url || String(input), location.href);
           const match = url.origin === location.origin && url.pathname.match(/\/tbo\/[^/]+\/voice\/calls(?:\/[^/]+\/(attach|stop))?$/);
-          if (match) phase = match[1] || 'create';
+          if (match) { phase = match[1] || 'create'; requestUrl = url.href; }
         } catch { /* Unknown request shapes retain native fetch behavior. */ }
       }
       if (call && phase && phase !== 'stop') stamp(call, phase === 'create' ? 'createStartMs' : 'attachStartMs');
+      const timingRequest = requestUrl ? call?.timing?.request(requestUrl, phase) : null;
       try {
         const response = await originalFetch.apply(this, args);
         if (owner === call && phase && phase !== 'stop') {
+          call.timing?.response(timingRequest, response);
           stamp(call, phase === 'create' ? 'createEndMs' : 'attachEndMs');
           if (!response.ok) event(call, 'failed', { statusCode: response.status });
           else if (phase === 'attach') { call.attached = true; active(call); }
@@ -130,6 +133,8 @@
       const call = { id: command.callId, sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
         clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, active: false, ended: false };
       owner = call;
+      call.timing = window.AgenticWearVoiceTiming?.create({ current: () => owner === call,
+        record: httpTiming => event(call, 'timing', { httpTiming }) });
       if (document.body) {
         const banner = document.createElement('div'); banner.setAttribute('role', 'status');
         banner.textContent = 'Agentic Wear · Watch microphone and speaker · Mute on the Watch';

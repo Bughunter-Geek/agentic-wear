@@ -8,7 +8,7 @@ export interface NativeDotConnection {
 }
 type Call = { id: string; threadId: string; startedAt: number; expiresAt: number; accepted: boolean; answer: boolean; active: boolean; transportSeq: number };
 type TimingLog = (fields: { callId: string; stage: string; at: number; sinceStartMs: number;
-  browserElapsedMs?: number; setupTiming?: NativeVoiceEvent["setupTiming"]; statusCode?: number }) => void;
+  browserElapsedMs?: number; setupTiming?: NativeVoiceEvent["setupTiming"]; httpTiming?: NativeVoiceEvent["httpTiming"]; statusCode?: number }) => void;
 
 /** Account/call control stays in the native browser client; Watch WebRTC owns media. */
 export class NativeDotVoice {
@@ -64,7 +64,8 @@ export class NativeDotVoice {
   async event(value: NativeVoiceEvent): Promise<void> {
     const call = this.call;
     if (!call || value.callId !== call.id || value.threadId !== call.threadId) return;
-    if (value.state === "accepted") { call.accepted = true; this.timing(call, "browser.accepted", value); }
+    if (value.state === "timing") { this.timing(call, `browser.http.${value.httpTiming?.phase}`, value); }
+    else if (value.state === "accepted") { call.accepted = true; this.timing(call, "browser.accepted", value); }
     else if (value.state === "answer" && call.accepted && !call.answer) {
       call.answer = true;
       this.timing(call, "browser.answer", value);
@@ -89,6 +90,7 @@ export class NativeDotVoice {
     this.log({ callId: call.id, stage, at, sinceStartMs: Math.max(0, at - call.startedAt),
       ...(event?.elapsedMs !== undefined ? { browserElapsedMs: event.elapsedMs } : {}),
       ...(event?.setupTiming ? { setupTiming: event.setupTiming } : {}),
+      ...(event?.httpTiming ? { httpTiming: event.httpTiming } : {}),
       ...(event?.statusCode !== undefined ? { statusCode: event.statusCode } : {}) });
   }
 

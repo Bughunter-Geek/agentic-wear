@@ -6,7 +6,13 @@ import { JSDOM } from 'jsdom';
 
 async function fixture() {
   const handlers = new Map(), events = [], tracks = [];
-  let microphoneRequests = 0, localResumes = 0;
+  let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
+  const observers = [];
+  class Observer {
+    constructor(callback) { this.callback = callback; this.closed = false; observers.push(this); }
+    observe(options) { assert.equal(JSON.stringify(options), '{"entryTypes":["resource"]}'); }
+    disconnect() { this.closed = true; }
+  }
   const makeTrack = () => { const track = { kind: 'audio', stopped: false, stop() { this.stopped = true; } }; tracks.push(track); return track; };
   const stream = () => { const track = makeTrack(); return { getTracks: () => [track], getAudioTracks: () => [track], clone: stream }; };
   class Context {
@@ -21,19 +27,22 @@ async function fixture() {
     close() { this.state = 'closed'; }
   }
   const response = { ok: true, status: 200, privateBody: 'PRIVATE_RESPONSE' };
-  const window = { RTCPeerConnection: Peer, AudioContext: Context,
+  const window = { RTCPeerConnection: Peer, AudioContext: Context, PerformanceObserver: Observer, performance: { now: () => now },
     addEventListener(name, handler) { handlers.set(name, handler); }, postMessage(message) { events.push(message.event); },
-    async fetch() { return response; } };
+    async fetch() { fetches++; return response; } };
   const location = { href: 'https://chatgpt.com/dots/home', origin: 'https://chatgpt.com' };
   const sandbox = { window, location, Event, EventTarget, DOMException, URL, navigator: { mediaDevices: {
     getUserMedia() { microphoneRequests++; return Promise.resolve('physical'); } } },
     document: { body: null }, Date,
     setInterval: () => 1, clearInterval() {}, setTimeout: () => 2, clearTimeout() {} };
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/remote-peer.js', import.meta.url), 'utf8'), sandbox);
+  vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-timing.js', import.meta.url), 'utf8'), sandbox);
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-hook.js', import.meta.url), 'utf8'), sandbox);
   const command = value => handlers.get('message')({ source: window, origin: location.origin,
     data: { type: 'aw.native.voice.command', command: value } });
-  return { window, sandbox, command, events, tracks, response, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes };
+  return { window, sandbox, command, events, tracks, response, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
+    fetches: () => fetches, advance: ms => { now += ms; }, observers,
+    resource(entry, observer = observers.at(-1)) { observer.callback({ getEntries: () => [entry] }); } };
 }
 const offer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111';
 
@@ -85,6 +94,59 @@ test('an existing unrelated browser peer prevents reserving a Watch call', async
   f.command({ action: 'start', callId: 'watch', sdp: offer, expiresAt: Date.now() + 45000 });
   assert.equal(f.events.at(-1).state, 'failed');
   assert.equal(personal.connectionState, 'new');
+});
+
+const createUrl = 'https://chatgpt.com/backend-api/tbo/PRIVATE_OWNER/voice/calls';
+function resource(name = createUrl, overrides = {}) {
+  return { name, entryType: 'resource', initiatorType: 'fetch', startTime: 100, fetchStart: 100,
+    duration: 16000, domainLookupStart: 110, domainLookupEnd: 130, connectStart: 130, connectEnd: 400,
+    secureConnectionStart: 200, requestStart: 450, responseStart: 16080, responseEnd: 16100,
+    workerStart: 0, serverTiming: [{ name: 'PRIVATE_NAME', description: 'PRIVATE_DESCRIPTION' }], ...overrides };
+}
+test('HTTP timings distinguish queue, connection and response waits without extra requests or private data', async () => {
+  const f = await fixture();
+  f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+  f.response.headers = { get(key) { assert.equal(key, 'x-envoy-upstream-service-time'); return '15000.4'; } };
+  await f.window.fetch(createUrl, { body: 'PRIVATE_SDP', headers: { Authorization: 'PRIVATE_CREDENTIAL' } });
+  f.resource(resource('https://other.example/voice/calls'));
+  f.resource(resource(createUrl, { startTime: 99 }));
+  assert.equal(f.events.some(e => e.state === 'timing'), false);
+  f.resource(resource());
+  const timings = f.events.filter(e => e.state === 'timing');
+  assert.equal(timings.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(timings[0].httpTiming)), { phase: 'create', totalMs: 16000,
+    dnsMs: 20, connectMs: 270, tlsMs: 200, responseWaitMs: 15630, downloadMs: 20, serverMs: 15000, queueMs: 60 });
+  assert.equal(JSON.stringify(f.events).includes('PRIVATE_'), false);
+  f.resource(resource());
+  assert.equal(f.events.filter(e => e.state === 'timing').length, 1);
+  assert.equal(f.fetches(), 1); assert.equal(f.microphoneRequests(), 0);
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+});
+test('timing cleanup rejects old call entries, zero timestamps stay unknown, and absent server duration is not zero', async () => {
+  const f = await fixture();
+  f.command({ action: 'start', callId: 'old', sdp: offer, expiresAt: Date.now() + 45000 });
+  await f.window.fetch(createUrl); const oldObserver = f.observers.at(-1);
+  f.command({ action: 'stop', callId: 'old' });
+  assert.equal(oldObserver.closed, true);
+  f.advance(200);
+  f.command({ action: 'start', callId: 'next', sdp: offer, expiresAt: Date.now() + 45000 });
+  await f.window.fetch(createUrl);
+  f.resource(resource(), oldObserver);
+  f.resource(resource(createUrl, { startTime: 300, duration: 20, fetchStart: 0, domainLookupStart: 0,
+    domainLookupEnd: 0, connectStart: 0, connectEnd: 0, secureConnectionStart: 0, requestStart: 0, responseStart: 0, responseEnd: 0 }));
+  const timing = f.events.find(e => e.state === 'timing');
+  assert.equal(timing.callId, 'next');
+  assert.deepEqual(JSON.parse(JSON.stringify(timing.httpTiming)), { phase: 'create', totalMs: 20 });
+  assert.equal(f.fetches(), 2);
+});
+test('an observer completion before fetch resolves waits for the response metadata', async () => {
+  const f = await fixture();
+  f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+  const pending = f.window.fetch(createUrl);
+  f.resource(resource());
+  assert.equal(f.events.some(e => e.state === 'timing'), false);
+  await pending;
+  assert.equal(f.events.filter(e => e.state === 'timing').length, 1);
 });
 
 const controllerSource = await readFile(new URL('../../browser-receiver/extension/voice-controller.js', import.meta.url), 'utf8');

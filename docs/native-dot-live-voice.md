@@ -5,8 +5,10 @@ has accepted creation and attachment through the signed-in Chrome page. Its
 voice reached the experimental Mac relay, and the user confirmed that the
 duplicate speaker playback was corrected. On 2026-10-12 the user confirmed native
 Lumen microphone and speaker operation on the actual Watch, with superb audio
-quality after connection. Startup needed about four attempts; interruption,
-mobile-network acceptance and measured conversational latency remain unverified.
+quality after connection. After adapter 0.3.4 restored bridge startup, the next
+call connected on its first attempt; the user measured 24 seconds to connect.
+Interruption, mobile-network acceptance and conversational latency remain
+unverified.
 The Watch/bridge/browser media delegation
 code is implemented and the signed candidate is built; activation and private
 publication are tracked separately from physical acceptance.
@@ -31,7 +33,7 @@ playback or open the Mac microphone.
 
 ## Validation and delivery
 
-Completed: bridge checks, 582 bridge tests, 26 browser-script tests, the additional
+Completed: bridge checks, 583 bridge tests, 29 browser-script tests, the additional
 authenticated native-host exchange regression, 44 relay tests, Watch unit tests,
 native Kotlin compilation, signed minified release assembly and release lint.
 The exact candidate keeps signer `bc70f367781d453b8dd22eb4daf5b735c291656a0d64137f974094aefdb6cda8`,
@@ -66,6 +68,40 @@ run alongside network startup. Their failures are logged; transcription still
 waits for actual backend readiness. The browser status now reports
 `bridgeConnected` only after an authenticated local-stream acknowledgement, so
 a readable Lumen page alone can no longer appear to prove bridge readiness.
+
+## Call-start latency
+
+The first successful 0.3.4 call produced these measured durations:
+
+| Stage | Duration |
+| --- | ---: |
+| Watch complete SDP offer, from Watch startup | 1.144 s |
+| Browser call creation fetch | 16.153 s |
+| Browser attachment fetch | 3.223 s |
+| Relay acceptance of the answer | 0.722 s |
+| Relay acceptance of readiness | 0.960 s |
+| Watch media connection, after receiving the answer | 0.319 s |
+
+Some stages overlap; adding these rows does not give end-to-end latency. The
+user's 24-second measurement remains the physical startup baseline. The older
+Mac media prototype also measured native creation at 8.864 and 13.129 seconds,
+so the main wait is not unique to delegated Watch media. Fetch duration alone
+does not distinguish browser scheduling, network RTT and upstream service work.
+
+Adapter 0.3.5 adds a resource observer restricted to the owned call's exact
+create/attach requests. It emits bounded numeric DNS, connection, TLS, queue,
+response-wait and download durations, plus an optional numeric upstream duration
+when the response supplies it. A response wait includes network time; a missing
+duration is unknown, not zero. TLS is included in the connection duration.
+URLs, IDs, headers, descriptions, request bodies and audio are never emitted.
+Diagnostics cannot activate a call, open the microphone or issue extra requests;
+ending a call disconnects its observer. This diagnostic update does not yet
+establish a latency reduction and must be activated after the current call ends.
+
+Use the next actual Watch call to separate those waits before choosing an
+optimization. Keep the existing parallel network/offer/capability setup and
+native attachment gate. Do not allocate hidden calls, reuse expired SDP, release
+input before attachment or change VPN routing to improve a displayed number.
 
 1. Verify the SDP delegation and native-client lifecycle with focused browser
    adapter tests and a synthetic endpoint. Never record personal audio.

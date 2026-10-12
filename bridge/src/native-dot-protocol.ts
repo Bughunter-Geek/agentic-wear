@@ -19,7 +19,7 @@ export const nativeVoiceCommandSchema = z.discriminatedUnion("action", [
 export type NativeVoiceCommand = z.infer<typeof nativeVoiceCommandSchema>;
 export const nativeVoiceEventSchema = z.object({
   callId: id, threadId: id,
-  state: z.enum(["accepted", "answer", "active", "closed", "failed"]),
+  state: z.enum(["accepted", "answer", "active", "closed", "failed", "timing"]),
   sdp: z.string().min(10).max(65_536).optional(),
   statusCode: z.number().int().min(0).max(599).optional(),
   elapsedMs: z.number().int().min(0).max(10_000_000).optional(),
@@ -31,5 +31,18 @@ export const nativeVoiceEventSchema = z.object({
     attachStartMs: z.number().int().min(0).max(120_000).optional(),
     attachEndMs: z.number().int().min(0).max(120_000).optional(),
   }).strict().optional(),
-}).strict().refine(value => value.state === "answer" ? value.sdp?.startsWith("v=0") && value.sdp.includes("m=audio") : value.sdp === undefined);
+  httpTiming: z.object({
+    phase: z.enum(["create", "attach"]),
+    totalMs: z.number().int().min(0).max(120_000),
+    queueMs: z.number().int().min(0).max(120_000).optional(),
+    dnsMs: z.number().int().min(0).max(120_000).optional(),
+    connectMs: z.number().int().min(0).max(120_000).optional(),
+    tlsMs: z.number().int().min(0).max(120_000).optional(),
+    responseWaitMs: z.number().int().min(0).max(120_000).optional(),
+    downloadMs: z.number().int().min(0).max(120_000).optional(),
+    workerMs: z.number().int().min(0).max(120_000).optional(),
+    serverMs: z.number().int().min(0).max(120_000).optional(),
+  }).strict().optional(),
+}).strict().refine(value => value.state === "answer" ? value.sdp?.startsWith("v=0") && value.sdp.includes("m=audio") : value.sdp === undefined)
+  .refine(value => value.state === "timing" ? value.httpTiming !== undefined : value.httpTiming === undefined);
 export type NativeVoiceEvent = z.infer<typeof nativeVoiceEventSchema>;
