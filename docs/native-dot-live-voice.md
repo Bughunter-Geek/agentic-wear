@@ -58,6 +58,15 @@ peer creation, native call creation/attachment and relay delivery. They contain
 no audio, SDP, account headers or response bodies. This is a bridge/receiver
 update; the installed signed Watch build 97 is unchanged.
 
+The first 0.3.3 restart exposed a separate startup dependency: the CLI waited
+for Phonon preparation before constructing the bridge, and the bridge waited
+for the local editor before opening its relay. A Core ML warmup remained pending
+for over 14 minutes. In 0.3.4, ASR and editor preparation remain sequential but
+run alongside network startup. Their failures are logged; transcription still
+waits for actual backend readiness. The browser status now reports
+`bridgeConnected` only after an authenticated local-stream acknowledgement, so
+a readable Lumen page alone can no longer appear to prove bridge readiness.
+
 1. Verify the SDP delegation and native-client lifecycle with focused browser
    adapter tests and a synthetic endpoint. Never record personal audio.
 2. Integrate the authenticated browser receiver, bridge capabilities and Watch

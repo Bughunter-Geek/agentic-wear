@@ -25,9 +25,11 @@ describe("native voice admission alongside cloud notifications", () => {
     await receiver.start();
     const transport = new DesktopCloudTransport(config, desktopCloudSocketPath(path), () => {});
     try {
+      expect(transport.connected).toBe(false);
       transport.start();
       transport.snapshot({ threadId, title: "Fixture", status: "idle", nativeVoice: true, messages: [] }, Date.now());
       await vi.waitFor(() => expect(receiver.nativeVoiceAvailable(threadId)).toBe(true));
+      await vi.waitFor(() => expect(transport.connected).toBe(true));
       const now = Date.now();
       transport.terminal({ eventId: cloudEventId(threadId, "turn", "terminal.completed"), threadId, turnId: "turn", kind: "terminal.completed",
         turnScope: "topLevel", title: "Fixture", detail: "Fixture reply", occurredAt: now, observedAt: now, nativeCompletedAt: null, source: "browser-ui" });
@@ -47,7 +49,8 @@ describe("native voice admission alongside cloud notifications", () => {
       await vi.waitFor(() => expect(receiver.snapshot(threadId).title).toBe("After alert"));
       expect(disconnected).not.toHaveBeenCalled();
     } finally {
-      alert.release(); answer.release(); transport.close(); await receiver.close(); await rm(home, { recursive: true, force: true });
+      alert.release(); answer.release(); transport.close(); expect(transport.connected).toBe(false);
+      await receiver.close(); await rm(home, { recursive: true, force: true });
     }
   });
 });

@@ -93,7 +93,10 @@ export class RelayClient {
     let reconnectDelay = 500;
     while (!signal.aborted) {
       try {
-        await this.connectOnce(signal, onEnvelope, onWatchPublicKey, () => { reconnectDelay = 500; });
+        await this.connectOnce(signal, onEnvelope, onWatchPublicKey, () => {
+          reconnectDelay = 500;
+          console.info(JSON.stringify({ level: "info", message: "relay.socket.connected", at: Date.now() }));
+        });
         reconnectDelay = 500;
       } catch (error) {
         if (signal.aborted) return;

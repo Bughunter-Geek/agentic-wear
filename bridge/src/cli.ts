@@ -190,12 +190,8 @@ async function start(): Promise<void> {
   }, provider === "phonon" ? "phonon" : provider === "local" ? "whisper" : undefined);
   if (provider === "local") await assertLocalWhisperInstalled();
   if (provider === "phonon") await assertLocalPhononRuntimeInstalled();
-  try {
-    await (transcriber.prepare?.() ?? Promise.resolve());
-  } catch (error) {
-    await transcriber.close?.();
-    throw error;
-  }
+  // BridgeService prepares local models after opening its network transport.
+  // Phonon compilation/loading must not prevent cloud text and native voice.
   const service = new BridgeService(
     config,
     relay,

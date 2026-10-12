@@ -130,12 +130,6 @@ export class BridgeService {
     const status = await this.relay.status();
     if (!status.paired || !status.watchPublicKey) throw new Error("The watch has not completed authenticated pairing");
     this.assertWatchPublicKey(status.watchPublicKey);
-    // Preload the resident voice editor before accepting Watch work. Phonon
-    // was already prepared by start(); avoid a first-use model load racing ASR.
-    if (this.transcriber.defaultBackend === "phonon") {
-      await this.draftEditor.prepare().catch(() => undefined);
-    }
-
     const socketTask = this.relay.runSocket(
       this.controller.signal,
       (envelope, localQueueMs) => this.onEnvelope(envelope, localQueueMs),
@@ -143,6 +137,7 @@ export class BridgeService {
     );
     try {
       if (this.controller.signal.aborted) throw abortError(this.controller.signal);
+      this.prepareLocalModels();
       // The Desktop-managed daemon owns the shared session registry. A private
       // stdio App Server sees every Desktop-loaded thread as foreign, which
       // makes an otherwise idle existing chat permanently unsendable from the
@@ -212,6 +207,28 @@ export class BridgeService {
 
   stop(): void {
     this.controller.abort(new Error("Bridge stopped"));
+  }
+
+  private prepareLocalModels(): void {
+    // Keep ASR/editor warmup sequential to avoid racing local model loads,
+    // while the relay and cloud adapter start independently. Transcription
+    // requests still await their backend's real readiness and report errors.
+    let stage = "transcriber";
+    void Promise.resolve().then(async () => {
+      console.info(JSON.stringify({ level: "info", message: "bridge.model.preparing", stage,
+        backend: this.transcriber.defaultBackend ?? "configured", at: Date.now() }));
+      await this.transcriber.prepare?.();
+      if (this.controller.signal.aborted) return;
+      console.info(JSON.stringify({ level: "info", message: "bridge.model.prepared", stage,
+        backend: this.transcriber.defaultBackend ?? "configured", at: Date.now() }));
+      if (this.transcriber.defaultBackend === "phonon") {
+        stage = "editor";
+        await this.draftEditor.prepare();
+        if (!this.controller.signal.aborted) console.info(JSON.stringify({ level: "info", message: "bridge.model.prepared", stage, at: Date.now() }));
+      }
+    }).catch((error: unknown) => {
+      if (!this.controller.signal.aborted) console.error(JSON.stringify({ level: "error", message: "bridge.model.prepare_failed", stage, error: publicError(error) }));
+    });
   }
 
   private assertWatchPublicKey(publicKey: string): void {

@@ -246,12 +246,14 @@ export class DesktopCloudTransport {
   private snapshots = new Map<string, CloudFrame>();
   private inFlight: CloudFrame | null = null;
   private readonly voiceInFlight = new Set<string>();
+  private authenticated = false;
   private closed = false;
   constructor(private readonly config: DesktopCloudConfig, private readonly socketPath: string, private readonly log: CloudLog = logDesktopCloud,
     private readonly onSend?: (command: CloudSend) => Promise<CloudSendResult>,
     private readonly onVoice?: (command: NativeVoiceCommand) => void,
     private readonly onVoiceDisconnected?: () => void) {}
   start(): void { this.connect(); }
+  get connected(): boolean { return Boolean(this.authenticated && this.socket && !this.socket.connecting && !this.socket.destroyed); }
   snapshot(snapshot: CloudSnapshot, observedAt: number): void {
     const frame: CloudFrame = { version: 1, kind: "snapshot", id: randomUUID(), streamId: this.streamId, snapshot, observedAt };
     this.snapshots.set(snapshot.threadId, frame);
@@ -271,12 +273,12 @@ export class DesktopCloudTransport {
     this.socket.write(`${JSON.stringify(frame)}\n`);
   }
   reset(): void {
-    this.pending.clear(); this.snapshots.clear(); this.inFlight = null; this.voiceInFlight.clear(); this.streamId = randomUUID();
+    this.pending.clear(); this.snapshots.clear(); this.inFlight = null; this.voiceInFlight.clear(); this.authenticated = false; this.streamId = randomUUID();
     this.pending.set("reset", { version: 1, kind: "reset", id: randomUUID(), streamId: this.streamId });
     this.socket?.destroy();
   }
   close(): void {
-    this.closed = true; this.pending.clear(); this.voiceInFlight.clear(); this.socket?.destroy();
+    this.closed = true; this.pending.clear(); this.voiceInFlight.clear(); this.authenticated = false; this.socket?.destroy();
     if (this.retry) clearTimeout(this.retry);
     if (this.flushTimer) clearTimeout(this.flushTimer);
   }
@@ -317,8 +319,9 @@ export class DesktopCloudTransport {
             continue;
           }
           const ack = cloudAckSchema.parse(raw);
-          if (this.voiceInFlight.delete(ack.id)) continue;
+          if (this.voiceInFlight.delete(ack.id)) { this.authenticated = true; continue; }
           if (ack.id !== this.inFlight?.id) { socket.destroy(); return; }
+          this.authenticated = true;
           this.inFlight = null; this.flush();
         } catch { socket.destroy(); return; }
       }
@@ -327,6 +330,7 @@ export class DesktopCloudTransport {
     socket.on("close", () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.authenticated = false;
       this.voiceInFlight.clear();
       this.onVoiceDisconnected?.();
       for (const [key, frame] of this.pending) if (frame.kind === "native-voice-event") this.pending.delete(key);
