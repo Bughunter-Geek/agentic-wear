@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   window.AgenticWearVoiceController = { create({ documentId, url, identity, changed }) {
-    let supported = false, owner = null, accepted = null;
+    let supported = false, owner = null, accepted = null, stopped = false;
     const disabled = new Map();
     const label = element => element.getAttribute('aria-label') || (element.innerText || element.textContent || '').trim();
     const buttons = () => [...document.querySelectorAll('button')];
@@ -14,9 +14,12 @@
       }
     }
     function post(command) { window.postMessage({ type: 'aw.native.voice.command', command }, location.origin); }
-    function release() {
+    function release(call = owner) {
+      if (owner !== call) return;
+      accepted?.resolve(false);
       for (const [button, wasDisabled] of disabled) if (button.isConnected) button.disabled = wasDisabled;
-      disabled.clear(); owner = null; accepted = null; changed();
+      disabled.clear(); owner = null; accepted = null;
+      if (!stopped) changed();
     }
     function report(event) {
       if (!owner || event.callId !== owner.callId) return;
@@ -24,9 +27,13 @@
         event: { ...event, threadId: owner.threadId } }).catch(() => {}); } catch { post({ action: 'stop', callId: owner.callId }); }
     }
     function receive(message) {
-      if (message.source !== window || message.origin !== location.origin || message.data?.type !== 'aw.native.voice.event') return;
+      if (stopped || message.source !== window || message.origin !== location.origin || message.data?.type !== 'aw.native.voice.event') return;
       const event = message.data.event;
-      if (event?.state === 'available') { supported = event.available === true; changed(); return; }
+      if (event?.state === 'available') {
+        const next = event.available === true;
+        if (supported !== next) { supported = next; changed(); }
+        return;
+      }
       if (!owner || event?.callId !== owner.callId) return;
       report(event);
       if (event.state === 'accepted') accepted?.resolve(true);
@@ -49,9 +56,9 @@
     }, 2000);
     post({ action: 'query' });
     return {
-      available: () => supported && Boolean(identity()) && (Boolean(owner) || !hangup()),
+      available: () => !stopped && supported && Boolean(identity()) && (Boolean(owner) || !hangup()),
       async command(command) {
-        if (command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
+        if (stopped || command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
         if (command.action === 'start') {
           if (owner || !supported || !identity() || hangup()) return false;
           const start = buttons().filter(button => label(button) === 'Start call' && !button.disabled).at(-1);
@@ -60,9 +67,11 @@
           const call = owner;
           const pending = new Promise(resolve => { accepted = { resolve }; });
           post(command);
-          const deadline = new Promise(resolve => setTimeout(() => resolve(false), 3000));
-          if (!await Promise.race([pending, deadline]) || owner !== call || Date.now() >= command.expiresAt) {
-            post({ action: 'stop', callId: call.callId }); release(); return false;
+          let timer;
+          const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(false), 3000); });
+          const ready = await Promise.race([pending, deadline]); clearTimeout(timer);
+          if (!ready || owner !== call || Date.now() >= command.expiresAt) {
+            post({ action: 'stop', callId: call.callId }); release(call); return false;
           }
           start.click();
           protectMicControls();
@@ -76,7 +85,14 @@
         }
         post(command); return true;
       },
+      cancel() {
+        if (stopped) return;
+        if (owner) post({ action: 'stop', callId: owner.callId });
+        release();
+      },
       stop() {
+        if (stopped) return;
+        stopped = true;
         if (owner) post({ action: 'stop', callId: owner.callId });
         release(); clearInterval(timer); controls.disconnect(); window.removeEventListener('message', receive);
       },

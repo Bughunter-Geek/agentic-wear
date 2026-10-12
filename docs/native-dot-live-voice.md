@@ -28,7 +28,7 @@ playback or open the Mac microphone.
 
 ## Validation and delivery
 
-Completed: bridge checks, 579 bridge tests, 20 browser-script tests, the additional
+Completed: bridge checks, 579 bridge tests, 26 browser-script tests, the additional
 authenticated native-host exchange regression, 44 relay tests, Watch unit tests,
 native Kotlin compilation, signed minified release assembly and release lint.
 The exact candidate keeps signer `bc70f367781d453b8dd22eb4daf5b735c291656a0d64137f974094aefdb6cda8`,
@@ -37,6 +37,12 @@ Its SHA-256 is `5e2c09c3b42c70b417910c6c8265069d663dbfa5267bde7a9d9510e9ec73c29f
 A local check using real Chrome WebRTC, AudioContext and AudioWorklet interfaces
 passed without a browser user gesture and with zero physical microphone requests.
 That check did not open a Lumen call or establish physical Watch media.
+
+The browser receiver keeps call cancellation separate from disposal: a native
+host reconnect must not remove capability listeners. Disposal is idempotent and
+cannot reschedule the retired content observer. A cancelled startup cannot
+release a newer call. These paths have focused browser regressions; adapter
+0.3.2 also announces availability when its main-world hook finishes loading.
 
 1. Verify the SDP delegation and native-client lifecycle with focused browser
    adapter tests and a synthetic endpoint. Never record personal audio.

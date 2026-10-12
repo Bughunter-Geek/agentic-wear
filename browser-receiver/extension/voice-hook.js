@@ -138,5 +138,8 @@
       if (command.action === 'stop') stop(call);
     }
   });
+  // Either world can be injected first on an existing SPA tab. Announce here
+  // as well as answering queries so a delayed hook needs no background timer.
+  emit({ state: 'available', available });
   window.addEventListener('pagehide', () => { if (owner) stop(owner); });
 })();

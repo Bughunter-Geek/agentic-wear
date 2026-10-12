@@ -10,7 +10,7 @@
     "build": "rm -rf dist && tsc",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && oxlint --deny typescript/no-floating-promises src test",
     "dev": "tsx src/cli.ts",
-    "test": "vitest run && node --test test/browser-cloud-content.test.mjs test/native-dot-browser.test.mjs",
+    "test": "vitest run && node --test test/browser-cloud-content.test.mjs test/native-dot-browser.test.mjs test/browser-worker.test.mjs",
     "build:desktop-cloud": "node scripts/bundle-desktop-cloud.mjs",
     "bundle:native-host": "node scripts/bundle-native-host.mjs"
   },

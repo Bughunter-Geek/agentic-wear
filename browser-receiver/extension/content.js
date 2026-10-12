@@ -7,15 +7,15 @@
   // or an in-page navigation to another chat). Same URL: keep the running instance.
   // Different URL: retire the old instance so only one answers commands.
   const previous=window.__agenticWearCloudReceiver;
-  if(previous&&previous.version==='0.3.1'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
+  if(previous&&previous.version==='0.3.2'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
   if(previous&&previous.stop)previous.stop();
   const isDot=TARGET===DOT, documentId=crypto.randomUUID();
+  let scheduled=false,last='',lastSent=0,sending=false,retired=false;
   const nativeVoice=isDot?window.AgenticWearVoiceController?.create({documentId,url:TARGET,identity:()=>dotIdentity()?NAMESPACE:null,changed:()=>schedule()}):null;
   const chatTitle=()=>{
     const text=(document.title||'').replace(/\s*[|\u2013\u2014-]\s*ChatGPT\s*$/i,'').trim().slice(0,200);
     return text&&!/^ChatGPT$/i.test(text)?text:'Codex cloud chat';
   };
-  let scheduled=false,last='',lastSent=0,sending=false;
   const label=e=>e.getAttribute('aria-label')||(e.innerText||e.textContent||'').trim();
   const clean=e=>{
     if(!e)return '';
@@ -340,7 +340,8 @@
     return !blocked()&&!!modelButton()&&!!readCurrent();
   }
   function inspect(){
-    scheduled=false;if(!chrome.runtime?.id){handle.stop();return;}
+    scheduled=false;if(retired)return;
+    if(!chrome.runtime?.id){handle.stop();return;}
     if(location.href!==TARGET)return;
     if(canLearn())learn();
     const started=performance.now(), unavailable=blocked(), composer=editor();
@@ -420,19 +421,21 @@
     if(sender.id!==chrome.runtime.id)return;
     if(command?.kind==='native-voice-check'){respond({ready:Boolean(nativeVoice?.available())});return;}
     if(command?.kind==='native-voice'){void nativeVoice?.command(command).then(respond);return true;}
-    if(command?.kind==='native-voice-lost'){nativeVoice?.stop();respond({closed:true});return;}
+    if(command?.kind==='native-voice-lost'){nativeVoice?.cancel();respond({closed:true});return;}
     if(command?.kind==='observe'){lastSent=0;inspect();respond({documentId});return;}
     if(command?.kind!=='send')return;
     void send(command).then(respond);return true;
   };
   chrome.runtime.onMessage?.addListener(onCommand);
-  function schedule(){if(!scheduled){scheduled=true;queueMicrotask(inspect);}}
+  function schedule(){if(!retired&&!scheduled){scheduled=true;queueMicrotask(inspect);}}
   const pageObserver=new MutationObserver(schedule);
   pageObserver.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
   document.addEventListener('visibilitychange',schedule);const tick=setInterval(inspect,1000);
-  const handle={url:TARGET,version:'0.3.1',alive:true,stop(){
+  const handle={url:TARGET,version:'0.3.2',alive:true,stop(){
+    if(retired)return;
+    retired=true;handle.alive=false;
     nativeVoice?.stop();
-    handle.alive=false;clearInterval(tick);pageObserver.disconnect();document.removeEventListener('visibilitychange',schedule);
+    clearInterval(tick);pageObserver.disconnect();document.removeEventListener('visibilitychange',schedule);
     try{chrome.runtime.onMessage?.removeListener(onCommand);}catch{}
   }};
   window.__agenticWearCloudReceiver=handle;
