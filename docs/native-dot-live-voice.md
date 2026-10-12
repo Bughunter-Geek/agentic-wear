@@ -190,8 +190,34 @@ native timer behavior. Native errors and cancellation still propagate, and
 Watch input still requires media connection and successful attachment. A
 regression completes attachment at 21 seconds; a second verifies that an
 uncompleted startup still times out. This is a reliability fix, not a reduction
-in the measured service response wait. Runtime and physical acceptance of the
-new adapter remain pending.
+in the measured service response wait.
+
+Adapter 0.3.9 was activated on 2026-10-12 as an extension-only update, with a
+rollback backup. Chrome showed 0.3.9 enabled, the loaded main-world watchdog
+guard was verified, and the receiver reconnected to the bridge. The native host,
+bridge, extension permissions, pairing configuration and private Watch build 97
+remained unchanged. The user then confirmed a successful first attempt, measured
+23 seconds to connect, and reported that the first spoken reply arrived right
+away. The call ended from the Watch normally.
+
+That call's instant allocation response wait was 15.921 seconds; attachment
+response wait was 3.119 seconds. Browser peer setup completed 466 ms after Mac
+dispatch, and relay readiness was accepted at 19.828 seconds. The Watch trace
+shows the complete offer at 1.552 seconds, answer receipt at 19.143 seconds and
+media connection at 19.464 seconds. Native attachment still gates usability.
+These clocks have different origins and their durations must not be summed.
+Creation reused its connection, with zero reported DNS/connect/TLS setup and
+1 ms of queueing; the response wait includes network RTT and upstream service
+work. No service-only timing was supplied.
+
+The physical call became native-active at 19.529 seconds, so it did not exercise
+the extended 20-to-30-second watchdog interval. One successful first attempt does
+not establish reliability across network conditions. The sub-10-second startup
+target remains unmet. The receiver already requests the native client's
+instant allocation mode; allocation must finish before applying its real answer
+and attaching, while attachment already runs alongside media activation. No
+additional supported faster allocation path was found, so the timing evidence
+does not justify another runtime change.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and
