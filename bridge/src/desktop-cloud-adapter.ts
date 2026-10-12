@@ -234,8 +234,9 @@ export class DesktopCloudObserver {
   }
 }
 
-// Acknowledged, bounded local outbox. Only terminal alerts receive immediate
-// priority; streaming snapshots coalesce, never queue behind every token.
+// Acknowledged, bounded local outbox. Voice control has its own bounded lane:
+// an in-flight notification delivery must not block native call negotiation.
+// Streaming snapshots coalesce, never queue behind every token.
 export class DesktopCloudTransport {
   private socket: Socket | null = null;
   private retry: NodeJS.Timeout | null = null;
@@ -244,6 +245,7 @@ export class DesktopCloudTransport {
   private pending = new Map<string, CloudFrame>();
   private snapshots = new Map<string, CloudFrame>();
   private inFlight: CloudFrame | null = null;
+  private readonly voiceInFlight = new Set<string>();
   private closed = false;
   constructor(private readonly config: DesktopCloudConfig, private readonly socketPath: string, private readonly log: CloudLog = logDesktopCloud,
     private readonly onSend?: (command: CloudSend) => Promise<CloudSendResult>,
@@ -262,17 +264,19 @@ export class DesktopCloudTransport {
   }
   voiceEvent(value: NativeVoiceEvent): void {
     if (!this.socket || this.socket.connecting || this.socket.destroyed) throw new Error("The private bridge disconnected");
-    if (this.pending.size >= 132) throw new Error("The browser receiver queue is full");
+    if (this.voiceInFlight.size >= 16) throw new Error("The native voice receiver queue is full");
     const event = nativeVoiceEventSchema.parse(value), id = randomUUID();
-    this.pending.set(id, { version: 1, kind: "native-voice-event", id, streamId: this.streamId, event }); this.flush();
+    const frame: CloudFrame = { version: 1, kind: "native-voice-event", id, streamId: this.streamId, event };
+    this.voiceInFlight.add(id);
+    this.socket.write(`${JSON.stringify(frame)}\n`);
   }
   reset(): void {
-    this.pending.clear(); this.snapshots.clear(); this.inFlight = null; this.streamId = randomUUID();
+    this.pending.clear(); this.snapshots.clear(); this.inFlight = null; this.voiceInFlight.clear(); this.streamId = randomUUID();
     this.pending.set("reset", { version: 1, kind: "reset", id: randomUUID(), streamId: this.streamId });
     this.socket?.destroy();
   }
   close(): void {
-    this.closed = true; this.pending.clear(); this.socket?.destroy();
+    this.closed = true; this.pending.clear(); this.voiceInFlight.clear(); this.socket?.destroy();
     if (this.retry) clearTimeout(this.retry);
     if (this.flushTimer) clearTimeout(this.flushTimer);
   }
@@ -281,7 +285,7 @@ export class DesktopCloudTransport {
     const socket = createConnection(this.socketPath); this.socket = socket;
     let input = "";
     socket.setEncoding("utf8");
-    socket.setTimeout(15_000, () => { if (this.inFlight) socket.destroy(); });
+    socket.setTimeout(15_000, () => { if (this.inFlight || this.voiceInFlight.size) socket.destroy(); });
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ version: 1, kind: "hello", capability: this.config.capability,
         pairBinding: this.config.pairBinding, streamId: this.streamId })}\n`);
@@ -289,6 +293,7 @@ export class DesktopCloudTransport {
       this.log("connected"); this.flush();
     });
     socket.on("data", (chunk: string) => {
+      if (this.socket !== socket || this.closed) return;
       input += chunk;
       if (Buffer.byteLength(input) > CLOUD_FRAME_BYTES) { socket.destroy(); return; }
       let newline;
@@ -312,6 +317,7 @@ export class DesktopCloudTransport {
             continue;
           }
           const ack = cloudAckSchema.parse(raw);
+          if (this.voiceInFlight.delete(ack.id)) continue;
           if (ack.id !== this.inFlight?.id) { socket.destroy(); return; }
           this.inFlight = null; this.flush();
         } catch { socket.destroy(); return; }
@@ -321,6 +327,7 @@ export class DesktopCloudTransport {
     socket.on("close", () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.voiceInFlight.clear();
       this.onVoiceDisconnected?.();
       for (const [key, frame] of this.pending) if (frame.kind === "native-voice-event") this.pending.delete(key);
       if (this.inFlight && this.inFlight.kind !== "native-voice-event") {

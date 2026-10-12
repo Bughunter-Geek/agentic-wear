@@ -5,14 +5,14 @@ import { nativeVoiceEventSchema, type NativeVoiceCommand } from "../src/native-d
 const sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111";
 function fixture() {
   let now = 1000, connected = true;
-  const commands: NativeVoiceCommand[] = [], delivered: Record<string, unknown>[] = [];
+  const commands: NativeVoiceCommand[] = [], delivered: Record<string, unknown>[] = [], timing: Record<string, unknown>[] = [];
   const browser: NativeDotConnection = {
     configuredDot: id => id === "dot" ? { title: "Your Dot" } : null,
     nativeVoiceAvailable: () => connected,
     voiceCommand: command => { if (!connected) throw new Error("Disconnected"); commands.push(command); },
   };
-  const voice = new NativeDotVoice(browser, async payload => { delivered.push(payload); }, () => now);
-  return { voice, commands, delivered, advance(ms: number) { now += ms; }, disconnect() { connected = false; } };
+  const voice = new NativeDotVoice(browser, async payload => { delivered.push(payload); }, () => now, fields => { timing.push({ ...fields }); });
+  return { voice, commands, delivered, timing, advance(ms: number) { now += ms; }, disconnect() { connected = false; } };
 }
 describe("native Dot media delegation", () => {
   it("dispatches start without waiting for the peer messages needed to connect", async () => {
@@ -59,5 +59,18 @@ describe("native Dot media delegation", () => {
     await f.voice.event({ callId: "first", threadId: "other", state: "failed" });
     expect(f.delivered).toEqual([]);
     expect(nativeVoiceEventSchema.safeParse({ callId: "first", threadId: "dot", state: "failed", message: "PRIVATE_TOKEN" }).success).toBe(false);
+  });
+  it("separates browser startup and relay delivery timing without logging SDP or arbitrary page data", async () => {
+    const f = fixture(); f.voice.start("first", "dot", sdp);
+    f.advance(10); await f.voice.event({ callId: "first", threadId: "dot", state: "accepted", elapsedMs: 0 });
+    f.advance(400); await f.voice.event({ callId: "first", threadId: "dot", state: "answer", sdp, elapsedMs: 300,
+      setupTiming: { captureMs: 20, peerMs: 50, createStartMs: 55, createEndMs: 299 } });
+    expect(f.timing.find(value => value.stage === "browser.answer")).toMatchObject({ sinceStartMs: 410, browserElapsedMs: 300,
+      setupTiming: { captureMs: 20, peerMs: 50, createStartMs: 55, createEndMs: 299 } });
+    expect(f.timing.at(-1)?.stage).toBe("relay.answer.accepted");
+    expect(JSON.stringify(f.timing)).not.toContain(sdp);
+    expect(nativeVoiceEventSchema.safeParse({ callId: "first", threadId: "dot", state: "accepted",
+      setupTiming: { token: "PRIVATE_TOKEN" } }).success).toBe(false);
+    expect(nativeVoiceEventSchema.safeParse({ callId: "first", threadId: "dot", state: "accepted", elapsedMs: -1 }).success).toBe(false);
   });
 });

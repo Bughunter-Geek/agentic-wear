@@ -69,6 +69,9 @@ test('native acceptance needs endpoint media and HTTP attachment; stale transpor
   const response = await f.window.fetch('/backend-api/tbo/PRIVATE_OWNER/voice/calls/PRIVATE_CALL/attach', { headers: { Authorization: 'PRIVATE_CREDENTIAL' } });
   assert.equal(response, f.response);
   assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+  const timing = f.events.find(e => e.state === 'active');
+  assert.equal(Number.isInteger(timing.elapsedMs), true);
+  for (const key of ['peerMs', 'attachStartMs', 'attachEndMs']) assert.equal(Number.isInteger(timing.setupTiming[key]), true);
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'failed', iceState: 'failed', channelState: 'closed' } });
   assert.equal(peer.connectionState, 'connected');
   assert.equal(JSON.stringify(f.events).includes('PRIVATE_'), false);

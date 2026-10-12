@@ -183,6 +183,8 @@ export class DesktopCloudReceiver {
     if (this.closed || this.sockets.size >= 4) { socket.destroy(); return; }
     this.sockets.add(socket);
     let input = "", streamId: string | null = null, queued = 0, chain = Promise.resolve();
+    let normal = Promise.resolve(), voice = Promise.resolve();
+    const reject = () => { this.log("frame_rejected"); socket.destroy(); };
     socket.setEncoding("utf8");
     const handshakeTimeout = setTimeout(() => { if (!streamId) socket.destroy(); }, 2_000);
     handshakeTimeout.unref();
@@ -201,21 +203,30 @@ export class DesktopCloudReceiver {
       while ((newline = input.indexOf("\n")) >= 0) {
         const line = input.slice(0, newline); input = input.slice(newline + 1);
         if (++queued > 16) { socket.destroy(); return; }
-        chain = chain.then(async () => {
-          if (socket.destroyed || this.closed) return;
+        let finished = false;
+        const finish = () => { if (!finished) { finished = true; queued--; } };
+        chain = chain.then(() => {
+          if (socket.destroyed || this.closed) { finish(); return; }
           const value: unknown = JSON.parse(line);
           if (!streamId) {
             const hello = cloudHelloSchema.parse(value);
             if (this.active || !this.config || !sameSecret(hello.capability, this.config.capability) ||
                 !sameSecret(hello.pairBinding, this.config.pairBinding)) throw new Error("Unauthorized cloud sender");
             this.active = socket; streamId = hello.streamId; this.snapshots.clear();
-            clearTimeout(handshakeTimeout); this.log("authenticated"); return;
+            clearTimeout(handshakeTimeout); this.log("authenticated"); finish(); return;
           }
           const frame = cloudFrameSchema.parse(value);
           if (frame.streamId !== streamId || this.active !== socket) throw new Error("Retired cloud stream");
-          await this.receive(frame);
-          if (!socket.destroyed) socket.write(`${JSON.stringify({ version: 1, kind: "ack", id: frame.id })}\n`);
-        }).catch(() => { this.log("frame_rejected"); socket.destroy(); }).finally(() => { queued--; });
+          const receive = async () => {
+            if (socket.destroyed || this.closed || this.active !== socket) return;
+            await this.receive(frame);
+            if (!socket.destroyed) socket.write(`${JSON.stringify({ version: 1, kind: "ack", id: frame.id })}\n`);
+          };
+          // Authentication and frame admission stay ordered and bounded. Voice
+          // events preserve their own order without awaiting slow alert I/O.
+          const task = frame.kind === "native-voice-event" ? voice = voice.then(receive) : normal = normal.then(receive);
+          void task.catch(reject).finally(finish);
+        }).catch(() => { finish(); reject(); });
       }
     });
   }

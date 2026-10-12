@@ -105,7 +105,8 @@ export class BridgeService {
           console.error(JSON.stringify({level:"error",message:"Could not push cloud history",error:publicError(error)}));
         });
       });
-    this.nativeDotVoice = new NativeDotVoice(this.desktopCloud, payload => this.send(payload));
+    this.nativeDotVoice = new NativeDotVoice(this.desktopCloud, payload => this.send(payload), undefined,
+      fields => console.info(JSON.stringify({ level: "info", message: "native.voice.timing", ...fields })));
     this.desktopCloud.setVoiceHandlers(value => this.nativeDotVoice.event(value), () => this.nativeDotVoice.disconnected());
     this.appServer = new AppServerClient(
       this.ownedThreads,

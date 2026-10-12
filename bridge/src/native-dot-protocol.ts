@@ -22,5 +22,14 @@ export const nativeVoiceEventSchema = z.object({
   state: z.enum(["accepted", "answer", "active", "closed", "failed"]),
   sdp: z.string().min(10).max(65_536).optional(),
   statusCode: z.number().int().min(0).max(599).optional(),
+  elapsedMs: z.number().int().min(0).max(10_000_000).optional(),
+  setupTiming: z.object({
+    captureMs: z.number().int().min(0).max(120_000).optional(),
+    peerMs: z.number().int().min(0).max(120_000).optional(),
+    createStartMs: z.number().int().min(0).max(120_000).optional(),
+    createEndMs: z.number().int().min(0).max(120_000).optional(),
+    attachStartMs: z.number().int().min(0).max(120_000).optional(),
+    attachEndMs: z.number().int().min(0).max(120_000).optional(),
+  }).strict().optional(),
 }).strict().refine(value => value.state === "answer" ? value.sdp?.startsWith("v=0") && value.sdp.includes("m=audio") : value.sdp === undefined);
 export type NativeVoiceEvent = z.infer<typeof nativeVoiceEventSchema>;

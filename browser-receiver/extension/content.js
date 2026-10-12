@@ -7,7 +7,7 @@
   // or an in-page navigation to another chat). Same URL: keep the running instance.
   // Different URL: retire the old instance so only one answers commands.
   const previous=window.__agenticWearCloudReceiver;
-  if(previous&&previous.version==='0.3.2'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
+  if(previous&&previous.version==='0.3.3'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
   if(previous&&previous.stop)previous.stop();
   const isDot=TARGET===DOT, documentId=crypto.randomUUID();
   let scheduled=false,last='',lastSent=0,sending=false,retired=false;
@@ -431,7 +431,7 @@
   const pageObserver=new MutationObserver(schedule);
   pageObserver.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
   document.addEventListener('visibilitychange',schedule);const tick=setInterval(inspect,1000);
-  const handle={url:TARGET,version:'0.3.2',alive:true,stop(){
+  const handle={url:TARGET,version:'0.3.3',alive:true,stop(){
     if(retired)return;
     retired=true;handle.alive=false;
     nativeVoice?.stop();

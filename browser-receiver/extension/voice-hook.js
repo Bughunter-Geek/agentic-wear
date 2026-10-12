@@ -9,7 +9,11 @@
   const trackOwners = new WeakMap(), graphOwners = new WeakMap();
   let owner = null;
   const emit = event => window.postMessage({ type: 'aw.native.voice.event', event }, location.origin);
-  function event(call, state, extra = {}) { if (owner === call) emit({ callId: call.id, state, ...extra }); }
+  const elapsed = call => Math.max(0, Math.min(10_000_000, Date.now() - call.startedAt));
+  function stamp(call, key) { if (owner === call && call.setupTiming[key] === undefined) call.setupTiming[key] = Math.min(120_000, elapsed(call)); }
+  function event(call, state, extra = {}) {
+    if (owner === call) emit({ callId: call.id, state, elapsedMs: elapsed(call), setupTiming: { ...call.setupTiming }, ...extra });
+  }
   function active(call) {
     if (owner === call && call.connected && call.attached && !call.active) { call.active = true; event(call, 'active'); }
   }
@@ -52,6 +56,7 @@
       const call = owner;
       if (!call) return gum(constraints);
       if (!constraints?.audio || constraints.video) throw new DOMException('This call delegates audio only to the Watch', 'NotAllowedError');
+      stamp(call, 'captureMs');
       const stream = call.placeholder.stream.clone(); call.clones.push(...stream.getTracks());
       for (const track of stream.getAudioTracks()) trackOwners.set(track, call);
       return stream;
@@ -71,6 +76,7 @@
           };
         }
         if (call) {
+          stamp(call, 'peerMs');
           call.peer = peer;
           call.remote = window.AgenticWearRemotePeer.attach(peer, call.sdp, {
             current: () => owner === call,
@@ -96,9 +102,11 @@
           if (match) phase = match[1] || 'create';
         } catch { /* Unknown request shapes retain native fetch behavior. */ }
       }
+      if (call && phase && phase !== 'stop') stamp(call, phase === 'create' ? 'createStartMs' : 'attachStartMs');
       try {
         const response = await originalFetch.apply(this, args);
         if (owner === call && phase && phase !== 'stop') {
+          stamp(call, phase === 'create' ? 'createEndMs' : 'attachEndMs');
           if (!response.ok) event(call, 'failed', { statusCode: response.status });
           else if (phase === 'attach') { call.attached = true; active(call); }
         }
@@ -119,7 +127,7 @@
           typeof command.sdp !== 'string' || !command.sdp.startsWith('v=0') || !command.sdp.includes('m=audio') || command.sdp.length > 65536 ||
           Date.now() >= command.expiresAt || command.expiresAt > Date.now() + 60000) { emit({ callId: command.callId, state: 'failed' }); return; }
       const context = new Context({ sampleRate: 48000 });
-      const call = { id: command.callId, sdp: command.sdp, context, placeholder: context.createMediaStreamDestination(),
+      const call = { id: command.callId, sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
         clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, active: false, ended: false };
       owner = call;
       if (document.body) {
