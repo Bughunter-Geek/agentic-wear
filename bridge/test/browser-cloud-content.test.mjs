@@ -39,6 +39,9 @@ const dotRow=(id,role,text)=>`<article class="message-row ${role==='user'?'self'
 it('extracts Dot role and body without timestamps or quoted actions; refuses another Dot',async()=>{
  const body=`<main><button data-orbit-profile-trigger="true" aria-label="Open Lumen’s profile"></button>${dotRow('a'.repeat(32),'user','My prompt')}${dotRow('b'.repeat(32),'assistant','Lumen reply')}</main>`;
  const out=(await run(body,dotUrl)).at(-1);assert.deepEqual(out.turns.map(t=>[t.role,t.reply]),[['user','My prompt'],['assistant','Lumen reply']]);
+ const open=(await run(body.replace('Open Lumen’s profile','Close Lumen’s profile'),dotUrl)).at(-1);
+ assert.equal(open.blocked,false);assert.equal(open.turns.length,2);
+ assert.equal((await run(body.replace('Open Lumen’s profile','Close Another’s profile'),dotUrl)).at(-1).blocked,true);
  assert.equal((await run(body.replaceAll(ns,'c'.repeat(32)),dotUrl)).at(-1).blocked,true);
 });
 async function runDotWithTops(body,tops){

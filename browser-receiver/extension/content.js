@@ -7,7 +7,7 @@
   // or an in-page navigation to another chat). Same URL: keep the running instance.
   // Different URL: retire the old instance so only one answers commands.
   const previous=window.__agenticWearCloudReceiver;
-  if(previous&&previous.version==='0.3.0'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
+  if(previous&&previous.version==='0.3.1'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
   if(previous&&previous.stop)previous.stop();
   const isDot=TARGET===DOT, documentId=crypto.randomUUID();
   const nativeVoice=isDot?window.AgenticWearVoiceController?.create({documentId,url:TARGET,identity:()=>dotIdentity()?NAMESPACE:null,changed:()=>schedule()}):null;
@@ -31,7 +31,7 @@
   function dotIdentity(){
     const rows=[...document.querySelectorAll('main article.message-row[data-message-id]')];
     return rows.length>0 && rows.every(e=>e.dataset.messageId.startsWith(`${NAMESPACE}~${NAMESPACE}~CalpicoMessage~`)) &&
-      !!document.querySelector('[data-orbit-profile-trigger=true][aria-label="Open Lumen’s profile"]');
+      !!document.querySelector('[data-orbit-profile-trigger=true][aria-label="Open Lumen’s profile"], [data-orbit-profile-trigger=true][aria-label="Close Lumen’s profile"]');
   }
   function readTurns(){
     if(isDot){
@@ -430,7 +430,7 @@
   const pageObserver=new MutationObserver(schedule);
   pageObserver.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
   document.addEventListener('visibilitychange',schedule);const tick=setInterval(inspect,1000);
-  const handle={url:TARGET,version:'0.3.0',alive:true,stop(){
+  const handle={url:TARGET,version:'0.3.1',alive:true,stop(){
     nativeVoice?.stop();
     handle.alive=false;clearInterval(tick);pageObserver.disconnect();document.removeEventListener('visibilitychange',schedule);
     try{chrome.runtime.onMessage?.removeListener(onCommand);}catch{}

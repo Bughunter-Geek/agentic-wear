@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agentic Wear Cloud Receiver",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Text, history and native Watch voice for Lumen using your signed-in browser.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAltGroWHoTDC1poQMHvmxH5pjxU7pSP0QE8eYgYd4GouhzI4CTXEGCEiuG05I86GFD6PKRdKz2o1ZGmDLuX18dX8xGrWp3u/OAw1PDizh/Ttitu8sq2fO1xb30C9YgHluQsoOXxZb+W2T97MKwqxJX9MxItv6/+yYgxYZXhC1dFaoj6QJbq9+/cXArfdALJweWEgJB/Jplgsb6rRUzp+5awHShNU4OHedgPU42Y+LPONnTz6xtIW7eHQV5MmvFnpdoTeOEyUT0XZfK6ep/rFLQE8g2To1jSiqXNzg2Lepkie7Zkb9NbKXGqA/Xt/il+AuFe8sqDDOCbrnZ+917K92pQIDAQAB",
   "permissions": [
