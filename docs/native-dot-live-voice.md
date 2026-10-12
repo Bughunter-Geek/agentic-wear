@@ -122,7 +122,35 @@ responses remain errors and cannot trigger another allocation. Cancellation
 before allocation or during denial inspection prevents a later request.
 Request bodies and authentication remain in Chrome; each HTTP attempt reports
 only fixed allocation-mode/status metadata and durations. Local regressions
-cover these boundaries. Actual startup benefit still requires a Watch test.
+cover these boundaries.
+
+Two subsequent native Watch calls used instant allocation successfully. Their
+creation response waits were 10.029 and 10.472 seconds; relay readiness arrived
+13.824 and 14.141 seconds after Mac dispatch. These are stage measurements, not
+the user's end-to-end stopwatch result. One other allocation returned HTTP 500.
+Several accepted attempts did not reach native capture or call creation and two
+timed out on the Watch. Neither reliable first-attempt startup nor a sub-10-second
+result is established for this mode. Unknown server failures still cannot trigger
+a second allocation.
+
+Adapter 0.3.7 corrects a reproducible startup-control race. The old controller
+selected the last Start call button (including the profile panel), then awaited
+the main-world reservation before clicking that saved element. Chrome can redraw
+the button during that wait. The controller now prefers the persistent toolbar
+and resolves a connected, enabled, rendered control again immediately before
+clicking. A missing control or changed Dot identity releases the reservation
+without clicking or allocating. Capability also requires an actionable control.
+Regressions cover a profile panel, a toolbar replacement during acknowledgement,
+control removal/disablement and hidden/inert/unrendered controls.
+
+Fixed control-clicked, capture and peer checkpoints distinguish adapter dispatch
+from actual native media setup without granting readiness or recording page data.
+The earlier silent timeouts have not yet been causally linked to the button race;
+the next physical Watch test must verify startup and reveal its last reached phase.
+The bridge/native host accept the optional instant-mode timing fields from 0.3.6
+as well as older receiver events, so an idle recovery cannot break signaling while
+Chrome still has an earlier hook loaded. Receiver activation still requires an
+idle Dot page reload to replace the existing main-world hook.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and

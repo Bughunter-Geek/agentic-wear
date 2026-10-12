@@ -19,7 +19,8 @@ export const nativeVoiceCommandSchema = z.discriminatedUnion("action", [
 export type NativeVoiceCommand = z.infer<typeof nativeVoiceCommandSchema>;
 export const nativeVoiceEventSchema = z.object({
   callId: id, threadId: id,
-  state: z.enum(["accepted", "answer", "active", "closed", "failed", "timing"]),
+  state: z.enum(["accepted", "answer", "active", "closed", "failed", "timing", "progress"]),
+  progressStage: z.enum(["control-clicked", "capture", "peer"]).optional(),
   sdp: z.string().min(10).max(65_536).optional(),
   statusCode: z.number().int().min(0).max(599).optional(),
   elapsedMs: z.number().int().min(0).max(10_000_000).optional(),
@@ -47,5 +48,6 @@ export const nativeVoiceEventSchema = z.object({
     serverMs: z.number().int().min(0).max(120_000).optional(),
   }).strict().optional(),
 }).strict().refine(value => value.state === "answer" ? value.sdp?.startsWith("v=0") && value.sdp.includes("m=audio") : value.sdp === undefined)
-  .refine(value => value.state === "timing" ? value.httpTiming !== undefined : value.httpTiming === undefined);
+  .refine(value => value.state === "timing" ? value.httpTiming !== undefined : value.httpTiming === undefined)
+  .refine(value => value.state === "progress" ? value.progressStage !== undefined : value.progressStage === undefined);
 export type NativeVoiceEvent = z.infer<typeof nativeVoiceEventSchema>;

@@ -5,6 +5,15 @@
     const disabled = new Map();
     const label = element => element.getAttribute('aria-label') || (element.innerText || element.textContent || '').trim();
     const buttons = () => [...document.querySelectorAll('button')];
+    const usable = button => button.isConnected && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+      !button.closest('[hidden],[inert],[aria-hidden="true"]') && button.getClientRects().length > 0 &&
+      getComputedStyle(button).display !== 'none' && getComputedStyle(button).visibility === 'visible';
+    function startControl() {
+      const candidates = buttons().filter(button => label(button) === 'Start call' && usable(button));
+      // The profile panel can disappear while the main-world reservation is
+      // acknowledged. Prefer the persistent toolbar, and resolve it at click time.
+      return candidates.find(button => !button.closest('[role="dialog"]')) || candidates[0];
+    }
     const hangup = () => buttons().find(button => label(button) === 'Hang up' && !button.disabled);
     function protectMicControls() {
       if (!owner) return;
@@ -56,13 +65,12 @@
     }, 2000);
     post({ action: 'query' });
     return {
-      available: () => !stopped && supported && Boolean(identity()) && (Boolean(owner) || !hangup()),
+      available: () => !stopped && supported && Boolean(identity()) && (Boolean(owner) || (!hangup() && Boolean(startControl()))),
       async command(command) {
         if (stopped || command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
         if (command.action === 'start') {
           if (owner || !supported || !identity() || hangup()) return false;
-          const start = buttons().filter(button => label(button) === 'Start call' && !button.disabled).at(-1);
-          if (!start) return false;
+          if (!startControl()) return false;
           owner = { callId: command.callId, threadId: command.threadId, identity: identity() };
           const call = owner;
           const pending = new Promise(resolve => { accepted = { resolve }; });
@@ -73,7 +81,12 @@
           if (!ready || owner !== call || Date.now() >= command.expiresAt) {
             post({ action: 'stop', callId: call.callId }); release(call); return false;
           }
+          const start = startControl();
+          if (!start || identity() !== call.identity || hangup()) {
+            post({ action: 'stop', callId: call.callId }); release(call); return false;
+          }
           start.click();
+          report({ callId: call.callId, state: 'progress', progressStage: 'control-clicked' });
           protectMicControls();
           changed(); return true;
         }

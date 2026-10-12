@@ -65,7 +65,8 @@ export class NativeDotVoice {
   async event(value: NativeVoiceEvent): Promise<void> {
     const call = this.call;
     if (!call || value.callId !== call.id || value.threadId !== call.threadId) return;
-    if (value.state === "timing") { this.timing(call, `browser.http.${value.httpTiming?.phase}`, value); }
+    if (value.state === "progress") { this.timing(call, `browser.startup.${value.progressStage}`, value); }
+    else if (value.state === "timing") { this.timing(call, `browser.http.${value.httpTiming?.phase}`, value); }
     else if (value.state === "accepted") { call.accepted = true; this.timing(call, "browser.accepted", value); }
     else if (value.state === "answer" && call.accepted && !call.answer) {
       call.answer = true;

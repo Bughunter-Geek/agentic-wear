@@ -55,6 +55,7 @@ test('delegated capture never opens the Mac mic and only its unused input graph 
   f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
   const input = await f.sandbox.navigator.mediaDevices.getUserMedia({ audio: true });
   assert.equal(f.microphoneRequests(), 1);
+  assert.equal(f.events.find(e => e.state === 'progress').progressStage, 'capture');
   await assert.rejects(f.sandbox.navigator.mediaDevices.getUserMedia({ audio: true, video: true }), { name: 'NotAllowedError' });
   const graph = new f.window.AudioContext(); graph.createMediaStreamSource(input); await graph.resume();
   assert.equal(f.localResumes(), 0);
@@ -74,6 +75,7 @@ test('native acceptance needs endpoint media and HTTP attachment; stale transpor
   const f = await fixture();
   f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  assert.equal(f.events.find(e => e.progressStage === 'peer').state, 'progress');
   await peer.setLocalDescription(await peer.createOffer());
   await peer.setRemoteDescription({ type: 'answer', sdp: offer });
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
@@ -268,6 +270,10 @@ function controllerPage() {
   const observations = [], commands = []; let listener, clears = 0;
   const w = dom.window;
   Object.defineProperty(w.HTMLElement.prototype, 'innerText', { get() { return this.textContent; } });
+  // JSDOM has no layout. Supply rendered geometry; native Chrome provides it.
+  w.HTMLElement.prototype.getClientRects = function () {
+    return this.closest('[hidden],[inert],[data-fixture-unrendered]') ? [] : [{ width: 36, height: 36 }];
+  };
   const clear = w.clearInterval.bind(w);
   w.clearInterval = id => { clears++; clear(id); };
   w.chrome = { runtime: { id: 'extension', sendMessage(value) { observations.push(value); return Promise.resolve(); },
@@ -293,6 +299,80 @@ test('controller teardown is idempotent, stops polling and cannot reschedule a r
     assert.equal(changes, beforeStop); assert.equal(f.clears(), 1); assert.equal(controller.available(), false);
     assert.equal(await controller.command({ documentId: 'document', url: f.w.location.href, action: 'start', expiresAt: Date.now() + 1000 }), false);
   } finally { f.dom.window.close(); }
+});
+
+function acknowledgeStarts(f, beforeAcceptance = () => {}) {
+  f.w.postMessage = value => {
+    f.commands.push(value.command);
+    if (value.command.action === 'start') {
+      beforeAcceptance();
+      queueMicrotask(() => f.w.dispatchEvent(new f.w.MessageEvent('message', { source: f.w, origin: f.w.location.origin,
+        data: { type: 'aw.native.voice.event', event: { state: 'accepted', callId: value.command.callId } } })));
+    }
+  };
+}
+const startController = f => f.w.AgenticWearVoiceController.create({ documentId: 'document', url: f.w.location.href,
+  identity: () => dotNamespace, changed() {} });
+const controllerStart = f => ({ documentId: 'document', url: f.w.location.href,
+  action: 'start', callId: 'owned', threadId: 'dot:lumen', sdp: offer, expiresAt: Date.now() + 10000 });
+
+test('native startup chooses the persistent toolbar rather than the profile panel', async () => {
+  const f = controllerPage(); let controller;
+  try {
+    const clicked = [];
+    f.w.document.querySelector('[aria-label="Start call"]').onclick = () => clicked.push('toolbar');
+    const panel = f.w.document.createElement('div'); panel.setAttribute('role', 'dialog');
+    panel.innerHTML = '<button aria-label="Start call"></button>';
+    panel.firstChild.onclick = () => clicked.push('profile'); f.w.document.body.append(panel);
+    controller = startController(f); f.announce(true); acknowledgeStarts(f);
+    assert.equal(await controller.command(controllerStart(f)), true);
+    assert.deepEqual(clicked, ['toolbar']);
+    assert.equal(f.observations.at(-1).event.progressStage, 'control-clicked');
+  } finally { controller?.stop(); f.dom.window.close(); }
+});
+
+test('native startup resolves a redrawn toolbar after reservation and never clicks the detached element', async () => {
+  const f = controllerPage(); let controller, clicked = 0;
+  try {
+    const old = f.w.document.querySelector('[aria-label="Start call"]');
+    old.onclick = () => assert.fail('detached start control was clicked');
+    acknowledgeStarts(f, () => {
+      const replacement = old.cloneNode(); replacement.onclick = () => clicked++;
+      old.replaceWith(replacement);
+    });
+    controller = startController(f); f.announce(true);
+    assert.equal(await controller.command(controllerStart(f)), true); assert.equal(clicked, 1);
+  } finally { controller?.stop(); f.dom.window.close(); }
+});
+
+test('a missing or disabled control after reservation releases the owned startup without a native click', async () => {
+  for (const change of ['remove', 'disable']) {
+    const f = controllerPage(); let controller, clicks = 0;
+    try {
+      const button = f.w.document.querySelector('[aria-label="Start call"]'); button.onclick = () => clicks++;
+      acknowledgeStarts(f, () => change === 'remove' ? button.remove() : button.disabled = true);
+      controller = startController(f); f.announce(true);
+      assert.equal(await controller.command(controllerStart(f)), false); assert.equal(clicks, 0);
+      assert.equal(f.commands.at(-1).action, 'stop');
+      assert.equal(f.observations.some(value => value.event.progressStage === 'control-clicked'), false);
+    } finally { controller?.stop(); f.dom.window.close(); }
+  }
+});
+
+test('hidden, inert, disabled and unrendered native controls do not advertise Watch voice readiness', async () => {
+  for (const state of ['hidden', 'inert', 'disabled', 'aria-disabled', 'data-fixture-unrendered', 'visibility']) {
+    const f = controllerPage(); let controller;
+    try {
+      const button = f.w.document.querySelector('[aria-label="Start call"]');
+      if (state === 'visibility') button.style.visibility = 'hidden';
+      else if (state === 'disabled') button.disabled = true;
+      else button.setAttribute(state, state === 'aria-disabled' ? 'true' : '');
+      controller = startController(f); f.announce(true);
+      assert.equal(controller.available(), false, state);
+      assert.equal(await controller.command(controllerStart(f)), false);
+      assert.equal(f.commands.some(value => value.action === 'start'), false);
+    } finally { controller?.stop(); f.dom.window.close(); }
+  }
 });
 
 test('native-host loss before the first ready signal cancels a call without disposing the receiver', async () => {

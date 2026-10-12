@@ -59,6 +59,7 @@
       if (!call) return gum(constraints);
       if (!constraints?.audio || constraints.video) throw new DOMException('This call delegates audio only to the Watch', 'NotAllowedError');
       stamp(call, 'captureMs');
+      event(call, 'progress', { progressStage: 'capture' });
       const stream = call.placeholder.stream.clone(); call.clones.push(...stream.getTracks());
       for (const track of stream.getAudioTracks()) trackOwners.set(track, call);
       return stream;
@@ -79,6 +80,7 @@
         }
         if (call) {
           stamp(call, 'peerMs');
+          event(call, 'progress', { progressStage: 'peer' });
           call.peer = peer;
           call.remote = window.AgenticWearRemotePeer.attach(peer, call.sdp, {
             current: () => owner === call,
