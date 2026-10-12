@@ -13,6 +13,8 @@ class NativeLivePeer(
     context: Context,
     private val onState: (String) -> Unit,
     private val onCaption: (String) -> Unit,
+    private val onTransport: (String, String, String) -> Unit = { _, _, _ -> },
+    private val onFullCaption: (String) -> Unit = {},
 ) : LivePeer {
     @Volatile private var closed = false
     /**
@@ -29,6 +31,10 @@ class NativeLivePeer(
     private lateinit var microphone: AudioTrack
     private lateinit var connection: PeerConnection
     private lateinit var events: DataChannel
+    @Volatile private var peerState = "new"
+    @Volatile private var iceState = "new"
+    @Volatile private var channelState = "connecting"
+    private fun transportChanged() { if (!closed) onTransport(peerState, iceState, channelState) }
 
     init {
         try {
@@ -47,10 +53,14 @@ class NativeLivePeer(
         connection = factory.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onSignalingChange(state: PeerConnection.SignalingState?) = Unit
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
+                iceState = state?.name?.lowercase(java.util.Locale.ROOT) ?: "new"
+                transportChanged()
                 VoiceTrace.event(VoiceTraceStage.ICE_STATE, state?.name)
                 if (!closed && state == PeerConnection.IceConnectionState.FAILED) onState("failed")
             }
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
+                peerState = state?.name?.lowercase(java.util.Locale.ROOT) ?: "new"
+                transportChanged()
                 VoiceTrace.event(VoiceTraceStage.PEER_STATE, state?.name)
                 if (!closed) when (state) {
                     PeerConnection.PeerConnectionState.CONNECTED -> onState("connected")
@@ -82,6 +92,8 @@ class NativeLivePeer(
         events.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(previous: Long) = Unit
             override fun onStateChange() {
+                channelState = events.state().name.lowercase(java.util.Locale.ROOT)
+                transportChanged()
                 VoiceTrace.event(VoiceTraceStage.CHANNEL_STATE, events.state().name)
                 if (!closed && events.state() == DataChannel.State.CLOSED) onState("failed")
             }
@@ -92,11 +104,20 @@ class NativeLivePeer(
                     val event = JSONObject(String(bytes, Charsets.UTF_8))
                     val type = event.optString("type")
                     when (type) {
-                        "input_audio_buffer.speech_started" -> onState("listening")
-                        "input_audio_buffer.speech_stopped", "response.created" -> onState("thinking")
-                        "output_audio_buffer.started" -> onState("speaking")
+                        "input_audio_buffer.speech_started", "speech.started" -> onState("listening")
+                        "input_audio_buffer.speech_stopped", "response.created", "speech.stopped", "turn.created" -> onState("thinking")
+                        "output_audio_buffer.started", "output_transcript.added", "turn.delta" -> onState("speaking")
                         "output_audio_buffer.stopped", "output_audio_buffer.cleared" -> onState("ready")
-                        "response.done" -> onState("response.done")
+                        "response.done", "turn.done" -> onState("response.done")
+                        "session.error" -> if (event.optBoolean("fatal")) onState("failed")
+                    }
+                    if (type in setOf("transcript.delta", "transcript.final")) {
+                        val text = event.optString("text")
+                        if (text.isNotBlank()) onFullCaption("You: " + text.take(1900))
+                    }
+                    if (type == "output_transcript.added") {
+                        val text = event.optString("text").ifBlank { event.optJSONObject("transcript")?.optString("text").orEmpty() }
+                        if (text.isNotBlank()) onFullCaption(text.take(2000))
                     }
                     if (type.contains("transcript") && type.endsWith(".delta")) {
                         val delta = event.optString("delta")

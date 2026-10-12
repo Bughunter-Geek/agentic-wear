@@ -12,6 +12,7 @@ type Call = { id: string; threadId: string; expires: number; owned: boolean;
 export class LiveVoice {
   private call: Call | null = null;
   private starting: Promise<void> | null = null;
+  get active(): boolean { return this.call !== null; }
   constructor(private readonly server: LiveAppServer, private readonly deliver: Delivery,
     private readonly now = () => performance.now(),
     private readonly log: (line: string) => void = (line) => console.log(line)) {}

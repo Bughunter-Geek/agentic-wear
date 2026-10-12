@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
+import { nativeVoiceCommandSchema, nativeVoiceEventSchema, type NativeVoiceCommand, type NativeVoiceEvent } from "./native-dot-protocol.js";
 import {
   CLOUD_FRAME_BYTES, CLOUD_MAX_AGE_MS, cloudAckSchema, cloudEventId, cloudSendSchema, cloudSendResultSchema,
   type CloudSend, type CloudSendResult,
@@ -245,7 +246,9 @@ export class DesktopCloudTransport {
   private inFlight: CloudFrame | null = null;
   private closed = false;
   constructor(private readonly config: DesktopCloudConfig, private readonly socketPath: string, private readonly log: CloudLog = logDesktopCloud,
-    private readonly onSend?: (command: CloudSend) => Promise<CloudSendResult>) {}
+    private readonly onSend?: (command: CloudSend) => Promise<CloudSendResult>,
+    private readonly onVoice?: (command: NativeVoiceCommand) => void,
+    private readonly onVoiceDisconnected?: () => void) {}
   start(): void { this.connect(); }
   snapshot(snapshot: CloudSnapshot, observedAt: number): void {
     const frame: CloudFrame = { version: 1, kind: "snapshot", id: randomUUID(), streamId: this.streamId, snapshot, observedAt };
@@ -256,6 +259,12 @@ export class DesktopCloudTransport {
   terminal(event: CloudTerminal): void {
     if (this.pending.size >= 132) { this.log("outbox_full", { eventId: event.eventId }); return; }
     this.pending.set(event.eventId, { version: 1, kind: "terminal", id: event.eventId, streamId: this.streamId, event }); this.flush();
+  }
+  voiceEvent(value: NativeVoiceEvent): void {
+    if (!this.socket || this.socket.connecting || this.socket.destroyed) throw new Error("The private bridge disconnected");
+    if (this.pending.size >= 132) throw new Error("The browser receiver queue is full");
+    const event = nativeVoiceEventSchema.parse(value), id = randomUUID();
+    this.pending.set(id, { version: 1, kind: "native-voice-event", id, streamId: this.streamId, event }); this.flush();
   }
   reset(): void {
     this.pending.clear(); this.snapshots.clear(); this.inFlight = null; this.streamId = randomUUID();
@@ -287,6 +296,8 @@ export class DesktopCloudTransport {
         const line = input.slice(0, newline); input = input.slice(newline + 1);
         try {
           const raw: unknown = JSON.parse(line);
+          const voice = nativeVoiceCommandSchema.safeParse(raw);
+          if (voice.success) { this.onVoice?.(voice.data); continue; }
           const command = cloudSendSchema.safeParse(raw);
           if (command.success) {
             const value = command.data;
@@ -310,18 +321,20 @@ export class DesktopCloudTransport {
     socket.on("close", () => {
       if (this.socket !== socket) return;
       this.socket = null;
-      if (this.inFlight) {
+      this.onVoiceDisconnected?.();
+      for (const [key, frame] of this.pending) if (frame.kind === "native-voice-event") this.pending.delete(key);
+      if (this.inFlight && this.inFlight.kind !== "native-voice-event") {
         const key = this.inFlight.kind === "snapshot" ? `snapshot:${this.inFlight.snapshot.threadId}` : this.inFlight.id;
         if (!this.pending.has(key)) this.pending.set(key, this.inFlight);
-        this.inFlight = null;
       }
+      this.inFlight = null;
       if (!this.closed) { this.retry = setTimeout(() => { this.retry = null; this.connect(); }, 1_000); this.retry.unref(); }
     });
   }
   private flush(): void {
     if (!this.socket || this.socket.connecting || this.socket.destroyed || this.inFlight) return;
     const entries = [...this.pending.entries()];
-    const entry = entries.find(([, frame]) => frame.kind === "reset") ?? entries.find(([, frame]) => frame.kind === "terminal") ?? entries[0];
+    const entry = entries.find(([, frame]) => frame.kind === "reset") ?? entries.find(([, frame]) => frame.kind === "native-voice-event") ?? entries.find(([, frame]) => frame.kind === "terminal") ?? entries[0];
     if (!entry) return;
     const [key, frame] = entry; this.pending.delete(key);
     if (frame.kind === "terminal" && Date.now() - frame.event.observedAt > CLOUD_MAX_AGE_MS) { this.flush(); return; }

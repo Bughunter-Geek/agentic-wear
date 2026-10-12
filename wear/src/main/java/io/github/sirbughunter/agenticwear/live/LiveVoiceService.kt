@@ -50,6 +50,7 @@ class LiveVoiceService : Service() {
     private var speaking = false
     private var network: VoiceNetwork? = null
     private var releaseNetworkMonitor: (() -> Unit)? = null
+    private var readiness = NativeVoiceReadiness()
 
     override fun onCreate() {
         super.onCreate()
@@ -66,7 +67,7 @@ class LiveVoiceService : Service() {
             END -> end()
             MUTE -> {
                 val muted = !state.value.muted
-                peer?.mute(muted)
+                peer?.mute(readiness.effectiveMute(muted))
                 state.value = state.value.copy(muted = muted)
                 getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification())
             }
@@ -92,6 +93,7 @@ class LiveVoiceService : Service() {
         VoiceTrace.begin(callId!!, thread.orEmpty())
         ending = false
         speaking = false
+        readiness = NativeVoiceReadiness()
         state.value = LiveVoiceState(if (createNew) "creating" else "connecting",
             if (createNew) "Creating local voice task…" else "Checking Codex voice…", taskId = thread.orEmpty())
         try {
@@ -146,6 +148,16 @@ class LiveVoiceService : Service() {
         LiveSignaling.discardOldEvents()
         val capability = CompletableDeferred<JSONObject>()
         val firstMediaConnection = CompletableDeferred<Unit>()
+        val expectedCall = callId ?: return
+        val gate = readiness
+        var transportSeq = 0
+        fun activateWhenReady() {
+            if (gate.ready && !ending && callId == expectedCall) {
+                peer?.mute(gate.effectiveMute(state.value.muted))
+                firstMediaConnection.complete(Unit)
+                disconnectJob?.cancel(); state.value = state.value.withConnection(true)
+            }
+        }
         var capabilityId: String? = null
         var answerApplied = false
         eventsJob = scope.launch {
@@ -158,6 +170,7 @@ class LiveVoiceService : Service() {
                 }
                 if (event.optString("callId") != callId || ending) continue
                 when (event.optString("kind")) {
+                    "live.ready" -> { gate.accepted(); activateWhenReady() }
                     "live.answer" -> if (answerApplied) {
                         // A repeated answer must not renegotiate the established session.
                         VoiceTrace.event(VoiceTraceStage.ANSWER_DUPLICATE)
@@ -206,14 +219,14 @@ class LiveVoiceService : Service() {
                 val networkReady = async { network!!.acquire() }
                 val createPeer = { NativeLivePeer(this@LiveVoiceService, { status ->
                     scope.launch {
-                        if (ending) return@launch
+                        if (ending || callId != expectedCall) return@launch
                         when (status) {
                             "connected" -> {
-                                firstMediaConnection.complete(Unit)
-                                disconnectJob?.cancel(); state.value = state.value.withConnection(true)
+                                gate.connected(true); activateWhenReady()
                             }
                             "failed" -> end("Voice connection failed. Reconnect when ready.")
                             "disconnected" -> {
+                                gate.connected(false)
                                 state.value = state.value.withConnection(false)
                                 disconnectJob?.cancel()
                                 disconnectJob = scope.launch { delay(10_000); end("Voice disconnected. Reconnect when ready.") }
@@ -231,7 +244,24 @@ class LiveVoiceService : Service() {
                             "response.done" -> if (!speaking) state.value = state.value.copy(mediaActivity = "ready")
                         }
                     }
-                }, { caption -> scope.launch { if (!ending) state.value = state.value.copy(caption = (state.value.caption + caption).takeLast(2000)) } }).also { peer = it; VoiceTrace.event(VoiceTraceStage.PEER_CREATED) } }
+                }, { caption -> scope.launch { if (!ending && callId == expectedCall) state.value = state.value.copy(caption = (state.value.caption + caption).takeLast(2000)) } },
+                { remotePeer, remoteIce, remoteChannel -> scope.launch {
+                    val id = callId
+                    if (!ending && gate.requiresHostAcceptance && id == expectedCall) {
+                        transportSeq++
+                        val snapshot = JSONObject().put("seq", transportSeq).put("peerState", remotePeer)
+                            .put("iceState", remoteIce).put("channelState", remoteChannel)
+                        launch(Dispatchers.IO) {
+                            try { signaling.send("live.transport", id, JSONObject().put("transport", snapshot)) }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { /* The call lease bounds a lost transport-state update. */ }
+                        }
+                    }
+                } }, { caption -> scope.launch { if (!ending && callId == expectedCall) state.value = state.value.copy(caption = caption.take(2000)) } }
+                ).also {
+                    if (ending || callId != expectedCall) { it.close(); throw CancellationException("Previous voice call ended") }
+                    peer = it; VoiceTrace.event(VoiceTraceStage.PEER_CREATED)
+                } }
                 // The offer does not depend on the capability reply, so build it while that round trip runs.
                 // Failures are returned rather than thrown: a failed child would cancel startupJob before the
                 // catch blocks below run (and a LinkageError would reach the uncaught-exception handler).
@@ -255,6 +285,8 @@ class LiveVoiceService : Service() {
                     val catalog = withTimeout(15_000) { capability.await() }
                     VoiceTrace.event(VoiceTraceStage.CAPABILITY_RECEIVED)
                     check(catalog.optBoolean("realtimeApiAvailable")) { "This Codex host has no compatible live voice interface" }
+                    gate.configure(catalog.optBoolean("requiresHostReady"))
+                    if (gate.requiresHostAcceptance) peer?.mute(true)
                     val defaultVoice = catalog.getJSONObject("voices").getString("defaultV1")
                     catalog.optJSONObject("task")?.let { task ->
                         fun text(key: String) = if (task.isNull(key)) "" else task.optString(key).take(250)
@@ -265,6 +297,7 @@ class LiveVoiceService : Service() {
                     defaultVoice
                 } catch (error: Throwable) { offerJob.cancel(); throw error }
                 val offer = offerJob.await().getOrThrow()
+                peer?.mute(gate.effectiveMute(state.value.muted))
                 val id = callId ?: return@launch
                 VoiceTrace.event(VoiceTraceStage.START_SEND)
                 withContext(Dispatchers.IO) { signaling.send("live.start", id, JSONObject().put("threadId", thread).put("voice", voice).put("sdp", offer)) }

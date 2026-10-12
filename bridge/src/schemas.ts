@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { voiceTransportSchema } from "./native-dot-protocol.js";
 import {
   MAX_AUDIO_BASE64_CHARS,
   MAX_INBOUND_CIPHERTEXT_BASE64_CHARS,
@@ -40,6 +41,8 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     callId: safeId, threadId: safeId, sdp: z.string().min(10).max(65_536), voice: safeId, fastMode: z.boolean().optional() }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("live.heartbeat"), requestId: safeId, callId: safeId }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("live.stop"), requestId: safeId, callId: safeId }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("live.transport"), requestId: safeId, callId: safeId,
+    transport: voiceTransportSchema }).strict(),
   // Metadata-only call diagnostics from the Watch: stage names, timings, states and counts.
   z.object({ version: z.literal(1), kind: z.literal("live.trace"), requestId: safeId, callId: safeId,
     events: z.array(z.object({ stage: z.string().regex(/^[A-Z_]{1,32}$/u), elapsedMs: z.number().int().min(0).max(90_000),

@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {BrowserCloudObservers,browserObservationSchema} from '../bridge/dist/browser-cloud-observer.js';
 import {DesktopCloudTransport} from '../bridge/dist/desktop-cloud-adapter.js';
 import {autoCloudChatsEnabled,readDesktopCloudConfig,desktopCloudConfigPath,desktopCloudSocketPath,cloudSendResultSchema,readPrivateJson,writePrivateJson} from '../bridge/dist/desktop-cloud-protocol.js';
+import {nativeVoiceEventSchema} from '../bridge/dist/native-dot-protocol.js';
 const manifest=JSON.parse(readFileSync(new URL('./extension/manifest.json',import.meta.url)));
 const extensionId=[...createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32)].map(c=>String.fromCharCode(97+parseInt(c,16))).join('');
 if(process.argv[2]!==`chrome-extension://${extensionId}/`)process.exit(2);
@@ -69,7 +70,13 @@ async function send(command){
 }
 const transport=new DesktopCloudTransport(config,desktopCloudSocketPath(desktopCloudConfigPath()),(event,fields)=>{
  process.stderr.write(JSON.stringify({event,at:Date.now(),...fields})+'\n');
-},send);
+},send,command=>{
+ const target=config.targets.find(t=>t.threadId===command.threadId&&t.dotNamespace),page=target&&pages.get(target.url);
+ if(!target||!page||page.blocked||Date.now()-page.observedAt>60000||Date.now()>=command.expiresAt){
+  transport.voiceEvent({callId:command.callId,threadId:command.threadId,state:'failed'});return;
+ }
+ reply({...command,url:target.url,documentId:page.documentId});
+},()=>reply({kind:'native-voice-lost'}));
 // Config targets plus, unless autoCloudChats is false, one observer per open chatgpt.com/local/<uuid> tab (max 8).
 const observers=new BrowserCloudObservers(config.targets,autoCloudChatsEnabled(config),(s,t)=>transport.snapshot(s,t),e=>transport.terminal(e),url=>pages.delete(url));
 transport.start();let input=Buffer.alloc(0);
@@ -82,6 +89,14 @@ process.stdin.on('data',b=>{
   try{raw=JSON.parse(input.subarray(4,4+n));}catch{hostLog('frame','invalid_json');status({status:'invalid_frame'});transport.reset();process.exit(4);}
   input=input.subarray(4+n);
   try{
+   if(raw?.kind==='native-voice-event'){
+    const target=config.targets.find(t=>t.dotNamespace&&t.url===raw.url),page=pages.get(raw.url);
+    if(!target||!page||raw.documentId!==page.documentId||raw.identity!==target.dotNamespace)continue;
+    const parsed=nativeVoiceEventSchema.safeParse({...raw.event,threadId:target.threadId});
+    if(parsed.success)transport.voiceEvent(parsed.data);
+    else hostLog('native-voice',issueSummary(parsed.error));
+    continue;
+   }
    if(raw?.kind==='send-result'){
     const parsed=cloudSendResultSchema.safeParse(raw.result);
     if(!parsed.success){hostLog('send-result',issueSummary(parsed.error));continue;}

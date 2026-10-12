@@ -4,6 +4,8 @@ import { watchPayloadSchema } from "../src/schemas.js";
 import { LiveVoice } from "../src/live-voice.js";
 import { BridgeService } from "../src/bridge-service.js";
 import type { WatchPayload } from "../src/schemas.js";
+import { DesktopCloudReceiver } from "../src/desktop-cloud-receiver.js";
+import { NativeDotVoice } from "../src/native-dot-voice.js";
 
 type Internals = { request: (method: string, params: unknown) => Promise<unknown>; write: (value: unknown) => void;
   fastProtocolSupported: boolean; modelCache: unknown; modelCacheExpiresAt: number; initialize: () => Promise<void> };
@@ -159,7 +161,9 @@ describe("watch Fast capability negotiation", () => {
       realtimeVoiceCapability: vi.fn().mockResolvedValue({ realtimeApiAvailable: true, voices: { defaultV1: "sol", v1: ["sol"] } }),
       submitTurn: vi.fn(), startRealtime: vi.fn(),
     };
-    Object.assign(service, { config: { defaultCwd: "/tmp" }, appServer, send });
+    const desktopCloud = new DesktopCloudReceiver({ pairId: "fixture", bridgePublicKey: "fixture", watchPublicKey: "fixture" }, async () => {}, () => {});
+    Object.assign(service, { config: { defaultCwd: "/tmp" }, appServer, send,
+      desktopCloud, nativeDotVoice: new NativeDotVoice(desktopCloud, send) });
     return { service, appServer, send };
   }
   it("correlates the existing strict session.sync request without extending its payload", async () => {

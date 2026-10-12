@@ -4,6 +4,7 @@ import { lstat, open, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { nativeVoiceEventSchema } from "./native-dot-protocol.js";
 
 // Local capability, never a ChatGPT credential. Both ends must opt into the
 // same explicit thread allowlist and current authenticated Watch pairing.
@@ -65,6 +66,7 @@ const cloudModelField = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:/ -]+$/u
 export const cloudSnapshotSchema = z.object({
   threadId: id, title: z.string().max(200), status: z.enum(["active", "idle", "error", "notLoaded"]),
   inputReady: z.boolean().optional(),
+  nativeVoice: z.boolean().optional(),
   cloudModel: cloudModelField.optional(), cloudModels: z.array(cloudModelField).max(24).optional(),
   cloudEffort: z.object({ index: z.number().int().min(0).max(9), label: z.string().min(1).max(64) }).strict().optional(),
   cloudEfforts: z.array(z.string().min(1).max(64)).max(10).optional(),
@@ -100,6 +102,7 @@ export const cloudFrameSchema = z.discriminatedUnion("kind", [
   z.object({ ...frame, kind: z.literal("terminal"), event: cloudTerminalSchema }).strict(),
   z.object({ ...frame, kind: z.literal("reset") }).strict(),
   z.object({ ...frame, kind: z.literal("send-result"), result:cloudSendResultSchema }).strict(),
+  z.object({ ...frame, kind: z.literal("native-voice-event"), event: nativeVoiceEventSchema }).strict(),
 ]);
 export type CloudFrame = z.infer<typeof cloudFrameSchema>;
 export const cloudHelloSchema = z.object({ version: z.literal(1), kind: z.literal("hello"),

@@ -4,6 +4,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { z } from "zod";
 import type { ChatSnapshot, SessionView } from "./app-server-client.js";
 import type { BridgeConfig } from "./config.js";
+import { nativeVoiceCommandSchema, type NativeVoiceCommand, type NativeVoiceEvent } from "./native-dot-protocol.js";
 import {
   CLOUD_FRAME_BYTES, CLOUD_MAX_AGE_MS, DEFAULT_CLOUD_CHAT_TITLE, DYNAMIC_CLOUD_OWN_MS, autoCloudChatsEnabled, cloudEventId, isCloudChatUuid, cloudFrameSchema, cloudHelloSchema,
   desktopCloudConfigPath, desktopCloudPairBinding, desktopCloudSocketPath, logDesktopCloud,
@@ -51,6 +52,24 @@ export class DesktopCloudReceiver {
   private socketInode: number | null = null;
   private closed = false;
   private sends = new Map<string, {threadId:string; resolve:(value:CloudSendResult)=>void; timer:NodeJS.Timeout}>();
+  private onVoice: (event: NativeVoiceEvent) => Promise<void> = async () => {};
+  private onVoiceDisconnected: () => Promise<void> = async () => {};
+  setVoiceHandlers(event: (value: NativeVoiceEvent) => Promise<void>, disconnected: () => Promise<void>): void {
+    this.onVoice = event; this.onVoiceDisconnected = disconnected;
+  }
+  configuredDot(threadId: string): { title: string } | null {
+    const target = this.config?.targets.find(target => target.threadId === threadId && target.dotNamespace);
+    return target ? { title: target.title } : null;
+  }
+  nativeVoiceAvailable(threadId: string): boolean {
+    const cached = this.snapshots.get(threadId);
+    return Boolean(this.configuredDot(threadId) && this.active && cached?.snapshot.nativeVoice && Date.now() - cached.observedAt < CLOUD_MAX_AGE_MS);
+  }
+  voiceCommand(value: NativeVoiceCommand): void {
+    const command = nativeVoiceCommandSchema.parse(value);
+    if (!this.active || !this.configuredDot(command.threadId)) throw new Error("The native Dot browser is unavailable");
+    this.active.write(`${JSON.stringify(command)}\n`);
+  }
   /** Options a browser cloud chat reports right now (empty for Dot or before the first snapshot). */
   cloudOptions(threadId:string):{models:string[];efforts:string[]}|null {
     const s=this.snapshots.get(threadId)?.snapshot;
@@ -171,6 +190,7 @@ export class DesktopCloudReceiver {
     socket.on("close", () => {
       clearTimeout(handshakeTimeout); this.sockets.delete(socket);
       if (this.active === socket) { this.active = null; this.log("disconnected");
+        void this.onVoiceDisconnected().catch(() => this.log("voice_cleanup_failed"));
         for(const [requestId,pending] of this.sends){clearTimeout(pending.timer);pending.resolve({requestId,threadId:pending.threadId,outcome:"uncertain",message:"Browser socket closed after dispatch; check the chat before retrying."});}
         this.sends.clear(); }
     });
@@ -200,6 +220,10 @@ export class DesktopCloudReceiver {
     });
   }
   private async receive(frame: CloudFrame): Promise<void> {
+    if (frame.kind === "native-voice-event") {
+      if (!this.configuredDot(frame.event.threadId)) throw new Error("Native voice target is not configured");
+      await this.onVoice(frame.event); return;
+    }
     if (frame.kind === "reset") { this.snapshots.clear(); return; }
     if(frame.kind==="send-result") {
       const pending=this.sends.get(frame.result.requestId);

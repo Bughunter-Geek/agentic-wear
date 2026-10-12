@@ -110,10 +110,11 @@ fun AgenticWearApp(
     val live by LiveVoiceService.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context) }
-    // Dot and cloud chats have no live call: the voice entry runs the turn-based voice loop instead.
+    // Dot uses native Watch media through the browser-owned authenticated call.
+    // Other cloud chats retain the existing turn-based conversation entry.
     val startVoice: () -> Unit = {
         val src = state.selectedSession?.source
-        if (src == "dot" || src == "cloud") {
+        if (src == "cloud") {
             if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED) viewModel.startVoiceLoop() else onPushToTalk()
         } else context.openLiveCall(autoConnect = !live.callActive())

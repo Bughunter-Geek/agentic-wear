@@ -15,6 +15,7 @@ describe("BridgeService App Server transport", () => {
       const sendChatSnapshot = vi.fn().mockResolvedValue(undefined);
       Object.assign(service, {
         appServer: { realtimeVoiceCapability: vi.fn().mockResolvedValue({ realtimeApiAvailable: true, voices: { v1: ["marin"] } }) },
+        desktopCloud: { configuredDot: () => null, owns: () => false }, nativeDotVoice: { active: false, owns: () => false },
         liveVoice: { start: vi.fn().mockResolvedValue(undefined), heartbeat: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) },
         sendChatSnapshot,
         watchedThreadId: null, watchAcceptedAt: 0, watchExpiresAt: 0,
@@ -53,6 +54,7 @@ describe("BridgeService App Server transport", () => {
       const send = vi.fn().mockResolvedValue(undefined);
       Object.assign(service, {
         appServer: { realtimeVoiceCapability },
+        desktopCloud: { configuredDot: () => null, owns: () => false }, nativeDotVoice: { active: false, owns: () => false },
         liveVoice: { start, heartbeat: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) },
         send,
         watchedThreadId: null, watchAcceptedAt: 0, watchExpiresAt: 0,
@@ -216,6 +218,7 @@ describe("BridgeService App Server transport", () => {
       appServer: { connect, close: vi.fn() },
       desktopCloud: { close: vi.fn().mockResolvedValue(undefined) }, cloudInlineTimers: new Map(),
       liveVoice: { close: vi.fn().mockResolvedValue(undefined) },
+      nativeDotVoice: { close: vi.fn().mockResolvedValue(undefined) },
       controller: new AbortController(),
       transcriber: {},
       assertWatchPublicKey: vi.fn(),

@@ -1,6 +1,7 @@
 import { cloudHistoryPayloads } from "./cloud-history-push.js";
 import { TurnTiming } from "./turn-timing.js";
 import { LiveVoice } from "./live-voice.js";
+import { NativeDotVoice } from "./native-dot-voice.js";
 import { CloudTextProof } from "./cloud-text-proof.js";
 import { CloudTextSession } from "./cloud-text-session.js";
 import { DesktopCloudReceiver } from "./desktop-cloud-receiver.js";
@@ -60,6 +61,7 @@ export class BridgeService {
   private readonly crypto: CryptoBox;
   private readonly appServer: AppServerClient;
   private readonly liveVoice: LiveVoice;
+  private readonly nativeDotVoice: NativeDotVoice;
   private turnTimingInstance: TurnTiming | undefined;
   private get turnTiming(): TurnTiming { return this.turnTimingInstance ??= new TurnTiming(); }
   private liveTimer: NodeJS.Timeout | null = null;
@@ -103,6 +105,8 @@ export class BridgeService {
           console.error(JSON.stringify({level:"error",message:"Could not push cloud history",error:publicError(error)}));
         });
       });
+    this.nativeDotVoice = new NativeDotVoice(this.desktopCloud, payload => this.send(payload));
+    this.desktopCloud.setVoiceHandlers(value => this.nativeDotVoice.event(value), () => this.nativeDotVoice.disconnected());
     this.appServer = new AppServerClient(
       this.ownedThreads,
       (event) => this.onTerminal(event),
@@ -173,6 +177,7 @@ export class BridgeService {
       }, PENDING_TURN_RETRY_MS);
       this.pendingTurnTimer.unref();
       this.liveTimer = setInterval(() => {
+        void this.nativeDotVoice.expire().catch(() => undefined);
         void this.liveVoice.expire()
           .then(() => this.appServer.releaseEndedRealtimeLeases()).catch(() => undefined);
       }, 5_000);
@@ -189,6 +194,7 @@ export class BridgeService {
     } finally {
       if (this.liveTimer) clearInterval(this.liveTimer);
       await this.liveVoice.close().catch(() => undefined);
+      await this.nativeDotVoice.close().catch(() => undefined);
       for (const timer of this.cloudInlineTimers.values()) clearTimeout(timer);
       this.cloudInlineTimers.clear();
       await this.desktopCloud.close();
@@ -336,6 +342,20 @@ export class BridgeService {
   private async handleWatchPayload(payload: WatchPayload): Promise<void> {
     let resolvedSubmit: Extract<WatchPayload, { kind: "turn.submit" }> | null = payload.kind === "turn.submit" ? payload : null;
     try {
+      if (payload.kind === "live.capability" && payload.threadId && this.desktopCloud.configuredDot(payload.threadId)) {
+        await this.send({ version: 1, kind: "live.capability", requestId: payload.requestId, ...this.nativeDotVoice.capability(payload.threadId) });
+        return;
+      }
+      if (payload.kind === "live.start" && this.desktopCloud.configuredDot(payload.threadId)) {
+        if (this.liveVoice.active) throw new Error("Another live voice call is active. End it before reconnecting.");
+        this.nativeDotVoice.start(payload.callId, payload.threadId, payload.sdp);
+        this.rememberLiveCall(payload.callId, payload.threadId);
+        return;
+      }
+      if (payload.kind === "live.transport") {
+        this.nativeDotVoice.transport(payload.callId, payload.transport);
+        return;
+      }
       if ("threadId" in payload && this.desktopCloud?.owns(payload.threadId) &&
           ["live.start", "live.capability", "feedback.submit"].includes(payload.kind)) {
         throw new Error("This browser cloud connection supports text replies and history. Live voice and feedback are not connected.");
@@ -358,6 +378,7 @@ export class BridgeService {
           return;
         }
         case "live.start": {
+          if (this.nativeDotVoice.active) throw new Error("Another live voice call is active. End it before reconnecting.");
           const capabilityStartedAt = Date.now();
           const { capability, cached } = await this.liveStartCapability(payload.voice);
           console.log(JSON.stringify({ level: "info", message: "live.voice.capability", callId: payload.callId,
@@ -369,14 +390,16 @@ export class BridgeService {
           return;
         }
         case "live.heartbeat": {
-          this.liveVoice.heartbeat(payload.callId);
+          if (this.nativeDotVoice.owns(payload.callId)) this.nativeDotVoice.heartbeat(payload.callId);
+          else this.liveVoice.heartbeat(payload.callId);
           // A call outlasts the chat subscription; keep its turn updates reaching the Watch.
           const threadId = this.liveCallThreads.get(payload.callId);
           if (threadId) this.keepChatWatched(threadId);
           return;
         }
         case "live.stop": {
-          await this.liveVoice.stop(payload.callId);
+          if (this.nativeDotVoice.owns(payload.callId)) await this.nativeDotVoice.stop(payload.callId);
+          else await this.liveVoice.stop(payload.callId);
           const threadId = this.liveCallThreads.get(payload.callId);
           this.liveCallThreads.delete(payload.callId);
           // Spoken transcript segments and the thread's final idle state arrive only on a fresh
@@ -494,7 +517,7 @@ export class BridgeService {
           return;
       }
     } catch (error) {
-      if (payload.kind === "live.newTask" || payload.kind === "live.start" || payload.kind === "live.stop" || payload.kind === "live.heartbeat" || payload.kind === "live.capability") {
+      if (payload.kind === "live.newTask" || payload.kind === "live.start" || payload.kind === "live.stop" || payload.kind === "live.heartbeat" || payload.kind === "live.capability" || payload.kind === "live.transport") {
         await this.send({ version: 1, kind: "live.error", requestId: payload.requestId,
           ...("callId" in payload ? { callId: payload.callId } : {}),
           ...(payload.kind === "live.newTask" ? { deliveryUncertain: true } : {}), message: publicRequestError(error, payload.kind) });
