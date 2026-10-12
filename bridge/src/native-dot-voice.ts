@@ -8,7 +8,8 @@ export interface NativeDotConnection {
 }
 type Call = { id: string; threadId: string; startedAt: number; expiresAt: number; accepted: boolean; answer: boolean; active: boolean; transportSeq: number };
 type TimingLog = (fields: { callId: string; stage: string; at: number; sinceStartMs: number;
-  browserElapsedMs?: number; setupTiming?: NativeVoiceEvent["setupTiming"]; httpTiming?: NativeVoiceEvent["httpTiming"]; statusCode?: number }) => void;
+  browserElapsedMs?: number; setupTiming?: NativeVoiceEvent["setupTiming"]; httpTiming?: NativeVoiceEvent["httpTiming"];
+  allocationMode?: NativeVoiceEvent["allocationMode"]; statusCode?: number }) => void;
 
 /** Account/call control stays in the native browser client; Watch WebRTC owns media. */
 export class NativeDotVoice {
@@ -91,6 +92,7 @@ export class NativeDotVoice {
       ...(event?.elapsedMs !== undefined ? { browserElapsedMs: event.elapsedMs } : {}),
       ...(event?.setupTiming ? { setupTiming: event.setupTiming } : {}),
       ...(event?.httpTiming ? { httpTiming: event.httpTiming } : {}),
+      ...(event?.allocationMode ? { allocationMode: event.allocationMode } : {}),
       ...(event?.statusCode !== undefined ? { statusCode: event.statusCode } : {}) });
   }
 

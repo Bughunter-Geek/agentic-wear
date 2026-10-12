@@ -29,7 +29,8 @@
       if (stopped || !current() || !requests.has(request) || !request.entry || !request.responded) return;
       requests.delete(request);
       const timing = summarize(request.entry, request.phase, request.serverMs);
-      if (timing) record(timing);
+      if (timing) record({ ...timing, ...(request.allocationMode ? { allocationMode: request.allocationMode } : {}),
+        ...(request.statusCode !== undefined ? { statusCode: request.statusCode } : {}) });
     }
     if (window.PerformanceObserver && window.performance?.now) {
       observer = new window.PerformanceObserver(list => {
@@ -46,14 +47,16 @@
       observer.observe({ entryTypes: ['resource'] });
     }
     return {
-      request(url, phase) {
+      request(url, phase, allocationMode) {
         if (stopped || !current() || !observer || !['create', 'attach'].includes(phase) || requests.size >= 4) return null;
-        const request = { url, phase, started: window.performance.now(), responded: false };
+        const request = { url, phase, started: window.performance.now(), responded: false,
+          ...(['instant', 'standard', 'unchanged'].includes(allocationMode) ? { allocationMode } : {}) };
         requests.add(request); return request;
       },
       response(request, response) {
         if (!request || !requests.has(request) || stopped || !current()) return;
         request.responded = true;
+        if (Number.isInteger(response.status) && response.status >= 0 && response.status <= 599) request.statusCode = response.status;
         // Envoy's duration is optional and numeric only. Absence is unknown,
         // never zero. It still includes upstream work, not model-only compute.
         const value = response.headers?.get('x-envoy-upstream-service-time');

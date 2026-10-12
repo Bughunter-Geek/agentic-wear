@@ -75,8 +75,8 @@ describe("native Dot media delegation", () => {
   });
   it("records only bounded HTTP durations and does not turn a timing report into call readiness", async () => {
     const f = fixture(); f.voice.start("first", "dot", sdp);
-    const event = { callId: "first", threadId: "dot", state: "timing", elapsedMs: 16000,
-      httpTiming: { phase: "create", totalMs: 16000, responseWaitMs: 15000 } };
+    const event = { callId: "first", threadId: "dot", state: "timing", elapsedMs: 16000, allocationMode: "instant",
+      httpTiming: { phase: "create", totalMs: 16000, responseWaitMs: 15000, allocationMode: "instant", statusCode: 201 } };
     await f.voice.event(nativeVoiceEventSchema.parse(event));
     expect(f.timing.at(-1)).toMatchObject({ stage: "browser.http.create", httpTiming: event.httpTiming });
     expect(f.delivered).toEqual([]);
@@ -85,6 +85,7 @@ describe("native Dot media delegation", () => {
       expect(nativeVoiceEventSchema.safeParse({ ...event, httpTiming }).success).toBe(false);
     expect(nativeVoiceEventSchema.safeParse({ ...event, httpTiming: undefined }).success).toBe(false);
     expect(nativeVoiceEventSchema.safeParse({ ...event, state: "active" }).success).toBe(false);
+    expect(nativeVoiceEventSchema.safeParse({ ...event, allocationMode: "PRIVATE_MODE" }).success).toBe(false);
     await f.voice.stop("first"); f.voice.start("second", "dot", sdp);
     const count = f.timing.length;
     await f.voice.event(nativeVoiceEventSchema.parse(event));

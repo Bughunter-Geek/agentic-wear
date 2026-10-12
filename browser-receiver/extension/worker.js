@@ -38,7 +38,7 @@ chrome.tabs.onUpdated.addListener((id,change)=>{if(change.url){release(id);if(is
 // navigated in-page to another chat. content.js guards against double injection itself.
 function inject(tabId){
  try{chrome.tabs.get(tabId).then(tab=>{
-  const prepare=tab.url===DOT_URL?chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:'MAIN',files:['remote-peer.js','voice-timing.js','voice-hook.js']}):Promise.resolve();
+  const prepare=tab.url===DOT_URL?chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:'MAIN',files:['remote-peer.js','voice-timing.js','native-allocation.js','voice-hook.js']}):Promise.resolve();
   return prepare.then(()=>chrome.scripting.executeScript({target:{tabId,frameIds:[0]},files:['voice-controller.js','content.js']}));
  }).catch(()=>{});}catch{}
 }

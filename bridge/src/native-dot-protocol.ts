@@ -23,6 +23,7 @@ export const nativeVoiceEventSchema = z.object({
   sdp: z.string().min(10).max(65_536).optional(),
   statusCode: z.number().int().min(0).max(599).optional(),
   elapsedMs: z.number().int().min(0).max(10_000_000).optional(),
+  allocationMode: z.enum(["instant", "standard", "unchanged"]).optional(),
   setupTiming: z.object({
     captureMs: z.number().int().min(0).max(120_000).optional(),
     peerMs: z.number().int().min(0).max(120_000).optional(),
@@ -33,6 +34,8 @@ export const nativeVoiceEventSchema = z.object({
   }).strict().optional(),
   httpTiming: z.object({
     phase: z.enum(["create", "attach"]),
+    allocationMode: z.enum(["instant", "standard", "unchanged"]).optional(),
+    statusCode: z.number().int().min(0).max(599).optional(),
     totalMs: z.number().int().min(0).max(120_000),
     queueMs: z.number().int().min(0).max(120_000).optional(),
     dnsMs: z.number().int().min(0).max(120_000).optional(),

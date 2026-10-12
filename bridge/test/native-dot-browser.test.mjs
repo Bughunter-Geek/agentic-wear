@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 
 async function fixture() {
-  const handlers = new Map(), events = [], tracks = [];
+  const handlers = new Map(), events = [], tracks = [], requests = [], responses = [];
   let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
   const observers = [];
   class Observer {
@@ -27,20 +27,23 @@ async function fixture() {
     close() { this.state = 'closed'; }
   }
   const response = { ok: true, status: 200, privateBody: 'PRIVATE_RESPONSE' };
-  const window = { RTCPeerConnection: Peer, AudioContext: Context, PerformanceObserver: Observer, performance: { now: () => now },
+  const window = { RTCPeerConnection: Peer, AudioContext: Context, Request, PerformanceObserver: Observer, performance: { now: () => now },
     addEventListener(name, handler) { handlers.set(name, handler); }, postMessage(message) { events.push(message.event); },
-    async fetch() { fetches++; return response; } };
+    async fetch(...args) { fetches++; requests.push(args); const next = responses.shift();
+      if (next instanceof Error) throw next;
+      return typeof next === 'function' ? next(...args) : next || response; } };
   const location = { href: 'https://chatgpt.com/dots/home', origin: 'https://chatgpt.com' };
-  const sandbox = { window, location, Event, EventTarget, DOMException, URL, navigator: { mediaDevices: {
+  const sandbox = { window, location, Event, EventTarget, DOMException, URL, TextDecoder, navigator: { mediaDevices: {
     getUserMedia() { microphoneRequests++; return Promise.resolve('physical'); } } },
     document: { body: null }, Date,
     setInterval: () => 1, clearInterval() {}, setTimeout: () => 2, clearTimeout() {} };
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/remote-peer.js', import.meta.url), 'utf8'), sandbox);
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-timing.js', import.meta.url), 'utf8'), sandbox);
+  vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/native-allocation.js', import.meta.url), 'utf8'), sandbox);
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-hook.js', import.meta.url), 'utf8'), sandbox);
   const command = value => handlers.get('message')({ source: window, origin: location.origin,
     data: { type: 'aw.native.voice.command', command: value } });
-  return { window, sandbox, command, events, tracks, response, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
+  return { window, sandbox, command, events, tracks, response, requests, responses, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
     fetches: () => fetches, advance: ms => { now += ms; }, observers,
     resource(entry, observer = observers.at(-1)) { observer.callback({ getEntries: () => [entry] }); } };
 }
@@ -115,7 +118,8 @@ test('HTTP timings distinguish queue, connection and response waits without extr
   const timings = f.events.filter(e => e.state === 'timing');
   assert.equal(timings.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(timings[0].httpTiming)), { phase: 'create', totalMs: 16000,
-    dnsMs: 20, connectMs: 270, tlsMs: 200, responseWaitMs: 15630, downloadMs: 20, serverMs: 15000, queueMs: 60 });
+    dnsMs: 20, connectMs: 270, tlsMs: 200, responseWaitMs: 15630, downloadMs: 20, serverMs: 15000, queueMs: 60,
+    allocationMode: 'unchanged', statusCode: 200 });
   assert.equal(JSON.stringify(f.events).includes('PRIVATE_'), false);
   f.resource(resource());
   assert.equal(f.events.filter(e => e.state === 'timing').length, 1);
@@ -136,17 +140,120 @@ test('timing cleanup rejects old call entries, zero timestamps stay unknown, and
     domainLookupEnd: 0, connectStart: 0, connectEnd: 0, secureConnectionStart: 0, requestStart: 0, responseStart: 0, responseEnd: 0 }));
   const timing = f.events.find(e => e.state === 'timing');
   assert.equal(timing.callId, 'next');
-  assert.deepEqual(JSON.parse(JSON.stringify(timing.httpTiming)), { phase: 'create', totalMs: 20 });
+  assert.deepEqual(JSON.parse(JSON.stringify(timing.httpTiming)), { phase: 'create', totalMs: 20, allocationMode: 'unchanged', statusCode: 200 });
   assert.equal(f.fetches(), 2);
 });
 test('an observer completion before fetch resolves waits for the response metadata', async () => {
   const f = await fixture();
   f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+  let finish;
+  f.responses.push(() => new Promise(resolve => { finish = resolve; }));
   const pending = f.window.fetch(createUrl);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.requests.length, 1);
   f.resource(resource());
   assert.equal(f.events.some(e => e.state === 'timing'), false);
+  finish(f.response);
   await pending;
   assert.equal(f.events.filter(e => e.state === 'timing').length, 1);
+});
+
+const startOwned = f => f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+const createInit = () => ({ method: 'POST', body: JSON.stringify({ sdp: offer, debug_prompt_overrides: { fixture: true } }),
+  headers: { Authorization: 'PRIVATE_CREDENTIAL', 'ChatGPT-Account-Id': 'PRIVATE_ACCOUNT' }, credentials: 'include' });
+test('the requested Watch allocation uses the native instant mode while preserving SDP and authentication', async () => {
+  const f = await fixture(); startOwned(f);
+  const init = createInit(), originalBody = init.body;
+  const response = await f.window.fetch(createUrl, init);
+  assert.equal(response, f.response); assert.equal(f.requests.length, 1);
+  const body = JSON.parse(f.requests[0][1].body);
+  assert.deepEqual(body, { ...JSON.parse(originalBody), instant_connect: true });
+  assert.equal(f.requests[0][1].headers, init.headers);
+  assert.equal(f.requests[0][1].credentials, init.credentials); assert.equal(init.body, originalBody);
+  f.resource(resource());
+  assert.equal(f.events.find(e => e.state === 'timing').httpTiming.allocationMode, 'instant');
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+  assert.equal(f.microphoneRequests(), 0);
+  assert.equal(JSON.stringify(f.events).includes('PRIVATE_'), false);
+});
+test('only a documented 409 denial without allocation permits the native standard mode, with Request bodies intact', async () => {
+  const f = await fixture(); startOwned(f);
+  const input = new Request(createUrl, createInit());
+  f.responses.push(new Response(JSON.stringify({ detail: "Your dot's voice task is still active" }), { status: 409 }));
+  await f.window.fetch(input);
+  assert.equal(f.requests.length, 2); assert.equal(input.bodyUsed, false);
+  assert.equal(JSON.parse(f.requests[0][1].body).instant_connect, true);
+  assert.deepEqual(JSON.parse(await f.requests[1][0].text()), JSON.parse(createInit().body));
+  assert.equal(f.requests[0][0].headers.get('Authorization'), 'PRIVATE_CREDENTIAL');
+  assert.equal(f.requests[1][0].headers.get('Authorization'), 'PRIVATE_CREDENTIAL');
+  assert.equal(f.events.some(e => e.state === 'failed'), false);
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+  await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  assert.equal(f.events.find(e => e.state === 'active').allocationMode, 'standard');
+});
+test('unknown conflicts, allocated responses, rate limits and server errors never issue another allocation', async () => {
+  for (const [status, detail, headers] of [[409, 'Unknown conflict', {}], [409, 'Another voice call is active', { Location: '/PRIVATE_CALL' }],
+    [429, 'Another voice call is active', {}], [503, 'Another voice call is active', {}], [403, 'Forbidden', {}]]) {
+    const f = await fixture(); startOwned(f);
+    const error = new Response(JSON.stringify({ detail }), { status, headers }); f.responses.push(error);
+    assert.equal(await f.window.fetch(createUrl, createInit()), error);
+    assert.equal(f.requests.length, 1); assert.equal(f.events.at(-1).state, 'failed');
+    assert.equal(f.events.at(-1).statusCode, status);
+  }
+});
+test('a network failure never retries the possibly allocated call', async () => {
+  const f = await fixture(); startOwned(f);
+  const error = new TypeError('network unavailable'); f.responses.push(error);
+  await assert.rejects(f.window.fetch(createUrl, createInit()), error);
+  assert.equal(f.requests.length, 1); assert.equal(f.events.at(-1).statusCode, 0);
+});
+test('malformed or oversized denial data leaves the original native failure visible without another request', async () => {
+  for (const text of ['not JSON', JSON.stringify({ detail: 'Another voice call is active', extra: 'x'.repeat(4096) })]) {
+    const f = await fixture(); startOwned(f);
+    const response = new Response(text, { status: 409 }); f.responses.push(response);
+    assert.equal(await f.window.fetch(createUrl, createInit()), response);
+    assert.equal(f.requests.length, 1); assert.equal(f.events.at(-1).state, 'failed');
+  }
+});
+test('cancelling during Request body preparation prevents even the first allocation', async () => {
+  const f = await fixture(); startOwned(f); let release;
+  class DelayedRequest extends Request {
+    clone() { const request = super.clone(); request.text = () => new Promise(resolve => { release = resolve; }); return request; }
+  }
+  const pending = f.window.fetch(new DelayedRequest(createUrl, createInit()));
+  f.command({ action: 'stop', callId: 'owned' }); release(createInit().body);
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(f.requests.length, 0);
+});
+test('an ended call cannot perform normal allocation after reading a safe denial', async () => {
+  const f = await fixture(); startOwned(f); let controller;
+  const body = new ReadableStream({ start(value) { controller = value; } });
+  f.responses.push(new Response(body, { status: 409 }));
+  const pending = f.window.fetch(createUrl, createInit());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.requests.length, 1);
+  f.command({ action: 'stop', callId: 'owned' });
+  controller.enqueue(new TextEncoder().encode(JSON.stringify({ detail: 'Another voice call is closing' }))); controller.close();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(f.requests.length, 1);
+});
+test('other browser requests and mismatched offers retain their native behavior', async () => {
+  const f = await fixture();
+  const personal = createInit(); await f.window.fetch(createUrl, personal);
+  assert.equal(f.requests[0][1], personal);
+  startOwned(f);
+  const otherUrl = 'https://other.example/backend-api/tbo/fixture/voice/calls';
+  await f.window.fetch(otherUrl, personal); assert.equal(f.requests[1][1], personal);
+  const foreign = { ...personal, body: JSON.stringify({ sdp: offer + '\r\na=FOREIGN' }) };
+  await f.window.fetch(createUrl, foreign); assert.equal(f.requests[2][1], foreign);
+  const nativeInstant = { ...personal, body: JSON.stringify({ sdp: offer, instant_connect: true }) };
+  f.responses.push(new Response(JSON.stringify({ detail: 'Another voice call is active' }), { status: 409 }));
+  await f.window.fetch(createUrl, nativeInstant);
+  assert.equal(f.requests.length, 4); assert.equal(f.requests[3][1], nativeInstant);
 });
 
 const controllerSource = await readFile(new URL('../../browser-receiver/extension/voice-controller.js', import.meta.url), 'utf8');

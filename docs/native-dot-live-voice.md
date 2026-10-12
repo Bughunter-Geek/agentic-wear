@@ -33,7 +33,7 @@ playback or open the Mac microphone.
 
 ## Validation and delivery
 
-Completed: bridge checks, 583 bridge tests, 29 browser-script tests, the additional
+Completed: bridge checks, 583 bridge tests, 37 browser-script tests, the additional
 authenticated native-host exchange regression, 44 relay tests, Watch unit tests,
 native Kotlin compilation, signed minified release assembly and release lint.
 The exact candidate keeps signer `bc70f367781d453b8dd22eb4daf5b735c291656a0d64137f974094aefdb6cda8`,
@@ -96,7 +96,33 @@ duration is unknown, not zero. TLS is included in the connection duration.
 URLs, IDs, headers, descriptions, request bodies and audio are never emitted.
 Diagnostics cannot activate a call, open the microphone or issue extra requests;
 ending a call disconnects its observer. This diagnostic update does not yet
-establish a latency reduction and must be activated after the current call ends.
+establish a latency reduction. It was activated after the user's call ended.
+
+The subsequent 0.3.5 test was measured by the user with an iPhone stopwatch at
+21.5 seconds. Its creation response wait was 15.134 seconds and attachment
+response wait was 3.406 seconds. Browser queueing was 1–2 ms, with reused
+connections and no DNS/connect/TLS setup. The Watch prepared its offer in
+1.186 seconds and media connected 0.301 seconds after the answer. These traces
+locate the dominant wait after dispatch; they do not separate network RTT from
+upstream service work. The change from 24 to 21.5 seconds is not evidence of
+an optimization by the diagnostic observer.
+
+The current native browser source exposes `instant_connect: true` for Dot voice
+preparation. Evidence: the `allocate` and `prepareForCall` methods in the public
+[native allocation bundle](https://chatgpt.com/cdn/assets/155568.f4345aafa0.js),
+inspected on 2026-10-12. Adapter 0.3.6 requests this allocation mode during an
+explicit Watch call start; it does not allocate idle/background calls. The
+native authentication, SDP, root-thread validation and attachment flow remain
+in the native client. Watch input still waits for media and successful attachment.
+
+The adapter returns to the original request only for HTTP 409 with no allocation
+Location and one of the native client's five exact preparation-denial details.
+Unknown conflicts, rate limits, server/network failures and malformed or oversized
+responses remain errors and cannot trigger another allocation. Cancellation
+before allocation or during denial inspection prevents a later request.
+Request bodies and authentication remain in Chrome; each HTTP attempt reports
+only fixed allocation-mode/status metadata and durations. Local regressions
+cover these boundaries. Actual startup benefit still requires a Watch test.
 
 Use the next actual Watch call to separate those waits before choosing an
 optimization. Keep the existing parallel network/offer/capability setup and

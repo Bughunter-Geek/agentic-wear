@@ -12,7 +12,8 @@
   const elapsed = call => Math.max(0, Math.min(10_000_000, Date.now() - call.startedAt));
   function stamp(call, key) { if (owner === call && call.setupTiming[key] === undefined) call.setupTiming[key] = Math.min(120_000, elapsed(call)); }
   function event(call, state, extra = {}) {
-    if (owner === call) emit({ callId: call.id, state, elapsedMs: elapsed(call), setupTiming: { ...call.setupTiming }, ...extra });
+    if (owner === call) emit({ callId: call.id, state, elapsedMs: elapsed(call), setupTiming: { ...call.setupTiming },
+      ...(call.allocationMode ? { allocationMode: call.allocationMode } : {}), ...extra });
   }
   function active(call) {
     if (owner === call && call.connected && call.attached && !call.active) { call.active = true; event(call, 'active'); }
@@ -104,11 +105,24 @@
         } catch { /* Unknown request shapes retain native fetch behavior. */ }
       }
       if (call && phase && phase !== 'stop') stamp(call, phase === 'create' ? 'createStartMs' : 'attachStartMs');
-      const timingRequest = requestUrl ? call?.timing?.request(requestUrl, phase) : null;
       try {
-        const response = await originalFetch.apply(this, args);
+        const prepared = call && phase === 'create' && window.AgenticWearNativeAllocation
+          ? await window.AgenticWearNativeAllocation.prefer(args, call.sdp) : { args };
+        if (call && phase === 'create' && owner !== call) throw new DOMException('The delegated call was cancelled before allocation', 'AbortError');
+        if (call && phase === 'create') call.allocationMode = prepared.allocationMode || 'unchanged';
+        const fetchOnce = async (values, allocationMode) => {
+          const timingRequest = requestUrl ? call?.timing?.request(requestUrl, phase, allocationMode) : null;
+          const response = await originalFetch.apply(this, values);
+          if (owner === call) call?.timing?.response(timingRequest, response);
+          return response;
+        };
+        let response = await fetchOnce(prepared.args, prepared.allocationMode);
+        if (prepared.standardArgs && await window.AgenticWearNativeAllocation.declined(response)) {
+          if (owner !== call) throw new DOMException('The delegated call ended before normal allocation', 'AbortError');
+          call.allocationMode = 'standard';
+          response = await fetchOnce(prepared.standardArgs, 'standard');
+        }
         if (owner === call && phase && phase !== 'stop') {
-          call.timing?.response(timingRequest, response);
           stamp(call, phase === 'create' ? 'createEndMs' : 'attachEndMs');
           if (!response.ok) event(call, 'failed', { statusCode: response.status });
           else if (phase === 'attach') { call.attached = true; active(call); }

@@ -19,7 +19,7 @@ it('re-attaches content.js to open chat tabs on install and startup, only for ma
  const w=load([{id:1,url:`https://chatgpt.com/local/${uuid}`},{id:2,url:'https://chatgpt.com/dots/home'},{id:3,url:`https://chatgpt.com/c/${uuid}`},{id:4,url:`https://chatgpt.com/local/${uuid}?x=1`}]);
  for(const f of w.hooks.installed)f();await new Promise(r=>setTimeout(r,5));
  assert.deepEqual(w.injected.map(o=>o.target.tabId),[2,1,2]);
- assert.equal(JSON.stringify(w.injected[0].files),'["remote-peer.js","voice-timing.js","voice-hook.js"]');
+ assert.equal(JSON.stringify(w.injected[0].files),'["remote-peer.js","voice-timing.js","native-allocation.js","voice-hook.js"]');
  assert.equal(w.injected[0].world,'MAIN');
  assert.equal(JSON.stringify(w.injected[1].files),'["voice-controller.js","content.js"]');
  for(const f of w.hooks.startup)f();await new Promise(r=>setTimeout(r,5));
