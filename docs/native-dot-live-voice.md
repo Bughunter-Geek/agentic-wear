@@ -498,3 +498,26 @@ the traces cannot distinguish lower demand, a rollout, or call-order effects.
 An earlier second-call allocation returned HTTP 500 after the previous stop
 returned 200. Its response body was not retained, so its cause remains unknown.
 Do not present three later successes as proof that this failure is fixed.
+
+### Private Watch build 100: visible native-call cooldown
+
+The user reported reliable reconnects after 20-second breaks, with later
+10- and 15-second breaks also succeeding. In the retained browser trace, two
+short-gap allocations returned HTTP 500 after starting 52–54 milliseconds after
+the previous native stop returned 200. A successful allocation started 2.971
+seconds after native stop completion; another succeeded after a much longer
+pause. The retained failure body was only `{"detail":"Internal Server Error"}`.
+This supports a cleanup/settling correlation but does not establish a documented
+OpenAI cooldown or make every HTTP 500 a cooldown error.
+
+Private build 100 adds a conservative 20-second app cooldown after
+catalog-verified native Dot voice attempts end. It stores a per-task monotonic
+end time in the existing app preferences so activity and process recreation
+cannot reset the wait. Other voice tasks are unaffected. The idle voice screen
+shows the remaining seconds, disables Start, and enables it at expiry without
+automatically creating a call. Both the activity/permission path and the service
+check the same deadline. The countdown ticker stops at expiry; no voice service,
+microphone, idle native allocation or request retry is needed for the countdown.
+Receiver 0.3.14 and the working Watch transport/readiness configuration remain
+unchanged. This is an app safeguard based on the observed tests, not a claim
+that the backend has a fixed 20-second cooldown. Physical acceptance is pending.

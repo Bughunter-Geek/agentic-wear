@@ -111,7 +111,17 @@ class LiveVoiceActivity : ComponentActivity() {
                 val thread = selectedThread
                 val taskToOpen = state.taskToOpen(thread)
                 val title = state.taskTitle.ifBlank { preferences.sessions.firstOrNull { it.id == thread }?.title ?: "No chat selected" }
-                val canConnect = BuildConfig.LIVE_VOICE_RUNTIME && thread != null && state.phase != "ending" && !creating
+                var cooldownSeconds by remember(thread) {
+                    mutableIntStateOf(nativeCallCooldownSeconds(NativeCallCooldownStore.remainingMs(this@LiveVoiceActivity, thread)))
+                }
+                LaunchedEffect(thread, state.phase) {
+                    while (true) {
+                        cooldownSeconds = nativeCallCooldownSeconds(NativeCallCooldownStore.remainingMs(this@LiveVoiceActivity, thread))
+                        if (cooldownSeconds == 0) break
+                        kotlinx.coroutines.delay(250)
+                    }
+                }
+                val canConnect = BuildConfig.LIVE_VOICE_RUNTIME && thread != null && state.phase != "ending" && !creating && cooldownSeconds == 0
 
                 fun start() {
                     if (preview == null) requestConnection(startNew = false)
@@ -178,6 +188,7 @@ class LiveVoiceActivity : ComponentActivity() {
                                 title = title,
                                 palette = palette,
                                 canConnect = canConnect,
+                                cooldownSeconds = cooldownSeconds,
                                 creating = creating,
                                 canCreate = BuildConfig.LIVE_VOICE_RUNTIME && !creating && !preferences.pending && state.phase != "ending",
                                 canOpenTask = taskToOpen != null,
@@ -245,6 +256,7 @@ class LiveVoiceActivity : ComponentActivity() {
     }
 
     private fun requestConnection(startNew: Boolean) {
+        if (!startNew && NativeCallCooldownStore.remainingMs(this, AppPreferences(this).selectedThreadId) > 0) return
         if (!canRequestVoiceStart(LiveVoiceService.state.value.phase, permissionPending)) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) connect(startNew)
         else {
@@ -392,6 +404,7 @@ private fun CallIdle(
     title: String,
     palette: io.github.sirbughunter.agenticwear.ui.OrbPalette,
     canConnect: Boolean,
+    cooldownSeconds: Int,
     creating: Boolean,
     canCreate: Boolean,
     canOpenTask: Boolean,
@@ -406,12 +419,13 @@ private fun CallIdle(
             Text(title, style = AwType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
             CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
             val message = when {
+                cooldownSeconds > 0 -> "Lumen is finishing its previous call. Ready in ${cooldownSeconds}s."
                 !BuildConfig.LIVE_VOICE_RUNTIME -> "This build doesn’t include the live voice runtime."
                 state.phase == "error" -> state.detail
                 state.phase == "ending" -> "Ending call…"
                 else -> state.detail
             }
-            Text(message, color = if (state.phase == "error") Aw.ErrorText else Aw.TextSecondary, fontSize = 11.sp, lineHeight = 14.sp, textAlign = TextAlign.Center)
+            Text(message, color = if (state.phase == "error" && cooldownSeconds == 0) Aw.ErrorText else Aw.TextSecondary, fontSize = 11.sp, lineHeight = 14.sp, textAlign = TextAlign.Center)
             Spacer(Modifier.height(6.dp))
             AwSectionLabel("Options")
             AwRowCard(onClick = onCreateTask, enabled = canCreate) {
@@ -430,7 +444,7 @@ private fun CallIdle(
                 style = AwType.Micro, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
         }
         AwEdgeButton(
-            label = if (state.phase == "error") "Try again" else "Start call",
+            label = if (cooldownSeconds > 0) "Ready in ${cooldownSeconds}s" else if (state.phase == "error") "Try again" else "Start call",
             enabled = canConnect,
             onClick = onStart,
         )

@@ -41,6 +41,7 @@ class LiveVoiceService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var callId: String? = null
     private var ending = false
+    private var nativeDotCall = false
     private var pollJob: Job? = null
     private var eventsJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -84,6 +85,11 @@ class LiveVoiceService : Service() {
             state.value = LiveVoiceState("error", "Choose a task and install the private WebRTC build first")
             stopSelf(); return
         }
+        if (!createNew && NativeCallCooldownStore.remainingMs(this, thread) > 0) {
+            state.value = LiveVoiceState(detail = "Lumen is finishing its previous call", taskId = thread.orEmpty())
+            stopSelf(); return
+        }
+        nativeDotCall = false
         val prefs = AppPreferences(this)
         if (prefs.pending || VoiceSessionService.sessionState.value.phase in setOf(VoiceSessionPhase.RECORDING, VoiceSessionPhase.TRANSCRIBING)) {
             state.value = LiveVoiceState("error", "Finish dictation before connecting live voice")
@@ -304,7 +310,8 @@ class LiveVoiceService : Service() {
                             taskContext = listOf(text("cwd"), listOf(text("model"), text("effort")).filter { it.isNotBlank() }.joinToString(" · "))
                                 .filter { it.isNotBlank() }.joinToString("\n"))
                     }
-                    nativeDotCatalog.complete(catalog.optBoolean("nativeDot") && gate.requiresHostAcceptance)
+                    nativeDotCall = catalog.optBoolean("nativeDot") && gate.requiresHostAcceptance
+                    nativeDotCatalog.complete(nativeDotCall)
                     defaultVoice
                 } catch (error: Throwable) { offerJob.cancel(); throw error }
                 val offer = offerJob.await().getOrThrow()
@@ -351,6 +358,7 @@ class LiveVoiceService : Service() {
         VoiceTrace.event(VoiceTraceStage.END)
         ending = true
         val id = callId
+        if (id != null) NativeCallCooldownStore.ended(this, state.value.taskId, nativeDotCall)
         callId = null
         val trace = VoiceTrace.events()
         runCatching { peer?.close() }; peer = null
@@ -409,7 +417,13 @@ class LiveVoiceService : Service() {
         internal const val CALL_POLL_MS = 1000L
         internal const val STARTUP_TIMEOUT_MESSAGE = "Codex voice did not respond in time. Retry when ready."
         fun beginNew(context: Context) = ContextCompat.startForegroundService(context, Intent(context, LiveVoiceService::class.java).setAction(BEGIN_NEW))
-        fun begin(context: Context, thread: String) = ContextCompat.startForegroundService(context, Intent(context, LiveVoiceService::class.java).setAction(BEGIN).putExtra("thread", thread))
+        fun begin(context: Context, thread: String) {
+            if (NativeCallCooldownStore.remainingMs(context, thread) > 0) {
+                state.value = LiveVoiceState(detail = "Lumen is finishing its previous call", taskId = thread)
+                return
+            }
+            ContextCompat.startForegroundService(context, Intent(context, LiveVoiceService::class.java).setAction(BEGIN).putExtra("thread", thread))
+        }
         fun end(context: Context) { context.startService(Intent(context, LiveVoiceService::class.java).setAction(END)) }
         fun mute(context: Context) { context.startService(Intent(context, LiveVoiceService::class.java).setAction(MUTE)) }
     }
