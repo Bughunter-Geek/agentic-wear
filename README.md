@@ -9,6 +9,12 @@ Agentic Wear is an unofficial, Apache-2.0-licensed companion that connects a wat
 <!-- Add a real-watch demo here when available. Identify the watch, app release,
 bridge revision, and Codex version. Do not imply hardware validation from an emulator. -->
 
+## Alpha 1 development preview
+
+**Alpha 1 is the proposed name for the next preview. Core features mostly work in the tested development setup, but design and stability are unfinished, some features are missing, and security testing and hardening need more time.** It is intended for willing early testers who understand these limitations.
+
+As checked on October 14, 2026, the newest published alpha is still **0.6.25**. Newer live voice work is in private development builds; Alpha 1 is not yet a downloadable release. Read [what to expect from Alpha 1](docs/alpha-preview-status.md) before trying the published alpha or comparing it with development demos.
+
 ## Current status
 
 **Early alpha — not a production-stability claim.** The latest published alpha checked on September 16, 2026 is **0.6.25**, released September 6, 2026, with `versionCode 51`.
