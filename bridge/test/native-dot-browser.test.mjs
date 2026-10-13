@@ -97,8 +97,9 @@ test('native acceptance follows the native input release after real media/channe
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
   assert.equal(f.events.find(e => e.progressStage === 'peer').state, 'progress');
   await peer.setLocalDescription(await peer.createOffer());
-  await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  await applied;
   assert.equal(f.events.some(e => e.state === 'active'), false);
   const response = await f.window.fetch('/backend-api/tbo/PRIVATE_OWNER/voice/calls/PRIVATE_CALL/attach', { method: 'POST', headers: { Authorization: 'PRIVATE_CREDENTIAL' } });
   assert.equal(response, f.response);
@@ -183,6 +184,85 @@ test('an observer completion before fetch resolves waits for the response metada
 });
 
 const startOwned = f => f.command({ action: 'start', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+test('native attachment waits for a delayed Watch to install its answer', async () => {
+  const f = await fixture(); startOwned(f);
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  let watchApplied = false;
+  const init = { method: 'POST', headers: { Authorization: 'PRIVATE_CREDENTIAL' } };
+  f.responses.push(() => watchApplied ? f.response : new Response('', { status: 502 }));
+  const startup = (async () => {
+    await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+    return f.window.fetch(createUrl + '/PRIVATE_CALL/attach', init);
+  })();
+  await new Promise(setImmediate);
+  assert.equal(f.events.filter(e => e.state === 'answer').length, 1);
+  assert.equal(peer.currentRemoteDescription, null);
+  assert.equal(peer.pendingRemoteDescription.sdp, offer);
+  assert.equal(peer.signalingState, 'have-local-offer');
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'new', iceState: 'new', channelState: 'connecting' } });
+  f.advance(6000); await new Promise(setImmediate);
+  assert.equal(f.requests.length, 0, 'forwarding the SDP must not start the backend attachment budget');
+  watchApplied = true;
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connecting', iceState: 'checking', channelState: 'connecting' } });
+  assert.equal(await startup, f.response);
+  assert.equal(peer.currentRemoteDescription.sdp, offer);
+  assert.equal(peer.pendingRemoteDescription, null);
+  assert.equal(peer.signalingState, 'stable');
+  assert.equal(f.requests.length, 1); assert.equal(f.requests[0][1], init);
+  assert.equal(f.events.some(e => e.state === 'active'), false, 'SDP application does not prove usable voice');
+  assert.equal(f.microphoneRequests(), 0);
+});
+test('foreign, stale or pre-answer transport cannot complete the pending native SDP operation', async () => {
+  const f = await fixture(); startOwned(f);
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  let complete = false; applied.then(() => { complete = true; });
+  const connected = { seq: 1, peerState: 'connected', iceState: 'completed', channelState: 'open' };
+  f.command({ action: 'transport', callId: 'foreign', transport: connected });
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connecting', iceState: 'new', channelState: 'connecting' } });
+  f.command({ action: 'transport', callId: 'owned', transport: connected });
+  await new Promise(setImmediate); assert.equal(complete, false);
+  await assert.rejects(peer.setRemoteDescription({ type: 'answer', sdp: offer }), { name: 'TypeError' });
+  f.command({ action: 'transport', callId: 'owned', transport: { ...connected, seq: 3 } });
+  await applied; assert.equal(complete, true);
+});
+test('stop, transport failure and the finite startup deadline reject pending SDP without attaching', async () => {
+  for (const ending of ['stop', 'failed', 'deadline']) {
+    const f = await fixture(); startOwned(f);
+    const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+    await peer.setLocalDescription(await peer.createOffer());
+    const startup = (async () => {
+      await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+      return f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+    })();
+    const rejected = assert.rejects(startup, { name: 'AbortError' });
+    if (ending === 'deadline') f.tick(30000);
+    else if (ending === 'failed') f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'failed', iceState: 'failed', channelState: 'connecting' } });
+    else f.command({ action: 'stop', callId: 'owned' });
+    await rejected;
+    f.command({ action: 'transport', callId: 'owned', transport: { seq: 2, peerState: 'connected', iceState: 'completed', channelState: 'open' } });
+    assert.equal(f.requests.length, 0); assert.equal(peer.connectionState, 'closed');
+    assert.equal(peer.pendingRemoteDescription, null);
+  }
+});
+test('cancellation during the applied-answer callback cannot attach the retired native call', async () => {
+  const f = await fixture(); startOwned(f);
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  peer.addEventListener('signalingstatechange', () => {
+    if (peer.signalingState === 'stable') f.command({ action: 'stop', callId: 'owned' });
+  });
+  const startup = (async () => {
+    await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+    return f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
+  })();
+  const rejected = assert.rejects(startup, { name: 'AbortError' });
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connecting', iceState: 'checking', channelState: 'connecting' } });
+  await rejected;
+  assert.equal(f.requests.length, 0); assert.equal(peer.connectionState, 'closed');
+});
 test('native startup can attach after 20 seconds without prematurely ending the connected Watch media', async () => {
   const f = await fixture(); startOwned(f);
   const input = await nativeInput(f);
@@ -192,8 +272,9 @@ test('native startup can attach after 20 seconds without prematurely ending the 
   const startup = Promise.race([new Promise(resolve => { complete = resolve; }), new Promise((_, reject) => {
     timer = f.window.setTimeout(() => reject(Error('Your dot’s voice connection timed out')), 20000);
   })]).finally(() => f.window.clearTimeout(timer));
-  f.tick(17000); await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.tick(17000); const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  await applied;
   f.tick(4000);
   assert.equal(f.events.some(e => e.state === 'active'), false, 'media alone still cannot release Watch input');
   await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
@@ -305,8 +386,9 @@ test('an explicitly selected native preparation mode is preserved without rewrit
   assert.equal(f.requests[0][1], init);
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
   await peer.setLocalDescription(await peer.createOffer());
-  await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  await applied;
   assert.equal(f.events.some(e => e.state === 'active'), false);
   await f.window.fetch(createUrl + '/PRIVATE_CALL/attach', { method: 'POST' });
   native.port.postMessage({ type: 'release' });
@@ -316,8 +398,9 @@ test('an explicitly selected native preparation mode is preserved without rewrit
 async function endpoint(f, channelState = 'open') {
   const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
   await peer.setLocalDescription(await peer.createOffer());
-  await peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
   f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState } });
+  await applied;
   return peer;
 }
 test('native input release overlaps pending attachment without inventing media or channel readiness', async () => {
@@ -583,6 +666,63 @@ test('hidden, inert, disabled and unrendered native controls do not advertise Wa
       assert.equal(f.commands.some(value => value.action === 'start'), false);
     } finally { controller?.stop(); f.dom.window.close(); }
   }
+});
+
+test('a closed Lumen profile reveals and verifies Start call before reserving native media', async () => {
+  for (const opens of [true, false]) {
+    const f = controllerPage(); let controller;
+    try {
+      const start = f.w.document.querySelector('[aria-label="Start call"]'); start.remove();
+      const profile = f.w.document.querySelector('[data-orbit-profile-trigger]');
+      let clicks = 0; start.onclick = () => clicks++;
+      profile.onclick = () => { if (opens) f.w.document.querySelector('main').append(start); };
+      acknowledgeStarts(f); controller = startController(f); f.announce(true);
+      assert.equal(controller.available(), true);
+      assert.equal(await controller.command(controllerStart(f)), opens);
+      assert.equal(clicks, opens ? 1 : 0);
+      assert.equal(f.commands.some(value => value.action === 'start'), opens);
+    } finally { controller?.stop(); f.dom.window.close(); }
+  }
+});
+
+test('cancellation while revealing the profile cannot reserve a later native call', async () => {
+  const f = controllerPage(); let controller;
+  try {
+    const start = f.w.document.querySelector('[aria-label="Start call"]'); start.remove();
+    controller = startController(f); f.announce(true);
+    const pending = controller.command(controllerStart(f));
+    controller.cancel(); f.w.document.querySelector('main').append(start);
+    assert.equal(await pending, false);
+    assert.equal(f.commands.some(value => value.action === 'start'), false);
+  } finally { controller?.stop(); f.dom.window.close(); }
+});
+
+test('retired hidden Hang up controls cannot block the next Watch call', async () => {
+  for (const state of ['hidden', 'inert', 'aria-hidden', 'aria-disabled', 'data-fixture-unrendered', 'visibility', 'display']) {
+    const f = controllerPage(); let controller;
+    try {
+      const retired = f.w.document.createElement('button'); retired.setAttribute('aria-label', 'Hang up');
+      if (state === 'visibility') retired.style.visibility = 'hidden';
+      else if (state === 'display') retired.style.display = 'none';
+      else retired.setAttribute(state, ['aria-hidden', 'aria-disabled'].includes(state) ? 'true' : '');
+      f.w.document.querySelector('main').append(retired);
+      acknowledgeStarts(f); controller = startController(f); f.announce(true);
+      assert.equal(controller.available(), true, state);
+      assert.equal(await controller.command(controllerStart(f)), true, state);
+    } finally { controller?.stop(); f.dom.window.close(); }
+  }
+});
+
+test('a rendered personal Hang up control still prevents Watch takeover', async () => {
+  const f = controllerPage(); let controller;
+  try {
+    const hangup = f.w.document.createElement('button'); hangup.setAttribute('aria-label', 'Hang up');
+    f.w.document.querySelector('main').append(hangup);
+    controller = startController(f); f.announce(true);
+    assert.equal(controller.available(), false);
+    assert.equal(await controller.command(controllerStart(f)), false);
+    assert.equal(f.commands.some(value => value.action === 'start'), false);
+  } finally { controller?.stop(); f.dom.window.close(); }
 });
 
 test('native-host loss before the first ready signal cancels a call without disposing the receiver', async () => {

@@ -3,11 +3,35 @@ const LOCAL_URL=/^https:\/\/chatgpt\.com\/local\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f
 const isTarget=url=>typeof url==='string'&&(url===DOT_URL||LOCAL_URL.test(url));
 let native;
 const owners=new Map(),protectedTabs=new Set();
-const voiceMutes=new Map();
+const voiceMutes=new Map(),voiceMuteQueues=new Map();
+// Serialize mute changes per tab: an old asynchronous restore must finish
+// before a new lease captures and applies its browser-audio mute state.
+function withVoiceTab(tabId,operation){
+ const previous=voiceMuteQueues.get(tabId)||Promise.resolve();
+ const result=previous.then(operation,operation);
+ let tail;
+ const cleanup=()=>{if(voiceMuteQueues.get(tabId)===tail)voiceMuteQueues.delete(tabId);};
+ tail=result.then(cleanup,cleanup);voiceMuteQueues.set(tabId,tail);return result;
+}
+async function acquireVoiceMute(callId,owner){
+ return withVoiceTab(owner.tabId,async()=>{
+  const tab=await chrome.tabs.get(owner.tabId);
+  const existing=[...voiceMutes.values()].find(lease=>lease.tabId===owner.tabId);
+  voiceMutes.set(callId,{tabId:owner.tabId,documentId:owner.documentId,
+   wasMuted:existing?existing.wasMuted:tab.mutedInfo?.muted===true});
+  if(!tab.mutedInfo?.muted)await chrome.tabs.update(owner.tabId,{muted:true});
+ });
+}
 async function restoreVoiceMute(callId){
- const lease=voiceMutes.get(callId);if(!lease)return;voiceMutes.delete(callId);
- if(lease.wasMuted)return;
- try{const tab=await chrome.tabs.get(lease.tabId);if(tab.mutedInfo?.reason==='extension'&&tab.mutedInfo?.extensionId===chrome.runtime.id)await chrome.tabs.update(lease.tabId,{muted:false});}catch{}
+ const lease=voiceMutes.get(callId);if(!lease)return;
+ try{await withVoiceTab(lease.tabId,async()=>{
+  if(voiceMutes.get(callId)!==lease)return;
+  voiceMutes.delete(callId);
+  if(lease.wasMuted||[...voiceMutes.values()].some(other=>other.tabId===lease.tabId))return;
+  const tab=await chrome.tabs.get(lease.tabId);
+  if(tab.mutedInfo?.reason==='extension'&&tab.mutedInfo?.extensionId===chrome.runtime.id)
+   await chrome.tabs.update(lease.tabId,{muted:false});
+ });}catch{}
 }
 async function voiceCommand(message,port){
  const owner=owners.get(DOT_URL),fail={version:1,kind:'native-voice-event',url:DOT_URL,documentId:message.documentId,
@@ -17,9 +41,7 @@ async function voiceCommand(message,port){
   if(message.action==='start'){
    const check=await chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-check'},{frameId:0});
    if(!check?.ready){port.postMessage(fail);return;}
-   const tab=await chrome.tabs.get(owner.tabId);
-   voiceMutes.set(message.callId,{tabId:owner.tabId,documentId:owner.documentId,wasMuted:tab.mutedInfo?.muted===true});
-   if(!tab.mutedInfo?.muted)await chrome.tabs.update(owner.tabId,{muted:true});
+   await acquireVoiceMute(message.callId,owner);
   }
   const accepted=await chrome.tabs.sendMessage(owner.tabId,message,{frameId:0});
   if(accepted!==true&&message.action==='start'){port.postMessage(fail);await restoreVoiceMute(message.callId);}

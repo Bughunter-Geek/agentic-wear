@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   window.AgenticWearVoiceController = { create({ documentId, url, identity, changed }) {
-    let supported = false, owner = null, accepted = null, stopped = false;
+    let supported = false, owner = null, accepted = null, stopped = false, generation = 0;
     const disabled = new Map();
     const label = element => element.getAttribute('aria-label') || (element.innerText || element.textContent || '').trim();
     const buttons = () => [...document.querySelectorAll('button')];
@@ -14,7 +14,27 @@
       // acknowledged. Prefer the persistent toolbar, and resolve it at click time.
       return candidates.find(button => !button.closest('[role="dialog"]')) || candidates[0];
     }
-    const hangup = () => buttons().find(button => label(button) === 'Hang up' && !button.disabled);
+    const hangup = () => buttons().find(button => label(button) === 'Hang up' && usable(button));
+    const profileControl = () => buttons().some(button => label(button) === 'Start call') ? null : [...document.querySelectorAll('[data-orbit-profile-trigger="true"]')]
+      .find(button => label(button) === 'Open Lumen’s profile' && usable(button));
+    function revealStart(command) {
+      if (startControl()) return Promise.resolve(true);
+      const profile = profileControl();
+      if (!profile || hangup()) return Promise.resolve(false);
+      return new Promise(resolve => {
+        let timer;
+        const observer = new MutationObserver(check);
+        function finish(value) { observer.disconnect(); clearTimeout(timer); resolve(value); }
+        function check() {
+          if (stopped || !identity() || hangup() || Date.now() >= command.expiresAt) finish(false);
+          else if (startControl()) finish(true);
+        }
+        observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
+        timer = setTimeout(() => finish(false), Math.min(1000, Math.max(0, command.expiresAt - Date.now())));
+        profile.click(); check();
+      });
+    }
+
     function protectMicControls() {
       if (!owner) return;
       for (const button of buttons()) if (/^(Mute|Unmute) microphone$/.test(label(button))) {
@@ -65,12 +85,15 @@
     }, 2000);
     post({ action: 'query' });
     return {
-      available: () => !stopped && supported && Boolean(identity()) && (Boolean(owner) || (!hangup() && Boolean(startControl()))),
+      available: () => !stopped && supported && Boolean(identity()) && (Boolean(owner) || (!hangup() && Boolean(startControl() || profileControl()))),
       async command(command) {
         if (stopped || command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
         if (command.action === 'start') {
           if (owner || !supported || !identity() || hangup()) return false;
-          if (!startControl()) return false;
+          const startingGeneration = generation;
+          if (!startControl() && !await revealStart(command)) return false;
+          if (startingGeneration !== generation) return false;
+          if (owner || stopped || !supported || !identity() || hangup()) return false;
           owner = { callId: command.callId, threadId: command.threadId, identity: identity() };
           const call = owner;
           const pending = new Promise(resolve => { accepted = { resolve }; });
@@ -101,12 +124,13 @@
       },
       cancel() {
         if (stopped) return;
+        generation++;
         if (owner) post({ action: 'stop', callId: owner.callId });
         release();
       },
       stop() {
         if (stopped) return;
-        stopped = true;
+        stopped = true; generation++;
         if (owner) post({ action: 'stop', callId: owner.callId });
         release(); clearInterval(timer); controls.disconnect(); window.removeEventListener('message', receive);
       },

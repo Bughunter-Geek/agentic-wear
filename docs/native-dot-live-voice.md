@@ -458,3 +458,43 @@ in the build 98 trace; it does not establish a shorter upstream creation wait or
 an under-20-second physical result. Compare two explicit user calls after private
 delivery, ending the first and waiting approximately 30 seconds before the
 second. No idle call or allocation is made between them.
+
+### Receiver 0.3.14: startup ordering and repeated-call readiness
+
+Receiver 0.3.12 keeps the native SDK's answer-application promise pending until
+this Watch peer reports real ICE negotiation progress. The SDK therefore starts
+attachment after the Watch has installed its answer. Cancellation, stale-call
+ownership and the existing finite startup deadline still reject the operation.
+The user accepted the changed screen-off startup test on 2026-10-14.
+
+Receiver 0.3.13 recognizes the verified Lumen profile as a native entry point
+when the page has removed its Start call control. On an explicit Watch start it
+opens that profile and waits at most one second for the real usable control
+before reserving native media. Hidden retired Hang up controls do not block the
+next call; a rendered personal Hang up control still prevents takeover. Profile
+reveal cancellation cannot start a later call. Three consecutive physical calls
+succeeded after this change, with allocation 201, attachment 200 and normal
+Watch shutdown. Their event channels opened at 14.710, 17.394 and 20.069 seconds.
+These are transport milestones, not first-greeting measurements.
+
+Receiver 0.3.14 serializes browser mute acquisition/restoration per tab. A delayed
+restore from an old call cannot unmute a newer call, overlapping leases preserve
+the original user mute state, and a rejected new start cannot release another
+call's lease. The race reproduced before the fix and focused regressions pass.
+Its physical acceptance is pending; it does not establish the cause of the
+previous audible desktop error cue or the allocation HTTP 500.
+
+All versions retain the native client's standard allocation mode, authentication
+and fresh Watch SDP. They neither prewarm idle calls nor retry allocation errors.
+Refresh the idle Lumen tab after updating the receiver to load the new hooks.
+No Watch update beyond private build 99 is required for these receiver changes.
+
+The launch target is under 20 seconds from Start to usable two-way voice, with
+21 seconds as the maximum acceptable startup. Consistent acceptance is not yet
+established. In the three-call trace, allocation response waits grew from 11.360
+to 13.836 to 16.740 seconds while browser preparation fell from 81 to 51 to 44
+milliseconds. Network/VPN and service work are included in that response wait;
+the traces cannot distinguish lower demand, a rollout, or call-order effects.
+An earlier second-call allocation returned HTTP 500 after the previous stop
+returned 200. Its response body was not retained, so its cause remains unknown.
+Do not present three later successes as proof that this failure is fixed.
