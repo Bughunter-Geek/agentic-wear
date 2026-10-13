@@ -85,10 +85,6 @@ class LiveVoiceService : Service() {
             state.value = LiveVoiceState("error", "Choose a task and install the private WebRTC build first")
             stopSelf(); return
         }
-        if (!createNew && NativeCallCooldownStore.remainingMs(this, thread) > 0) {
-            state.value = LiveVoiceState(detail = "Lumen is finishing its previous call", taskId = thread.orEmpty())
-            stopSelf(); return
-        }
         nativeDotCall = false
         val prefs = AppPreferences(this)
         if (prefs.pending || VoiceSessionService.sessionState.value.phase in setOf(VoiceSessionPhase.RECORDING, VoiceSessionPhase.TRANSCRIBING)) {

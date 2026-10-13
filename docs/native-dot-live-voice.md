@@ -515,8 +515,8 @@ catalog-verified native Dot voice attempts end. It stores a per-task monotonic
 end time in the existing app preferences so activity and process recreation
 cannot reset the wait. Other voice tasks are unaffected. The idle voice screen
 shows the remaining seconds, disables Start, and enables it at expiry without
-automatically creating a call. Both the activity/permission path and the service
-check the same deadline. The countdown ticker stops at expiry; no voice service,
+automatically creating a call. Both the activity/permission path and the service’s public start entry
+check the same deadline before requesting a foreground service. The countdown ticker stops at expiry; no voice service,
 microphone, idle native allocation or request retry is needed for the countdown.
 Receiver 0.3.14 and the working Watch transport/readiness configuration remain
 unchanged. This is an app safeguard based on the observed tests, not a claim
