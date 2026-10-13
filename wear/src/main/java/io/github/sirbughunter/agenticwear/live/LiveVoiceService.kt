@@ -215,14 +215,13 @@ class LiveVoiceService : Service() {
             try {
                 // Give WebRTC's network monitor a head start; the first peer is created within ~0.1 s.
                 if (releaseNetworkMonitor == null) releaseNetworkMonitor = runCatching { NativeLivePeer.warmUpNetworkMonitor(this@LiveVoiceService) }.getOrNull()
-                // Direct-network preparation remains parallel for Wi-Fi/LTE and
-                // local tasks. Only a Bluetooth Dot waits for its catalog before
-                // choosing the experimental default-route transport.
+                // Wake a direct radio while checking the catalog. Only a Bluetooth
+                // Dot needs that reply to permit the default-route transport.
                 val initialTransport = (network ?: VoiceNetwork(this@LiveVoiceService).also { network = it }).currentTransport()
                 VoiceTrace.event(VoiceTraceStage.NETWORK_REQUEST, initialTransport)
                 val networkReady = async {
-                    val nativeBluetooth = initialTransport == "BLUETOOTH" && thread.startsWith("dot:") && nativeDotCatalog.await()
-                    network!!.acquire(preferBluetoothDefaultRoute = nativeBluetooth)
+                    val bluetoothPermission = if (initialTransport == "BLUETOOTH" && thread.startsWith("dot:")) nativeDotCatalog else null
+                    network!!.acquire(bluetoothDefaultRoute = bluetoothPermission)
                 }
                 var defaultNetworkRoute = false
                 val createPeer = { NativeLivePeer(this@LiveVoiceService, { status ->

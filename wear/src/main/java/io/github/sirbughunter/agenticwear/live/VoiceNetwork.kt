@@ -5,20 +5,21 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.SystemClock
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.Deferred
 
 /**
- * Wear OS keeps apps on the phone's Bluetooth proxy until one asks for more. That proxy
- * offers WebRTC no usable interface, so an offer gathers no candidates. Holding a Wi-Fi or
- * cellular request for the call wakes a direct network and keeps it up until release().
+ * Holding a Wi-Fi or cellular request wakes a direct network and keeps it up until
+ * release(). Verified native Dot calls can also use the phone's Bluetooth default
+ * route through WebRTC's wildcard ports, without an enumerated adapter candidate.
  */
 internal class VoiceNetwork(context: Context) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private var callback: ConnectivityManager.NetworkCallback? = null
 
     /** Returns a trace label for the network WebRTC can use; never throws for a missing network. */
-    suspend fun acquire(timeoutMs: Long = 8_000, preferBluetoothDefaultRoute: Boolean = false): String {
+    suspend fun acquire(timeoutMs: Long = 8_000, bluetoothDefaultRoute: Deferred<Boolean>? = null): String {
         if (callback != null) return currentTransport()
         val available = CompletableDeferred<Network>()
         val request = NetworkRequest.Builder()
@@ -36,9 +37,8 @@ internal class VoiceNetwork(context: Context) {
         // hotspot. A verified Bluetooth Dot can then try the existing default
         // route without spending the ordinary eight-second wake-up deadline.
         // Keep the request registered for this call and release it normally.
-        val deadline = if (preferBluetoothDefaultRoute) minOf(timeoutMs, 1_000) else timeoutMs
-        val network = withTimeoutOrNull(deadline) { available.await() }
-        if (network == null) return if (preferBluetoothDefaultRoute && currentTransport() == "BLUETOOTH")
+        val network = awaitVoiceNetworkPreparation(available, timeoutMs, bluetoothDefaultRoute, SystemClock::elapsedRealtime)
+        if (network == null) return if (bluetoothDefaultRoute?.await() == true && currentTransport() == "BLUETOOTH")
             "BLUETOOTH" else "${currentTransport()}_TIMEOUT"
         return transport(connectivity.getNetworkCapabilities(network))
     }

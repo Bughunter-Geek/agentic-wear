@@ -428,3 +428,33 @@ if direct media proves unsuitable.
 
 Never start physical microphone or audible native-call tests unattended. During
 an active user call, defer receiver reloads and bridge restarts until it ends.
+
+### Build 98 physical Bluetooth acceptance and the next latency change
+
+On 2026-10-13 the user installed private build 98 and reported that the Bluetooth
+test worked: approximately 24 seconds to answer the call, then another 1–2
+seconds before the spoken greeting. Call `dd2b4b62-ad93-4789-95fd-fac8d53ec1ee`
+identified Bluetooth at network request and readiness, sent `DEFAULT_ROUTE_OFFER`
+with zero advertised candidates, connected real media at Watch 21.839 seconds
+and opened its data channel at 22.222 seconds. Native input release also occurred
+and the call closed normally from the Watch. This verifies the phone Bluetooth
+route for that call; the reported greeting delay does not measure a reply to a
+subsequent question. Network handover and consistent under-20-second startup
+remain unverified.
+
+The native creation response wait was 17.294 seconds, attachment took 4.583
+seconds, and attachment overlapped actual native input release. Watch capability
+arrived at 1.153 seconds, but radio preparation then added its separate one-second
+grace: network ready was 2.161 seconds and the offer was sent at 2.567 seconds.
+
+Private candidate 99 registers the same direct-radio request concurrently with
+the capability exchange, and counts the one-second Bluetooth grace from that
+request. The signed catalog still must approve the native route before peer
+creation. A direct network discovered during the catalog reply keeps priority;
+ordinary routes retain their eight-second radio deadline. The working default
+ports, SDP validation, microphone readiness, lifecycle and receiver 0.3.11 are
+unchanged. This removes about one second from the preparation sequence observed
+in the build 98 trace; it does not establish a shorter upstream creation wait or
+an under-20-second physical result. Compare two explicit user calls after private
+delivery, ending the first and waiting approximately 30 seconds before the
+second. No idle call or allocation is made between them.
