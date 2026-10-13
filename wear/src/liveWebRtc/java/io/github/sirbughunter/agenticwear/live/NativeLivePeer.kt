@@ -15,6 +15,7 @@ class NativeLivePeer(
     private val onCaption: (String) -> Unit,
     private val onTransport: (String, String, String) -> Unit = { _, _, _ -> },
     private val onFullCaption: (String) -> Unit = {},
+    private val defaultNetworkRoute: Boolean = false,
 ) : LivePeer {
     @Volatile private var closed = false
     /**
@@ -49,6 +50,12 @@ class NativeLivePeer(
         microphone = factory.createAudioTrack("watch-microphone", source)
         val config = PeerConnection.RTCConfiguration(emptyList()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+            if (defaultNetworkRoute) {
+                // Use Android's actual default route instead of requiring a
+                // separately enumerated interface for the Bluetooth proxy.
+                portAllocatorFlags = DISABLE_ADAPTER_ENUMERATION
+                enableIceGatheringOnAnyAddressPorts = true
+            }
         }
         connection = factory.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onSignalingChange(state: PeerConnection.SignalingState?) = Unit
@@ -190,12 +197,16 @@ class NativeLivePeer(
         }
         setDescription(offer, local = true)
         if (whileOpen { connection.iceGatheringState() } == PeerConnection.IceGatheringState.COMPLETE) completeOffer.gathered()
-        return completeOffer.await({
-            whileOpen { connection.localDescription.description }.also { sdp ->
+        return completeOffer.await(read = {
+            // Match the native browser's original-offer contract on this route.
+            // It is the fresh description applied to this same live peer, before
+            // local candidates/end-of-candidates were appended by gathering.
+            whileOpen { if (defaultNetworkRoute) offer.description else connection.localDescription.description }.also { sdp ->
                 val count = sdp.lineSequence().count { it.startsWith("a=candidate:") }
-                VoiceTrace.event(if (count == 0) VoiceTraceStage.OFFER_NO_CANDIDATE else VoiceTraceStage.OFFER_READY, count = count)
+                VoiceTrace.event(if (defaultNetworkRoute) VoiceTraceStage.DEFAULT_ROUTE_OFFER
+                    else if (count == 0) VoiceTraceStage.OFFER_NO_CANDIDATE else VoiceTraceStage.OFFER_READY, count = count)
             }
-        })
+        }, allowWithoutCandidates = defaultNetworkRoute)
     }
 
     override suspend fun answer(sdp: String) = setDescription(SessionDescription(SessionDescription.Type.ANSWER, sdp), false)
@@ -219,6 +230,9 @@ class NativeLivePeer(
     override fun mute(muted: Boolean) { ifOpen { microphone.setEnabled(!muted) } }
 
     companion object {
+        // libwebrtc p2p/base/port_allocator.h; the installed SDK exposes the
+        // portAllocatorFlags configuration through its native JNI binding.
+        private const val DISABLE_ADAPTER_ENUMERATION = 0x400
         /**
          * Starts WebRTC's Java network monitor at call start, before the first peer exists. A peer
          * created immediately can otherwise finish ICE gathering before WebRTC knows the watch's

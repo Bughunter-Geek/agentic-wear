@@ -6,6 +6,9 @@ import org.junit.Test
 
 class CompleteVoiceOfferTest {
     private val sdp = "v=0\r\na=candidate:host 1 udp 1 192.0.2.1 9000 typ host\r\n"
+    private val nativeSdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=ice-ufrag:test\r\n" +
+        "a=ice-pwd:test-password\r\na=fingerprint:sha-256 test-fingerprint\r\n"
     @Test fun readsOfferOnlyAfterGatheringCompletes() = runBlocking {
         val offer = CompleteVoiceOffer(); var read = false
         val result = async { offer.await({ read = true; sdp }) }
@@ -54,5 +57,30 @@ class CompleteVoiceOfferTest {
         failed.close()
         val next = CompleteVoiceOffer(); next.gathered()
         assertEquals(sdp, next.await({ sdp }))
+    }
+    @Test fun nativeDefaultRouteStillWaitsForThisPeersGathering() = runBlocking {
+        val offer = CompleteVoiceOffer(); var read = false
+        val result = async { offer.await({ read = true; nativeSdp }, allowWithoutCandidates = true) }
+        yield(); assertFalse(read)
+        offer.gathered(); assertEquals(nativeSdp, result.await()); assertTrue(read)
+    }
+    @Test fun candidateFreeNativeOfferRemainsRejectedForOrdinaryCalls() = runBlocking {
+        val offer = CompleteVoiceOffer(); offer.gathered()
+        try { offer.await({ nativeSdp }); fail() } catch (_: NoVoiceCandidateException) {}
+    }
+    @Test fun defaultRouteDoesNotAdmitMissingMediaOrTransportIdentity() = runBlocking {
+        for (prefix in listOf("v=0", "m=audio", "m=application", "a=ice-ufrag:", "a=ice-pwd:", "a=fingerprint:")) {
+            val offer = CompleteVoiceOffer(); offer.gathered()
+            val incomplete = nativeSdp.lineSequence().filterNot { it.startsWith(prefix) }.joinToString("\r\n")
+            try { offer.await({ incomplete }, allowWithoutCandidates = true); fail(prefix) }
+            catch (_: NoVoiceCandidateException) {}
+        }
+    }
+    @Test fun cancelledDefaultRouteCannotReadOrDispatchAnOffer() = runBlocking {
+        val offer = CompleteVoiceOffer(); var read = false
+        val result = async { offer.await({ read = true; nativeSdp }, allowWithoutCandidates = true) }
+        yield(); offer.close(); offer.gathered()
+        try { result.await(); fail() } catch (_: CancellationException) {}
+        assertFalse(read)
     }
 }

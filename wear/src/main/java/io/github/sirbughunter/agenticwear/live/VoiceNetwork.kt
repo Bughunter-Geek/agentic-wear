@@ -18,7 +18,7 @@ internal class VoiceNetwork(context: Context) {
     private var callback: ConnectivityManager.NetworkCallback? = null
 
     /** Returns a trace label for the network WebRTC can use; never throws for a missing network. */
-    suspend fun acquire(timeoutMs: Long = 8_000): String {
+    suspend fun acquire(timeoutMs: Long = 8_000, preferBluetoothDefaultRoute: Boolean = false): String {
         if (callback != null) return currentTransport()
         val available = CompletableDeferred<Network>()
         val request = NetworkRequest.Builder()
@@ -32,7 +32,14 @@ internal class VoiceNetwork(context: Context) {
         val accepted = runCatching { connectivity.requestNetwork(request, registered) }.isSuccess
         if (!accepted) return "${currentTransport()}_UNREQUESTED"
         callback = registered
-        val network = withTimeoutOrNull(timeoutMs) { available.await() } ?: return "${currentTransport()}_TIMEOUT"
+        // Still wake/prefer an available direct radio, including a saved phone
+        // hotspot. A verified Bluetooth Dot can then try the existing default
+        // route without spending the ordinary eight-second wake-up deadline.
+        // Keep the request registered for this call and release it normally.
+        val deadline = if (preferBluetoothDefaultRoute) minOf(timeoutMs, 1_000) else timeoutMs
+        val network = withTimeoutOrNull(deadline) { available.await() }
+        if (network == null) return if (preferBluetoothDefaultRoute && currentTransport() == "BLUETOOTH")
+            "BLUETOOTH" else "${currentTransport()}_TIMEOUT"
         return transport(connectivity.getNetworkCapabilities(network))
     }
 

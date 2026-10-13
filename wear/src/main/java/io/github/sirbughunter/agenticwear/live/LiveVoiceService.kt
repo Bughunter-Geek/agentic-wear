@@ -147,6 +147,7 @@ class LiveVoiceService : Service() {
     private fun startConnection(thread: String) {
         LiveSignaling.discardOldEvents()
         val capability = CompletableDeferred<JSONObject>()
+        val nativeDotCatalog = CompletableDeferred<Boolean>()
         val firstMediaConnection = CompletableDeferred<Unit>()
         val expectedCall = callId ?: return
         val gate = readiness
@@ -214,9 +215,16 @@ class LiveVoiceService : Service() {
             try {
                 // Give WebRTC's network monitor a head start; the first peer is created within ~0.1 s.
                 if (releaseNetworkMonitor == null) releaseNetworkMonitor = runCatching { NativeLivePeer.warmUpNetworkMonitor(this@LiveVoiceService) }.getOrNull()
-                // Wake a direct network while the capability check runs; WebRTC needs it for the offer.
-                VoiceTrace.event(VoiceTraceStage.NETWORK_REQUEST, (network ?: VoiceNetwork(this@LiveVoiceService).also { network = it }).currentTransport())
-                val networkReady = async { network!!.acquire() }
+                // Direct-network preparation remains parallel for Wi-Fi/LTE and
+                // local tasks. Only a Bluetooth Dot waits for its catalog before
+                // choosing the experimental default-route transport.
+                val initialTransport = (network ?: VoiceNetwork(this@LiveVoiceService).also { network = it }).currentTransport()
+                VoiceTrace.event(VoiceTraceStage.NETWORK_REQUEST, initialTransport)
+                val networkReady = async {
+                    val nativeBluetooth = initialTransport == "BLUETOOTH" && thread.startsWith("dot:") && nativeDotCatalog.await()
+                    network!!.acquire(preferBluetoothDefaultRoute = nativeBluetooth)
+                }
+                var defaultNetworkRoute = false
                 val createPeer = { NativeLivePeer(this@LiveVoiceService, { status ->
                     scope.launch {
                         if (ending || callId != expectedCall) return@launch
@@ -257,7 +265,8 @@ class LiveVoiceService : Service() {
                             catch (_: Exception) { /* The call lease bounds a lost transport-state update. */ }
                         }
                     }
-                } }, { caption -> scope.launch { if (!ending && callId == expectedCall) state.value = state.value.copy(caption = caption.take(2000)) } }
+                } }, { caption -> scope.launch { if (!ending && callId == expectedCall) state.value = state.value.copy(caption = caption.take(2000)) } },
+                    defaultNetworkRoute = defaultNetworkRoute,
                 ).also {
                     if (ending || callId != expectedCall) { it.close(); throw CancellationException("Previous voice call ended") }
                     peer = it; VoiceTrace.event(VoiceTraceStage.PEER_CREATED)
@@ -267,10 +276,12 @@ class LiveVoiceService : Service() {
                 // catch blocks below run (and a LinkageError would reach the uncaught-exception handler).
                 val offerJob = async(Dispatchers.Default) {
                     try {
-                        VoiceTrace.event(VoiceTraceStage.NETWORK_READY, networkReady.await())
+                        val transport = networkReady.await()
+                        defaultNetworkRoute = transport == "BLUETOOTH" && nativeDotCatalog.await()
+                        VoiceTrace.event(VoiceTraceStage.NETWORK_READY, transport)
                         VoiceTrace.event(VoiceTraceStage.OFFER_BEGIN)
                         Result.success(offerWithFreshPeers(createPeer,
-                            offer = { created -> withTimeout(15_000) { created.offerWithMuteState(state.value.muted) } },
+                            offer = { created -> withTimeout(15_000) { created.offerWithMuteState(gate.effectiveMute(state.value.muted)) } },
                             retrying = { attempt -> VoiceTrace.event(VoiceTraceStage.OFFER_RETRY, count = attempt); peer = null },
                         ).second)
                     } catch (timeout: TimeoutCancellationException) { Result.failure(timeout) }
@@ -294,6 +305,7 @@ class LiveVoiceService : Service() {
                             taskContext = listOf(text("cwd"), listOf(text("model"), text("effort")).filter { it.isNotBlank() }.joinToString(" · "))
                                 .filter { it.isNotBlank() }.joinToString("\n"))
                     }
+                    nativeDotCatalog.complete(catalog.optBoolean("nativeDot") && gate.requiresHostAcceptance)
                     defaultVoice
                 } catch (error: Throwable) { offerJob.cancel(); throw error }
                 val offer = offerJob.await().getOrThrow()

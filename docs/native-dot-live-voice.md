@@ -371,9 +371,58 @@ to improve a displayed number.
    measured response latency on the actual Pixel Watch 3. Until then, report the
    candidate as physically unverified.
 
-The existing native transport requires Watch Wi-Fi or cellular connectivity.
-Bluetooth phone-proxy voice and network handover require physical acceptance;
-text connectivity does not establish WebRTC media reachability. Keep the Mac's
+## Bluetooth default-route experiment
+
+On 2026-10-13 the user reported five failed outdoor starts through the phone's
+mobile data. Every trace identified Bluetooth, timed out acquiring direct
+Wi-Fi/cellular after eight seconds, and gathered zero candidates on all three
+fresh peers. No native Dot allocation was dispatched. A subsequent phone-hotspot
+call worked physically: Watch network type was Wi-Fi, creation response wait
+was 15.397 seconds, native input release occurred at browser 16.845 seconds,
+and Watch media connected at 18.121 seconds. Attachment returned HTTP 200 and
+the call ended normally from the Watch. The user said it worked right away;
+no exact physical stopwatch time or first-reply duration was supplied.
+
+Private candidate 98 tests the installed WebRTC SDK's default-route ports for
+Bluetooth native Dot calls. The signed catalog must identify `nativeDot` and
+require host readiness before this route is selected. Wi-Fi/LTE offer preparation
+and local tasks keep their existing route. Only eligible Bluetooth Dot calls
+allow a one-second direct-radio wake-up attempt, then use Bluetooth if no direct
+network arrives. They disable adapter enumeration with
+the SDK's `portAllocatorFlags` value 0x400, and enable wildcard-port gathering.
+No network-monitor, encryption, account or native-client activation policy is
+disabled. Source: `BasicPortAllocatorSession::GetNetworks`, `OnCandidateReady`
+and `PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION` in the public
+[WebRTC allocator](https://webrtc.googlesource.com/src/+/refs/heads/main/p2p/client/basic_port_allocator.cc)
+and [flag definitions](https://webrtc.googlesource.com/src/+/refs/heads/main/p2p/base/port_allocator.h);
+the installed SDK exposes both configuration fields through JNI.
+
+The candidate sends the fresh original offer from that same live peer, matching
+the native browser's `HSv`/`Up` contract. It still waits for this peer's gathering
+completion. Candidate-free offers require audio/data media sections, ICE
+credentials and a DTLS fingerprint. Ordinary routes retain the local-candidate
+requirement. `DEFAULT_ROUTE_OFFER` records only its stage and candidate count.
+An offer never grants readiness: actual connected media, the open data channel
+and the native client's input release still gate Watch microphone transmission.
+Cancellation and the existing finite startup/attachment deadlines remain active.
+
+All 333 Watch unit tests, signed minified release assembly and release lint
+passed. The release retains the production package, signer, ARM32/ARM64 and
+existing Firebase client configuration, with no new local-network permission.
+A separate silent emulator test using the same native SDK/configuration
+connected two real WebRTC peers and their data channels from a candidate-free
+offer, negotiated an audio SDP section and delivered data. It created no
+microphone source or account call. The emulator-only probe used local-network
+permission for its local peer pair; that permission is absent from the Watch
+release. This proves the native SDP/default-route configuration can negotiate;
+it does not establish phone Bluetooth throughput, real Watch microphone/speaker
+operation on that route, or an under-20-second physical result.
+
+Candidate 98 requires private pair-scoped delivery and physical testing with
+the phone hotspot off and the Watch using Bluetooth. Receiver 0.3.11 is unchanged.
+If that transport cannot carry the endpoint's packets, phone mediation or an
+appropriate relay would require a further implementation rather than more
+candidate retries. Network handover remains unverified. Keep the Mac's
 VPN on and leave split tunneling unchanged. A Mac media relay remains an option
 if direct media proves unsuitable.
 
