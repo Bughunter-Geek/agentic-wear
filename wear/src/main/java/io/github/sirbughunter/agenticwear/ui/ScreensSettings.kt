@@ -75,6 +75,7 @@ internal fun SettingsScreen(
     val preferences = remember { AppPreferences(context) }
     var colour by remember { mutableStateOf(LiveVoiceColour.fromLabel(preferences.liveVoiceColour)) }
     var dotAvatar by remember { mutableStateOf(DotAvatar.fromLabel(preferences.dotAvatar)) }
+    var dotCallVisual by remember { mutableStateOf(preferences.dotCallVisual) }
     Box(Modifier.fillMaxSize().background(Aw.Bg)) {
         AwScrollColumn(bottomPadding = 40.dp) {
             AwScreenTitle("Settings")
@@ -119,6 +120,10 @@ internal fun SettingsScreen(
                 dotAvatar = choice
                 preferences.dotAvatar = choice.label
             }
+            AwOption("Dot in calls", "Your Dot reacts to you and Lumen's voice", dotCallVisual != "Orb",
+                onClick = { dotCallVisual = "Avatar"; preferences.dotCallVisual = "Avatar" })
+            AwOption("Orb in calls", "The cloud orb instead", dotCallVisual == "Orb",
+                onClick = { dotCallVisual = "Orb"; preferences.dotCallVisual = "Orb" })
 
             AwRowCard(onClick = {}, enabled = false, minHeight = 46.dp) {
                 Icon(Icons.Rounded.Science, contentDescription = null, tint = Aw.Attention, modifier = Modifier.size(16.dp))
