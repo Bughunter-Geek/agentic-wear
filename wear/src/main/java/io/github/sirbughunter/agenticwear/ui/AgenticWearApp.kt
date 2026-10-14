@@ -120,7 +120,12 @@ fun AgenticWearApp(
                 android.content.pm.PackageManager.PERMISSION_GRANTED) viewModel.startVoiceLoop() else onPushToTalk()
         } else context.openLiveCall(autoConnect = !live.callActive())
     }
-    val orbPalette = remember(state.screen) { LiveVoiceColour.fromLabel(preferences.liveVoiceColour).orbPalette() }
+    // A selected Dot tints every orb in its own colour.
+    val selectedIsDot = state.selectedSession?.source == "dot" || state.selectedThreadId?.startsWith("dot:") == true
+    val orbPalette = remember(state.screen, selectedIsDot) {
+        if (selectedIsDot) DotAvatar.fromLabel(preferences.dotAvatar).orbPalette()
+        else LiveVoiceColour.fromLabel(preferences.liveVoiceColour).orbPalette()
+    }
 
     // A small UI back stack so Back returns to the list a chat or alert came from.
     val trail = rememberSaveable { mutableStateListOf<String>() }
@@ -521,9 +526,22 @@ private fun HomeScreen(
                 }
                 .semantics { contentDescription = if (callActive) "Return to live call" else "Talk live with ${session?.title ?: "Codex"}" },
         ) {
-            CloudOrb(
+            val context = LocalContext.current
+            val prefs = remember { AppPreferences(context) }
+            val homeMode = if (callActive) live.orbMode() else if (session?.status == SessionStatus.ACTIVE) OrbMode.Thinking else OrbMode.Idle
+            val isDot = session?.source == "dot" || session?.id?.startsWith("dot:") == true
+            // The selected Dot sits on the first page itself; the orb is for other chats (or by choice).
+            if (isDot && prefs.dotCallVisual != "Orb") {
+                DotFigure(
+                    DotAvatar.fromLabel(prefs.dotAvatar),
+                    homeMode.toDotMood(),
+                    Modifier.fillMaxSize(.86f).align(Alignment.Center),
+                    userLevel = if (callActive && !live.muted) live.inputLevel else 0f,
+                    agentLevel = if (callActive) live.outputLevel else 0f,
+                )
+            } else CloudOrb(
                 palette = palette,
-                mode = if (callActive) live.orbMode() else if (session?.status == SessionStatus.ACTIVE) OrbMode.Thinking else OrbMode.Idle,
+                mode = homeMode,
                 userLevel = if (callActive && !live.muted) live.inputLevel else 0f,
                 agentLevel = if (callActive) live.outputLevel else 0f,
                 modifier = Modifier.fillMaxSize(),
