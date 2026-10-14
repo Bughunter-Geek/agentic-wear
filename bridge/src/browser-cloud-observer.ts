@@ -12,6 +12,7 @@ export const browserObservationSchema = z.object({
   effort:z.object({label:z.string().min(1).max(64),index:z.number().int().min(0).max(9).optional(),max:z.number().int().min(0).max(9).optional()}).strict().optional(),
   models:z.array(z.string().min(1).max(128)).max(24).optional(), efforts:z.array(z.string().max(64)).max(10).optional(),
   inputReady:z.boolean().optional(),
+  generationActive:z.boolean().optional(),
   nativeVoice:z.boolean().optional(),
   visibility:z.enum(["visible","hidden"]),blocked:z.boolean(),
   turns:z.array(z.object({id:turnId,reply:z.string().max(4000),role:z.enum(["user","assistant"]).optional(), prompts:z.array(z.object({id:turnId,text:z.string().max(4000)}).strict()).max(10).optional(),completed:z.boolean(),
@@ -54,7 +55,10 @@ export class BrowserCloudObserver {
     if(value.blocked){this.pending.clear();this.known.clear();this.documentId="";this.snapshot({threadId:this.target.threadId,title:this.target.title,status:"notLoaded",messages:[]},value.observedAt);return {baseline:true,turns:0,completed:0,pending:0};}
     // Empty initial/loading pages cannot establish a history baseline. A new
     // document always baselines history and never replays old completion alerts.
-    if(!value.turns.length){this.documentId="";return {baseline:true,turns:0,completed:0,pending:0};}
+    if(!value.turns.length){
+      if(!this.target.dotNamespace && value.generationActive!==undefined)
+        this.snapshot({threadId:this.target.threadId,title:this.target.title,status:value.generationActive?"active":"idle",inputReady:Boolean(this.target.sendEnabled&&value.inputReady),...cloudModelFields(value),messages:[]},value.observedAt);
+      this.documentId="";return {baseline:true,turns:0,completed:0,pending:0};}
     let completed=0;
     const parents=new Map<string,string>();
     let latestUser:string|undefined;
@@ -80,7 +84,11 @@ export class BrowserCloudObserver {
     if(this.known.size>256)this.known=new Set([...this.known].slice(-128));
     // Final text is sent with its actual stable cloud turn ID. UI observation
     // timestamps are never represented as native/server completion timestamps.
-    this.snapshot({threadId:this.target.threadId,title:this.target.title,status:this.pending.size?"active":"idle",
+    // Pending history is receipt/completion evidence, not proof of ongoing generation.
+    // Legacy receivers with a ready composer also prove that generation has ended.
+    const working=this.target.dotNamespace ? this.pending.size>0 :
+      value.generationActive ?? (value.inputReady===true ? false : this.pending.size>0);
+    this.snapshot({threadId:this.target.threadId,title:this.target.title,status:working?"active":"idle",
       inputReady:Boolean(this.target.sendEnabled && value.inputReady),
       ...(this.target.dotNamespace && value.nativeVoice !== undefined ? { nativeVoice: value.nativeVoice === true } : {}),
       ...(this.target.dotNamespace?{}:cloudModelFields(value)),

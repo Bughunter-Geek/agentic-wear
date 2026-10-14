@@ -394,6 +394,7 @@ private fun VoiceLoopScreen(
                 CloudOrb(
                     palette = palette,
                     mode = when (phase) {
+                        VoiceLoopPhase.STARTING -> OrbMode.Connecting
                         VoiceLoopPhase.LISTENING -> OrbMode.Listening
                         VoiceLoopPhase.SPEAKING -> OrbMode.Speaking
                         VoiceLoopPhase.IDLE -> OrbMode.Idle
@@ -405,7 +406,10 @@ private fun VoiceLoopScreen(
                 )
             }
             Spacer(Modifier.height(8.dp))
-            Text(
+            if (phase == VoiceLoopPhase.STARTING) {
+                ShimmerText(voiceLoopLabel(phase), fontSize = 12.sp,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            } else Text(
                 voiceLoopLabel(phase),
                 style = AwType.Label,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },

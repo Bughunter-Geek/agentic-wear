@@ -23,7 +23,15 @@
     clone.querySelectorAll('.turn-action-controls,.message-inline-actions,[data-markdown-copy="exclude"],button,script,style,svg,[role=tooltip],[aria-hidden=true],[class*=sr-only]').forEach(n=>n.remove());
     return (clone.innerText||clone.textContent||'').trim().slice(0,4000);
   };
-  const stopped=()=>[...document.querySelectorAll('button')].some(b=>/^Stop(?: generating| response)?$/.test(label(b)));
+  const stopped=()=>[...document.querySelectorAll('button')].some(b=>{
+    if(!/^Stop(?: generating| response)?$/.test(label(b))||b.disabled||b.getAttribute('aria-disabled')==='true')return false;
+    for(let n=b;n;n=n.parentElement){
+      if(n.hidden||n.getAttribute('aria-hidden')==='true')return false;
+      const style=window.getComputedStyle(n);
+      if(style.display==='none'||style.visibility==='hidden'||style.opacity==='0')return false;
+    }
+    return true;
+  });
   const editor=()=>{
     const matches=[...document.querySelectorAll(isDot?'main .ProseMirror[contenteditable=true][aria-label="Message"]':'main .ProseMirror[contenteditable=true][data-codex-composer=true]')];
     return matches.length===1?matches[0]:null;
@@ -347,6 +355,7 @@
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
       ...(isDot?{identity:NAMESPACE,nativeVoice:Boolean(nativeVoice?.available())}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
+    if(!isDot)model.generationActive=stopped();
     const encoded=JSON.stringify(model),now=Date.now();
     if(encoded===last&&now-lastSent<3000)return;
     last=encoded;lastSent=now;
