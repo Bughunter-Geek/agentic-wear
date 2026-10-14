@@ -6,9 +6,9 @@ Updated October 14, 2026.
 
 ## What you can install today
 
-The newest published alpha checked October 14 is [0.6.29](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.29-alpha), Watch build 110. Its release notes report local checks and pending physical-watch acceptance. Use its [source/setup reference](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.29-alpha/README.md) together with the [receiver privacy and update instructions](../README.md#dot-receiver-setup-and-existing-user-privacy-update).
+The newest published alpha checked October 14 is [0.6.30](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.30-alpha), Watch build 111. Its release notes report local checks and pending physical-watch acceptance. Use its [source/setup reference](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/README.md) together with the [receiver privacy and update instructions](../README.md#dot-receiver-setup-and-existing-user-privacy-update).
 
-The browser receiver is a separate component from the Watch APK. The privacy-corrected public receiver is **0.3.5.1** in the replaced ZIP on release **0.6.26**; the receiver archives on releases **0.6.27–0.6.29** and the 0.6.29 source tag still retain the original default. Existing 0.3.14 installations use an in-place **0.3.14.1** maintenance patch, not a separate public download. After that patch is applied, end calls, reload the existing extension and select your own Dot. Updating this page does not install components or change the automatic updater.
+The browser receiver is a separate component from the Watch APK. The privacy-corrected public receiver is **0.3.5.1** in the replaced ZIP on release **0.6.26**; the receiver archives on releases **0.6.27–0.6.30** and the 0.6.30 source tag still retain the original default. Existing 0.3.14 installations use an in-place **0.3.14.1** maintenance patch, not a separate public download. After that patch is applied, end calls, reload the existing extension and select your own Dot. Updating this page does not install components or change the automatic updater.
 
 ## What is working in development
 
