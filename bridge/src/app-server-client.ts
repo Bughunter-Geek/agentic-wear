@@ -459,7 +459,7 @@ export class AppServerClient {
 
   private async initialize(): Promise<void> {
     const initialized = initializeResponseSchema.parse(await this.request("initialize", {
-      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.6.8" },
+      clientInfo: { name: "agentic_wear", title: "Agentic Wear", version: "0.3.15" },
       capabilities: {
         // The fallback completion monitor intentionally uses
         // `thread/turns/list`, which is negotiated behind this capability.

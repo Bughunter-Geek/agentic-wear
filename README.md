@@ -6,7 +6,7 @@ Speak to Codex, follow a session, and receive completion or permission alerts fr
 
 The newest published Watch Alpha is [0.6.35, build 116](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.35-alpha). Private build 117 adds receiver-aware voice setup guidance for the existing tester. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device and network acceptance remains incomplete.
 
-This source correction is a review candidate based on v0.6.35. Its corrected receiver version is **0.3.5.3**. It has not been published as an installer or receiver ZIP. Use the reviewed clean source revision supplied with a tester handoff; do not build or package receivers from older source tags. Historical tags are unchanged and may retain the maintainer-specific Dot default.
+This source correction is a review candidate based on v0.6.35. Its corrected receiver version is **0.3.15**. It has not been published as an installer or receiver ZIP. Use the reviewed clean source revision supplied with a tester handoff; do not build or package receivers from older source tags. Historical tags are unchanged and may retain the maintainer-specific Dot default.
 
 The separately corrected [receiver ZIP on v0.6.30](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.30-alpha/agentic-cloud-receiver-0.3.5.zip) internally reports **0.3.5.1** despite its original filename. It is not a replacement for a newer working installation or a complete matching Mac companion for current cloud voice.
 

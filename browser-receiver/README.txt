@@ -1,4 +1,4 @@
-Agentic Wear Cloud Receiver 0.3.5.3 — review candidate
+Agentic Wear Cloud Receiver 0.3.15 — review candidate
 
 Also called Relay. Older public packages display Agentic Cloud Receiver.
 This candidate is not a published receiver ZIP. Use only a matching reviewed
