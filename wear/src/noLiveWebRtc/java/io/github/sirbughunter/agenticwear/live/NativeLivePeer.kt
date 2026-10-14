@@ -4,7 +4,9 @@ import android.content.Context
 
 class NativeLivePeer(context: Context, onState: (String) -> Unit, onCaption: (String) -> Unit,
     onTransport: (String, String, String) -> Unit = { _, _, _ -> }, onFullCaption: (String) -> Unit = {},
-    defaultNetworkRoute: Boolean = false) : LivePeer {
+    defaultNetworkRoute: Boolean = false, prepareSilently: Boolean = false) : LivePeer {
+    fun activateAudio(muted: Boolean) = Unit
+    fun bind(state: (String) -> Unit, caption: (String) -> Unit, transport: (String, String, String) -> Unit, fullCaption: (String) -> Unit) = Unit
     override suspend fun offer(): String = error("This build has no WebRTC runtime. Install the private live voice build after download approval.")
     override suspend fun answer(sdp: String) = Unit
     override fun mute(muted: Boolean) = Unit

@@ -71,7 +71,7 @@
       }
     } finally {
       owner = null;
-      clearInterval(call.timer); clearTimeout(call.startup);
+      clearInterval(call.timer); clearTimeout(call.startup); call.releaseActivation?.();
       call.timing?.close();
       call.remote?.close();
       for (const track of call.clones) track.stop();
@@ -109,7 +109,7 @@
       // connected. Match only this owned native watchdog; retain a finite
       // deadline and the Watch's existing 30 s startup/cancellation contract.
       if (call?.peer && !call.ended && !call.active && delay === 20000 && typeof callback === 'function' &&
-          Function.prototype.toString.call(callback).includes('Your dot’s voice connection timed out')) delay = 30000;
+          Function.prototype.toString.call(callback).includes('Your dot’s voice connection timed out')) delay = call.preparing ? 75000 : 30000;
       return nativeTimeout.call(this, callback, delay, ...args);
     };
     // The native client's local input graph is unused for delegated media.
@@ -215,6 +215,8 @@
         if (call && phase === 'create') call.allocationMode = prepared.allocationMode || 'unchanged';
         const fetchOnce = async (values, allocationMode) => {
           const timingRequest = requestUrl ? call?.timing?.request(requestUrl, phase, allocationMode) : null;
+          if (call?.preparing && phase === 'attach') await call.activation;
+          if (call?.ended && phase === 'attach') throw new DOMException('Preparation ended before attachment', 'AbortError');
           const pending = originalFetch.apply(this, values);
           const input = values[0], request = typeof window.Request === 'function' && input instanceof window.Request;
           if (owner === call && phase === 'attach' && (values[1]?.method || (request ? input.method : 'GET')).toUpperCase() === 'POST') {
@@ -251,9 +253,10 @@
       emit({ state: 'available', available }); return;
     }
     if (!command || !/^[A-Za-z0-9_.:-]{1,128}$/.test(command.callId || '')) return;
-    if (command.action === 'start') {
+    if (command.action === 'start' || command.action === 'prepare') {
       const refused = !available ? 'runtime-unavailable'
         : !supportedUrl(location.href) || (command.url !== undefined && command.url !== location.href) ? 'page-changed'
+        : command.action === 'prepare' && location.href !== 'https://chatgpt.com/dots/home' ? 'preparation-target-invalid'
         : owner ? 'owned-call-present'
         : [...peers].some(peer => peer.connectionState !== 'closed') ? 'browser-peer-present'
         : typeof command.sdp !== 'string' || !command.sdp.startsWith('v=0') || !command.sdp.includes('m=audio') || command.sdp.length > 65536 ? 'offer-invalid'
@@ -265,26 +268,34 @@
       }
       const context = new Context({ sampleRate: 48000 });
       const call = { id: command.callId, url: location.href, isDot: location.href === 'https://chatgpt.com/dots/home', sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
-        clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, attachStarted: false,
+        clones: [], preparing: command.action === 'prepare', lastPing: Date.now(), seq: 0, connected: false, attached: false, attachStarted: false,
         nativeReleased: false, active: false, ended: false, nativeStarted: false };
+      call.activation = new Promise(resolve => { call.releaseActivation = resolve; });
       owner = call;
       call.timing = window.AgenticWearVoiceTiming?.create({ current: () => owner === call,
         record: httpTiming => event(call, 'timing', { httpTiming }) });
       if (document.body) {
         const banner = document.createElement('div'); banner.setAttribute('role', 'status');
-        banner.textContent = 'Agentic Wear · Watch microphone and speaker · Mute on the Watch';
+        banner.textContent = call.preparing ? 'Agentic Wear · Preparing Watch connection · Audio inactive · Hang up to cancel' : 'Agentic Wear · Watch microphone and speaker · Mute on the Watch';
         Object.assign(banner.style, { position: 'fixed', bottom: '8px', left: '8px', zIndex: '2147483647', background: '#234537', color: '#fff', padding: '8px 12px', borderRadius: '10px', font: '13px system-ui', pointerEvents: 'none' });
         document.body.append(banner); call.banner = banner;
       }
-      call.timer = setInterval(() => { if (location.href !== call.url || Date.now() - call.lastPing > 45000) stop(call); }, 1000);
-      call.startup = setTimeout(() => { if (owner === call && (!call.active || !call.attached)) { event(call, 'failed'); stop(call); } }, 30000);
+      call.timer = setInterval(() => { if (location.href !== call.url || (call.preparing ? Date.now() >= command.expiresAt : Date.now() - call.lastPing > 45000)) stop(call); }, 1000);
+      const startup = () => { if (owner === call && (!call.active || !call.attached)) { event(call, 'failed'); stop(call); } };
+      call.startupCheck = startup;
+      if (!call.preparing) call.startup = setTimeout(startup, 30000);
       event(call, 'accepted');
     } else if (owner?.id === command.callId) {
       const call = owner;
       if (command.action === 'transport' && command.transport?.seq > call.seq) {
         call.seq = command.transport.seq; call.remote?.update(command.transport); active(call);
       }
-      if (command.action === 'heartbeat') call.lastPing = Date.now();
+      if (command.action === 'activate' && call.preparing && Date.now() < call.lastPing + 45000) {
+        call.preparing = false; call.lastPing = Date.now();
+        if (call.banner) call.banner.textContent = 'Agentic Wear · Watch microphone and speaker · Mute on the Watch';
+        call.startup = setTimeout(call.startupCheck, 30000); call.releaseActivation();
+      }
+      if (command.action === 'heartbeat' && !call.preparing) call.lastPing = Date.now();
       if (command.action === 'control') call.nativeStarted = true;
       if (command.action === 'stop') stop(call);
     }

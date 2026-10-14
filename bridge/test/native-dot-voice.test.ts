@@ -15,6 +15,26 @@ function fixture() {
   return { voice, commands, delivered, timing, advance(ms: number) { now += ms; }, disconnect() { connected = false; } };
 }
 describe("native Dot media delegation", () => {
+  it("prepares only the configured Dot and preserves a fixed lease until explicit activation", async () => {
+    const f = fixture();
+    f.voice.start("warm", "dot", sdp, true);
+    expect(f.commands[0]?.action).toBe("prepare");
+    await f.voice.event({ callId: "warm", threadId: "dot", state: "accepted" });
+    await f.voice.event({ callId: "warm", threadId: "dot", state: "answer", sdp });
+    await f.voice.event({ callId: "warm", threadId: "dot", state: "active" });
+    expect(f.delivered.map(value => value.kind)).toEqual(["live.answer"]);
+    expect(() => f.voice.heartbeat("warm")).toThrow("fixed expiry");
+    expect(() => f.voice.activate("foreign")).toThrow();
+    f.voice.activate("warm");
+    expect(f.commands.at(-1)?.action).toBe("activate");
+    await f.voice.event({ callId: "warm", threadId: "dot", state: "active" });
+    expect(f.delivered.at(-1)?.kind).toBe("live.ready");
+    await f.voice.stop("warm");
+    expect(() => f.voice.start("foreign", "other", sdp, true)).toThrow();
+    f.voice.start("expired", "dot", sdp, true); f.advance(45000);
+    expect(() => f.voice.activate("expired")).toThrow();
+    await f.voice.expire(); expect(f.voice.active).toBe(false);
+  });
   it("dispatches start without waiting for the peer messages needed to connect", async () => {
     const f = fixture(); f.voice.start("first", "dot", sdp);
     expect(f.commands[0]?.action).toBe("start");

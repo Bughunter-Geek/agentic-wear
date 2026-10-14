@@ -238,6 +238,9 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         updateForeground = true
         foregroundStartedAtMillis = System.currentTimeMillis()
         if (_state.value.demo) return
+        if (_state.value.screen in setOf(WearScreen.HOME, WearScreen.CHAT) && repository.isPaired) {
+            preferences.selectedThreadId?.let { io.github.sirbughunter.agenticwear.live.DotVoicePreparation.open(getApplication(), it) }
+        }
         if (repository.isPaired) refreshInbox()
         silentUpdateRetryAvailable = true
         if (updateManager.enabled && io.github.sirbughunter.agenticwear.update.UpdateCheckPolicy.shouldCheckOnForeground(
@@ -290,6 +293,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun selectSession(threadId: String) {
+        io.github.sirbughunter.agenticwear.live.DotVoicePreparation.cancel()
         preferences.selectedThreadId = threadId
         preferences.chatSnapshot = null
         reload(WearScreen.HOME)
@@ -549,6 +553,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
             _state.update { it.copy(error = "End live voice before starting dictation. Your draft is retained.") }
             return
         }
+        io.github.sirbughunter.agenticwear.live.DotVoicePreparation.cancel()
         cancelTranscriptionTimerJob()
         repository.clearRetryRecording()
         if (_state.value.transcriptionEngine.usesBridge) {
@@ -680,6 +685,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun onActivityStopped() {
+        io.github.sirbughunter.agenticwear.live.DotVoicePreparation.backgrounded()
         updateForeground = false
         stopVoiceLoop()
         speaker?.stop()

@@ -11,11 +11,12 @@ import org.json.JSONObject
 /** Native equivalent of Codex's RTCPeerConnection + microphone + oai-events channel. */
 class NativeLivePeer(
     context: Context,
-    private val onState: (String) -> Unit,
-    private val onCaption: (String) -> Unit,
-    private val onTransport: (String, String, String) -> Unit = { _, _, _ -> },
-    private val onFullCaption: (String) -> Unit = {},
+    @Volatile private var onState: (String) -> Unit,
+    @Volatile private var onCaption: (String) -> Unit,
+    @Volatile private var onTransport: (String, String, String) -> Unit = { _, _, _ -> },
+    @Volatile private var onFullCaption: (String) -> Unit = {},
     private val defaultNetworkRoute: Boolean = false,
+    private val prepareSilently: Boolean = false,
 ) : LivePeer {
     @Volatile private var closed = false
     /**
@@ -30,6 +31,7 @@ class NativeLivePeer(
     private lateinit var factory: PeerConnectionFactory
     private lateinit var source: AudioSource
     private lateinit var microphone: AudioTrack
+    private var preparedSender: RtpSender? = null
     private lateinit var connection: PeerConnection
     private lateinit var events: DataChannel
     @Volatile private var peerState = "new"
@@ -46,8 +48,7 @@ class NativeLivePeer(
             .setUseHardwareNoiseSuppressor(true)
             .createAudioDeviceModule()
         factory = PeerConnectionFactory.builder().setAudioDeviceModule(audioDevice).createPeerConnectionFactory()
-        source = factory.createAudioSource(MediaConstraints())
-        microphone = factory.createAudioTrack("watch-microphone", source)
+        if (!prepareSilently) createMicrophone()
         val config = PeerConnection.RTCConfiguration(emptyList()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             if (defaultNetworkRoute) {
@@ -94,7 +95,11 @@ class NativeLivePeer(
             override fun onRenegotiationNeeded() = Unit
             override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) = Unit
         }) ?: error("Could not create WebRTC audio transport")
-        connection.addTrack(microphone, listOf("watch-voice"))
+        if (prepareSilently) {
+            connection.setAudioRecording(false); connection.setAudioPlayout(false)
+            preparedSender = connection.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
+                RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV, listOf("watch-voice"))).sender
+        } else connection.addTrack(microphone, listOf("watch-voice"))
         events = connection.createDataChannel("oai-events", DataChannel.Init())
         events.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(previous: Long) = Unit
@@ -227,7 +232,26 @@ class NativeLivePeer(
         }
     }
 
-    override fun mute(muted: Boolean) { ifOpen { microphone.setEnabled(!muted) } }
+    private fun createMicrophone() {
+        source = factory.createAudioSource(MediaConstraints())
+        microphone = factory.createAudioTrack("watch-microphone", source)
+    }
+
+    /** Called only after explicit Call, with the microphone foreground service active. */
+    fun activateAudio(muted: Boolean) = whileOpen {
+        if (!::microphone.isInitialized) {
+            createMicrophone(); microphone.setEnabled(!muted)
+            check(preparedSender?.setTrack(microphone, false) == true) { "Could not attach the Watch microphone" }
+        }
+        microphone.setEnabled(!muted)
+        connection.setAudioRecording(true); connection.setAudioPlayout(true)
+    }
+    fun bind(state: (String) -> Unit, caption: (String) -> Unit, transport: (String, String, String) -> Unit, fullCaption: (String) -> Unit) {
+        onState = state; onCaption = caption; onTransport = transport; onFullCaption = fullCaption
+        transportChanged()
+        if (peerState in setOf("connected", "failed", "disconnected")) onState(peerState)
+    }
+    override fun mute(muted: Boolean) { ifOpen { if (::microphone.isInitialized) microphone.setEnabled(!muted) } }
 
     companion object {
         // libwebrtc p2p/base/port_allocator.h; the installed SDK exposes the

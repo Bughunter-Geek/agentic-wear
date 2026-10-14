@@ -84,7 +84,7 @@ class LiveSignaling(context: Context) {
             val storage = taskRequests(context)
             if (payload.optString("kind") == "live.taskCreated" && payload.optString("requestId") == storage.getString("request", null))
                 storage.edit().putString("result", payload.toString()).commit()
-            events.trySend(payload)
+            if (!DotVoicePreparation.receive(payload)) events.trySend(payload)
         }
         fun discardOldEvents() { while (events.tryReceive().isSuccess) Unit }
     }

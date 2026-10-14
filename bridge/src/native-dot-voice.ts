@@ -7,7 +7,7 @@ export interface NativeDotConnection {
   nativeVoiceTarget?(threadId: string): { title: string } | null;
   voiceCommand(command: NativeVoiceCommand): void;
 }
-type Call = { id: string; threadId: string; dot: boolean; startedAt: number; expiresAt: number; accepted: boolean; answer: boolean; active: boolean; transportSeq: number };
+type Call = { id: string; threadId: string; dot: boolean; startedAt: number; expiresAt: number; accepted: boolean; answer: boolean; active: boolean; transportSeq: number; preparing: boolean };
 type EndReason = "watch" | "native" | "receiver-lost" | "expired" | "bridge-stop";
 type TimingLog = (fields: { callId: string; stage: string; at: number; sinceStartMs: number;
   browserElapsedMs?: number; setupTiming?: NativeVoiceEvent["setupTiming"]; httpTiming?: NativeVoiceEvent["httpTiming"];
@@ -25,9 +25,10 @@ export class NativeDotVoice {
     const dot = this.browser.configuredDot(threadId);
     const target = dot ?? this.browser.nativeVoiceTarget?.(threadId);
     return { realtimeApiAvailable: Boolean(target && this.browser.nativeVoiceAvailable(threadId)), requiresHostReady: true,
-      nativeDot: Boolean(dot), nativeBrowserVoice: true, voices: { defaultV1: dot ? "dot" : "cloud" }, task: { id: threadId, title: target?.title ?? "Cloud chat", cwd: "", model: null, effort: null } };
+      nativeDot: Boolean(dot), nativeBrowserVoice: true, nativeDotPreparation: Boolean(dot), voices: { defaultV1: dot ? "dot" : "cloud" }, task: { id: threadId, title: target?.title ?? "Cloud chat", cwd: "", model: null, effort: null } };
   }
-  start(callId: string, threadId: string, sdp: string): void {
+  start(callId: string, threadId: string, sdp: string, preparing = false): void {
+    if (preparing && !this.browser.configuredDot(threadId)) throw new Error("Advance preparation is available only for the selected Dot");
     if (this.call) {
       if (this.call.id === callId && this.call.threadId === threadId) return;
       throw new Error("Another live voice call is active. End it before reconnecting.");
@@ -35,12 +36,19 @@ export class NativeDotVoice {
     if (!(this.browser.configuredDot(threadId) ?? this.browser.nativeVoiceTarget?.(threadId)) || !this.browser.nativeVoiceAvailable(threadId))
       throw new Error(this.browser.configuredDot(threadId) ? "Open Lumen in Chrome with the current Watch receiver before connecting native voice." : "Open this cloud chat in Chrome with the current Watch receiver before connecting native voice.");
     if (!sdp.startsWith("v=0") || !sdp.includes("m=audio") || sdp.length > 65_536) throw new Error("A valid WebRTC audio offer is required");
-    const call: Call = { id: callId, threadId, dot: Boolean(this.browser.configuredDot(threadId)), startedAt: this.now(), expiresAt: this.now() + 45_000, accepted: false, answer: false, active: false, transportSeq: 0 };
+    const call: Call = { id: callId, threadId, dot: Boolean(this.browser.configuredDot(threadId)), startedAt: this.now(), expiresAt: this.now() + 45_000, accepted: false, answer: false, active: false, transportSeq: 0, preparing };
     this.call = call;
-    try { this.command(call, { action: "start", sdp }); this.timing(call, "start.dispatched"); }
+    try { this.command(call, { action: preparing ? "prepare" : "start", sdp }); this.timing(call, preparing ? "prepare.dispatched" : "start.dispatched"); }
     catch (error) { if (this.call === call) this.call = null; throw error; }
     // Do not await media here: Watch peer-state messages must remain dispatchable
     // while the native client creates and attaches its authenticated call.
+  }
+  activate(callId: string): void {
+    const call = this.call;
+    if (!call || call.id !== callId || !call.preparing || this.now() >= call.expiresAt) throw new Error("Preparation expired. Reconnect explicitly.");
+    this.command(call, { action: "activate" });
+    call.preparing = false; call.expiresAt = this.now() + 45_000;
+    this.timing(call, "prepare.activated");
   }
   transport(callId: string, transport: VoiceTransportState): void {
     const call = this.call;
@@ -51,6 +59,7 @@ export class NativeDotVoice {
   heartbeat(callId: string): void {
     const call = this.call;
     if (!call || call.id !== callId) throw new Error("This call has ended. Reconnect explicitly.");
+    if (call.preparing) throw new Error("Preparation has a fixed expiry");
     call.expiresAt = this.now() + 45_000;
     this.command(call, { action: "heartbeat" });
   }
@@ -76,7 +85,7 @@ export class NativeDotVoice {
       this.timing(call, "browser.answer", value);
       await this.deliver({ version: 1, kind: "live.answer", callId: call.id, sdp: value.sdp });
       this.timing(call, "relay.answer.accepted");
-    } else if (value.state === "active" && call.accepted && call.answer && !call.active) {
+    } else if (value.state === "active" && call.accepted && call.answer && !call.active && !call.preparing) {
       call.active = true;
       this.timing(call, "browser.active", value);
       await this.deliver({ version: 1, kind: "live.ready", callId: call.id });
@@ -104,7 +113,7 @@ export class NativeDotVoice {
       ...(event?.statusCode !== undefined ? { statusCode: event.statusCode } : {}) });
   }
 
-  private command(call: Call, fields: { action: "start"; sdp: string } | { action: "transport"; transport: VoiceTransportState } | { action: "heartbeat" | "stop" }): void {
+  private command(call: Call, fields: { action: "start" | "prepare"; sdp: string } | { action: "transport"; transport: VoiceTransportState } | { action: "heartbeat" | "stop" | "activate" }): void {
     this.browser.voiceCommand({ version: 1, kind: "native-voice", callId: call.id, threadId: call.threadId,
       expiresAt: this.now() + 45_000, ...fields });
   }

@@ -41,7 +41,7 @@ async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgp
   const response = { ok: true, status: 200, privateBody: 'PRIVATE_RESPONSE' };
   const window = { RTCPeerConnection: Peer, AudioContext: Context, AudioWorkletNode: Worklet, Request, PerformanceObserver: Observer, performance: { now: () => now },
     setTimeout(callback, delay, ...args) { const timer = { callback, delay, args, due: now + delay, cleared: false }; timers.push(timer); return timer; },
-    clearTimeout(timer) { timer.cleared = true; },
+    clearTimeout(timer) { if (timer) timer.cleared = true; },
     addEventListener(name, handler) { handlers.set(name, handler); }, postMessage(message) { events.push(message.event); },
     async fetch(...args) { fetches++; requests.push(args); const next = responses.shift();
       if (next instanceof Error) throw next;
@@ -923,4 +923,41 @@ test('the installed hook supports a later cloud navigation while refusing an off
  const applied=peer.setRemoteDescription({type:'answer',sdp:offer});
  f.command({action:'transport',callId:'cloud',transport:{seq:1,peerState:'connected',iceState:'connected',channelState:'open'}});await applied;input.port.postMessage({type:'release'});
  assert.equal(f.events.filter(e=>e.state==='active').length,1);f.command({action:'stop',callId:'cloud'});
+});
+
+test('advance preparation allocates natively but holds attachment and readiness until explicit activation', async () => {
+  const f = await fixture();
+  f.command({ action: 'prepare', callId: 'owned', sdp: offer, expiresAt: Date.now() + 45000 });
+  const input = await nativeInput(f);
+  assert.equal(f.microphoneRequests(), 0);
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.command({ action: 'transport', callId: 'owned', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  await applied;
+  input.port.postMessage({ type: 'release' });
+  let settled = false;
+  const pending = f.window.fetch('/backend-api/tbo/PRIVATE_OWNER/voice/calls/PRIVATE_CALL/attach', { method: 'POST' }).then(value => { settled = true; return value; });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.fetches(), 0); assert.equal(settled, false);
+  assert.equal(f.events.some(event => event.state === 'active'), false);
+  f.command({ action: 'activate', callId: 'foreign' });
+  await Promise.resolve(); assert.equal(f.fetches(), 0);
+  f.command({ action: 'activate', callId: 'owned' });
+  assert.equal(await pending, f.response);
+  assert.equal(f.fetches(), 1);
+  assert.equal(f.events.filter(event => event.state === 'active').length, 1);
+});
+
+test('cancelling preparation releases the native wait without ever dispatching attach or affecting a new call', async () => {
+  const f = await fixture();
+  f.command({ action: 'prepare', callId: 'old', sdp: offer, expiresAt: Date.now() + 45000 });
+  const pending = f.window.fetch('/backend-api/tbo/PRIVATE_OWNER/voice/calls/PRIVATE_CALL/attach', { method: 'POST' });
+  await Promise.resolve(); await Promise.resolve();
+  f.command({ action: 'stop', callId: 'old' });
+  await assert.rejects(pending, { name: 'AbortError' }); assert.equal(f.fetches(), 0);
+  f.command({ action: 'start', callId: 'new', sdp: offer, expiresAt: Date.now() + 45000 });
+  f.command({ action: 'activate', callId: 'old' });
+  assert.equal(f.events.filter(event => event.callId === 'new' && event.state === 'closed').length, 0);
+  assert.ok(f.tracks.slice(0, 1).every(track => track.stopped));
 });

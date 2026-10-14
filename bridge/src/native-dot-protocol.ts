@@ -12,6 +12,8 @@ export type VoiceTransportState = z.infer<typeof voiceTransportSchema>;
 const base = { version: z.literal(1), kind: z.literal("native-voice"), callId: id, threadId: id, expiresAt: time };
 export const nativeVoiceCommandSchema = z.discriminatedUnion("action", [
   z.object({ ...base, action: z.literal("start"), sdp: z.string().min(10).max(65_536) }).strict(),
+  z.object({ ...base, action: z.literal("prepare"), sdp: z.string().min(10).max(65_536) }).strict(),
+  z.object({ ...base, action: z.literal("activate") }).strict(),
   z.object({ ...base, action: z.literal("transport"), transport: voiceTransportSchema }).strict(),
   z.object({ ...base, action: z.literal("heartbeat") }).strict(),
   z.object({ ...base, action: z.literal("stop") }).strict(),

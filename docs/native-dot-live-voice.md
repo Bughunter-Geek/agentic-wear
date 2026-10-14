@@ -533,3 +533,28 @@ User reported no calling sound on build 103 in either sound mode. Replace `ToneG
 ### Private Watch build 105: immediate calling audio
 
 Start local Dot calling feedback immediately after foreground ownership, audio focus and communication mode are established. The tone no longer waits for catalog lookup, network acquisition or SDP offer generation. User reported build 104 was audible but began roughly seven seconds late. Catalog rejection, non-native capability, acceptance and every existing teardown path stop playback. The cooldown and microphone permission gates still run before starting the service. Physical timing acceptance remains with the user.
+
+## Advance preparation candidate: Watch 120 / Mac 0.3.17
+
+Opening the selected Dot on the Watch home or chat screen starts one preparation
+with a fixed 45-second lifetime. Chrome's signed-in native client creates the
+call using the Watch peer's offer; the adapter holds its attachment request until
+the user presses Call. It does not reuse a Mac peer's SDP, cache account headers,
+change allocation mode, or retry a backend denial.
+
+The prepared Watch peer has an audio transceiver without a microphone track or
+audio source. Audio recording and playback stay disabled. Only explicit Call,
+after the microphone foreground service starts, creates the real microphone,
+attaches it to the same peer and enables playback. Existing native readiness and
+Watch mute still gate outgoing audio. SDP and preparation state remain in memory.
+
+Leaving the Dot, switching chats, starting dictation, backgrounding the app,
+selection changes, receiver loss and expiry cancel the owned preparation. A
+personal browser peer prevents preparation. Chrome displays preparation with
+inactive audio; Hang up cancels it. After expiry, Call uses ordinary startup.
+The native client still owns authentication, allocation results and cleanup.
+
+This candidate requires the matching Watch and Mac builds. Automated checks do
+not establish a physical startup-time improvement. Compare Call-to-ready timing
+after opening the Dot and waiting about 15 seconds, then verify leaving the Dot
+before Call releases preparation without activating the Watch microphone.

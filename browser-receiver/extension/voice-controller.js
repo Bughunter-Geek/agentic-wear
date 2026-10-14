@@ -88,6 +88,7 @@
     controls.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-label'] });
     const timer = setInterval(() => {
       query();
+      if (owner && identity() !== owner.identity) { post({ action: 'stop', callId: owner.callId }); release(); }
       if (owner) {
         // The browser's placeholder mic is not the physical input. Keep its
         // control visibly disabled; Watch mute operates the real native track.
@@ -113,7 +114,7 @@
       available: () => readiness() === 'ready',
       async command(command) {
         if (stopped || command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
-        if (command.action === 'start') {
+        if (command.action === 'start' || command.action === 'prepare') {
           if (owner || !supported || !identity() || hangup()) { console.warn('Agentic Wear voice startup refused: controller-precondition'); return false; }
           const startingGeneration = generation;
           if (!startControl() && !await revealStart(command)) { console.warn('Agentic Wear voice startup refused: start-control-unavailable'); return false; }

@@ -84,6 +84,7 @@ private fun WearScreen.depth(): Int = when (this) {
 
 /** Opens the live call screen; [autoConnect] starts the call immediately. */
 internal fun Context.openLiveCall(autoConnect: Boolean) {
+    if (autoConnect) io.github.sirbughunter.agenticwear.live.DotVoicePreparation.openingCall()
     startActivity(Intent(this, LiveVoiceActivity::class.java).putExtra(LiveVoiceActivity.EXTRA_AUTO_CONNECT, autoConnect))
     // Cross-fade instead of sliding, so a selected Dot appears to stay in place. API 34+ sets this in the activity itself.
     @Suppress("DEPRECATION")
@@ -114,6 +115,11 @@ fun AgenticWearApp(
     val live by LiveVoiceService.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context) }
+    LaunchedEffect(state.screen, state.selectedThreadId) {
+        if (!state.demo && state.isPaired && state.screen in setOf(WearScreen.HOME, WearScreen.CHAT)) {
+            state.selectedThreadId?.let { io.github.sirbughunter.agenticwear.live.DotVoicePreparation.open(context, it) }
+        } else io.github.sirbughunter.agenticwear.live.DotVoicePreparation.cancel()
+    }
     // Every Talk action uses full-duplex voice. Cloud calls delegate Watch media
     // to their own browser client; dictation remains a separate explicit action.
     val startVoice: () -> Unit = { context.openLiveCall(autoConnect = !live.callActive()) }

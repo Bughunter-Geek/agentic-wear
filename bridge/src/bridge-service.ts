@@ -381,9 +381,9 @@ export class BridgeService {
         await this.send({ version: 1, kind: "live.capability", requestId: payload.requestId, ...this.nativeDotVoice.capability(payload.threadId) });
         return;
       }
-      if (payload.kind === "live.start" && this.desktopCloud.configuredDot(payload.threadId)) {
+      if ((payload.kind === "live.start" || payload.kind === "live.prepare") && this.desktopCloud.configuredDot(payload.threadId)) {
         if (this.liveVoice.active || this.cloudVoice.active) throw new Error("Another live voice call is active. End it before reconnecting.");
-        this.nativeDotVoice.start(payload.callId, payload.threadId, payload.sdp);
+        this.nativeDotVoice.start(payload.callId, payload.threadId, payload.sdp, payload.kind === "live.prepare");
         this.rememberLiveCall(payload.callId, payload.threadId);
         return;
       }
@@ -432,6 +432,11 @@ export class BridgeService {
             throw new Error("Codex voice or the selected voice is unavailable on this host.");
           await this.liveVoice.start(payload.callId, payload.threadId, payload.sdp, payload.voice, payload.fastMode);
           this.rememberLiveCall(payload.callId, payload.threadId);
+          return;
+        }
+        case "live.prepare": throw new Error("Advance preparation is available only for the selected Dot");
+        case "live.activate": {
+          this.nativeDotVoice.activate(payload.callId);
           return;
         }
         case "live.heartbeat": {
@@ -564,7 +569,7 @@ export class BridgeService {
           return;
       }
     } catch (error) {
-      if (payload.kind === "live.newTask" || payload.kind === "live.start" || payload.kind === "live.stop" || payload.kind === "live.heartbeat" || payload.kind === "live.capability" || payload.kind === "live.transport") {
+      if (payload.kind === "live.prepare" || payload.kind === "live.activate" || payload.kind === "live.newTask" || payload.kind === "live.start" || payload.kind === "live.stop" || payload.kind === "live.heartbeat" || payload.kind === "live.capability" || payload.kind === "live.transport") {
         await this.send({ version: 1, kind: "live.error", requestId: payload.requestId,
           ...("callId" in payload ? { callId: payload.callId } : {}),
           ...(payload.kind === "live.newTask" ? { deliveryUncertain: true } : {}), message: publicRequestError(error, payload.kind) });

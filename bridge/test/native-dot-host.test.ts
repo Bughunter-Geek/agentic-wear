@@ -41,7 +41,7 @@ it("the authenticated native host carries a scoped offer and answer without chan
     await vi.waitFor(() => expect(commands).toHaveLength(1));
     expect(commands[0]).toMatchObject({ url, documentId, callId: "fixture-call", sdp });
     const frame = (state: string, identity = namespace) => ({ version: 1, kind: "native-voice-event", url, documentId, identity,
-      event: { callId: "fixture-call", state, ...(state === "answer" ? { sdp } : {}) } });
+      event: { callId: "fixture-call", threadId, state, ...(state === "answer" ? { sdp } : {}) } });
     write(frame("accepted")); write(frame("answer")); write(frame("active"));
     await vi.waitFor(() => expect(events).toEqual(["accepted", "answer", "active"]));
     write(frame("failed", "d".repeat(32)));
