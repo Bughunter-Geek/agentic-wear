@@ -529,3 +529,7 @@ The Watch plays a quiet local ringback tone after a catalog-verified native Dot 
 ### Private Watch build 104: media calling audio
 
 User reported no calling sound on build 103 in either sound mode. Replace `ToneGenerator` with a bundled original 425 Hz WAV (one second tone, four seconds silence, smooth edges) played in a loop with `MediaPlayer`, explicit `USAGE_MEDIA` / `CONTENT_TYPE_MUSIC` and 50% player gain. The clip uses media volume without altering volume or silent mode. Zero media volume remains silent. Acceptance/cancel/failure teardown releases the player immediately; foreground-service ownership and the late-start guard remain unchanged. Metadata-only trace stages report media volume, playback start, failure and release, so unavailable playback is diagnosable. Physical playback acceptance remains with the user.
+
+### Private Watch build 105: immediate calling audio
+
+Start local Dot calling feedback immediately after foreground ownership, audio focus and communication mode are established. The tone no longer waits for catalog lookup, network acquisition or SDP offer generation. User reported build 104 was audible but began roughly seven seconds late. Catalog rejection, non-native capability, acceptance and every existing teardown path stop playback. The cooldown and microphone permission gates still run before starting the service. Physical timing acceptance remains with the user.

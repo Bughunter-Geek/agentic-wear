@@ -146,6 +146,8 @@ class LiveVoiceService : Service() {
             focus = request
             check(audio.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "Audio is busy. Try again after the current call." }
             audio.mode = AudioManager.MODE_IN_COMMUNICATION
+            // Local calling feedback must not wait for catalog, network or SDP setup.
+            if (!createNew && thread?.startsWith("dot:") == true) callingTone?.start()
             wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:live-voice").apply {
                 setReferenceCounted(false); acquire(2L * 60L * 60L * 1000L)
             }
@@ -343,13 +345,13 @@ class LiveVoiceService : Service() {
                                 .filter { it.isNotBlank() }.joinToString("\n"))
                     }
                     nativeDotCall = catalog.optBoolean("nativeDot") && gate.requiresHostAcceptance
+                    if (!nativeDotCall) callingTone?.stop()
                     nativeDotCatalog.complete(nativeDotCall)
                     defaultVoice
                 } catch (error: Throwable) { offerJob.cancel(); throw error }
                 val offer = offerJob.await().getOrThrow()
                 peer?.mute(gate.effectiveMute(state.value.muted))
                 val id = callId ?: return@launch
-                if (nativeDotCall) callingTone?.start()
                 VoiceTrace.event(VoiceTraceStage.START_SEND)
                 withContext(Dispatchers.IO) { signaling.send("live.start", id, JSONObject().put("threadId", thread).put("voice", voice).put("sdp", offer)) }
                 VoiceTrace.event(VoiceTraceStage.START_POSTED)
