@@ -13,15 +13,34 @@ Use both matching packages. These are development builds, not production-stabili
 
 The current source and receiver have explicit per-browser Dot selection and no maintainer Dot default. A packaging guard checks the committed source and staged receiver. Older source tags, downloads and caches are unchanged and may retain the former default; use this release rather than rebuilding an old receiver. Historical tags are not rewritten.
 
-## Tester prerequisites and setup
+## Installation instructions
 
-Use your own signed-in Chrome and Codex accounts, an awake/online compatible Mac companion, a paired watch, and the deployment owner's existing relay/Firebase setup. This is a self-hosted developer Alpha, not an install-and-go hosted service. Follow the matching [Mac package setup](docs/mac-package-setup.md), [self-hosted setup](docs/self-hosted-setup.md), [distribution](docs/distribution.md) and [testing](docs/testing.md) instructions. A tester handoff must include the matching Mac bridge revision; the Watch APK alone is insufficient.
+Start with **native live voice**. Phonon and Qwen are optional dictation tools; you do not need to install them to talk to your Dot.
 
-1. Install the matching Mac bridge and native messaging helper, then pair the Watch using the existing authenticated pairing flow. Keep private configuration, Dot targets and credentials outside source and downloads.
-2. In Chrome, enable **Agentic Wear Cloud Receiver**, also called **Relay**. Older public packages display **Agentic Cloud Receiver**. This extension is separate from the encrypted relay service.
-3. Open your own Dot at `https://chatgpt.com/dots/home`. With no call active, open the extension popup and choose **Connect this Dot**. Opening the popup alone does not select a Dot. Selection stays in this browser's extension-local storage. Missing, malformed or mismatched selection blocks Dot history, sending and voice.
-4. The Mac companion's private target configuration must match that Dot. Receiver selection does not automatically rewrite companion configuration. Finish both sides before testing; use the existing matching configuration for an in-place update.
-5. For ordinary cloud chats, keep the selected supported `chatgpt.com/local/...` page open in Chrome with Relay enabled. Local Codex tasks use their native App Server route.
+### Before you start
+
+You need a compatible Mac with Node.js 22+, Codex/native voice access, your own signed-in Chrome account, a Wear OS watch and an authorized relay/pairing setup. The Mac must stay awake and online. This developer Alpha is self-hosted: the ZIP contains the bridge, not a hosted account or automatic installer. For a new deployment, follow [self-hosted setup](docs/self-hosted-setup.md); existing testers should use their deployment owner's setup. Broader Watch/device compatibility remains unverified.
+
+### Install and connect
+
+1. **Mac:** download the matching [Mac 0.3.15 ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.36-alpha/agentic-wear-mac-0.3.15.zip), extract it to a permanent folder, and follow [Mac package setup](docs/mac-package-setup.md). Configure the bridge, its default transcription dependency and native helper there. New installations need authenticated pairing; existing installations keep their private configuration, pairing and extension identity.
+2. **Watch:** install [Watch 0.6.36/build118](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.36-alpha) and enter the pairing code/relay URL supplied by your own bridge. If already paired, update through **Settings → App updates** and confirm the system installer.
+3. **Chrome:** enable **Agentic Wear Cloud Receiver**, also called **Relay**. Open your own Dot at `https://chatgpt.com/dots/home`. With no call active, open the Receiver popup and choose **Connect this Dot**. Opening the popup alone does not select it. Older packages may call this extension **Agentic Cloud Receiver**; it is separate from the relay server.
+4. **Match the Dot:** the Mac's private target configuration must match the selected Dot. The popup stores selection locally in Chrome; it does not rewrite the Mac configuration. Missing or mismatched selection blocks Dot access. A new tester must finish both sides with their deployment owner.
+5. **Verify the connection:** from the matching Mac package/source root, run `node bridge/dist/cli.js doctor` and `node bridge/dist/cli.js service status`. Confirm the established bridge is running, then open the Watch and confirm its chat list refreshes. Open your Dot in Chrome and try **Talk** on the Watch. For an ordinary cloud chat, keep its supported `chatgpt.com/local/...` page open with Relay enabled. Local Codex tasks use their native route.
+
+Keep credentials and private Dot targets outside source/downloads. See [update instructions](#in-place-updates) before replacing an existing installation, and [distribution](docs/distribution.md)/[testing](docs/testing.md) for developer details.
+
+## Choose how to speak
+
+| Choice | What happens | Requirements |
+| --- | --- | --- |
+| **Talk / native live voice** | A live conversation with your selected Dot or local Codex task. Ordinary cloud chats use the Mac voice companion. | Awake, connected Mac; compatible Codex/account access; Chrome Receiver for browser chats/Dots. |
+| **Phonon-2 dictation** | Watch records audio; your Mac recognizes English; you review the text and send it. | Optional [Phonon setup](docs/phonon-setup.md) on Apple silicon. Not a model running on the Watch. |
+| **Private Whisper** | Mac transcription for multilingual record/review/send. | Separate Local Whisper setup; default bridge provider. |
+| **Device speech** | The Watch opens its installed system speech recognizer, then you review/send its text. | A compatible device recognizer. Languages, network needs and any offline support depend on that provider. |
+
+Phonon inference is local/offline **after** downloading its runtime and model. This does not make the full app offline: recorded Watch audio still travels through the paired encrypted relay to the Mac, and sending a prompt/live voice needs the corresponding online services. Qwen is a separate optional text-cleanup model; it does not recognize speech. Advanced model setup belongs in [Phonon instructions](docs/phonon-setup.md), not the native-voice installation path.
 
 ## In-place updates
 
@@ -36,7 +55,7 @@ Watch updates use **Settings → App updates**, verify checksum/package/version/
 - **Local:** native Codex WebRTC voice attached to the selected local task. Tool availability follows that task/runtime. Cross-chat tools have their own scope; voice does not grant unrestricted access.
 - **Dot:** Chrome owns account identity and native call creation/attachment; Watch WebRTC owns microphone/speaker media. Relay must be enabled and the same Dot selected/configured. Existing calls are not taken over.
 - **Ordinary cloud:** a private ephemeral Mac voice companion forwards substantive requests to one selected cloud chat and speaks only its matched final reply. The cloud chat retains its model, settings and tools. The companion disables inherited local tools. Greetings/clarifications remain in the call; the full spoken transcript is not automatically saved to the cloud thread. Uncertain sends are not automatically repeated.
-- **Dictation:** explicit record/review/send, separate from live voice; local Whisper is the default transcription route. See [privacy](PRIVACY.md) for external media and data flows.
+- **Dictation:** explicit record/review/send, separate from live voice. Local Whisper is the default; optional **Phonon-2** provides English dictation on an Apple-silicon Mac. Neither Phonon nor its model is installed by the Mac ZIP. See [Phonon installation and configuration](docs/phonon-setup.md), including the separate optional Qwen text-cleanup step, and [privacy](PRIVACY.md).
 
 ## Approval controls and known availability issues
 

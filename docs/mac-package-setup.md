@@ -25,3 +25,7 @@ node scripts/register-receiver-host.mjs
 After choosing the permanent path and ending calls, `node scripts/register-receiver-host.mjs --apply` is the explicit registration action. A mismatched registration requires review rather than automatic replacement. This is a developer Alpha, not a turnkey one-click installer.
 
 Watch approval controls are intentionally unavailable in Alpha1; decide in Codex. Ordinary cloud voice does not automatically persist its full spoken transcript. OpenAI distribution permission remains pending. Read PRIVACY.md and the release's known availability issues before testing.
+
+## Optional Phonon-2 dictation
+
+Phonon is an optional English speech-to-text backend on the Mac, separate from native Dot/local live voice. The ZIP contains its worker, not the Python runtime or model weights. `transcription setup` installs Whisper only. Follow [Phonon setup](phonon-setup.md) for the pinned runtime, model acquisition, private configuration and optional Ollama/Qwen cleanup.

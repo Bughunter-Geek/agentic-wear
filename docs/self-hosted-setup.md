@@ -78,3 +78,7 @@ The background service reads `.env.local`, stores its relay credential and ECDH 
 Follow mac-package-setup.md. Register the same receiver native host, enable Agentic Wear Cloud Receiver (Relay), open your own Dot with no active call and choose Connect this Dot. The Mac private target configuration must independently match the selected Dot. Neither a receiver ZIP nor the popup alone establishes pairing/target authorization.
 
 For ordinary cloud voice keep the selected supported cloud page open in Chrome; the matching Mac voice companion forwards requests to it. Local voice uses Codex App Server. Dictation is separate. Approval decisions remain on Codex in Alpha1. See README.md and PRIVACY.md for limitations and data flows.
+
+## Optional Phonon-2 dictation
+
+Phonon is an optional English speech-to-text backend on the Mac, separate from native Dot/local live voice. The ZIP contains its worker, not the Python runtime or model weights. `transcription setup` installs Whisper only. Follow [Phonon setup](phonon-setup.md) for the pinned runtime, model acquisition, private configuration and optional Ollama/Qwen cleanup.
