@@ -356,6 +356,7 @@ private fun CallInProgress(
             val mode = state.orbMode()
             io.github.sirbughunter.agenticwear.ui.DotCallFigure(
                 avatar = dotAvatar,
+                palette = palette,
                 mood = when (mode) {
                     OrbMode.Listening -> io.github.sirbughunter.agenticwear.ui.DotMood.LISTENING
                     OrbMode.Speaking -> io.github.sirbughunter.agenticwear.ui.DotMood.SPEAKING

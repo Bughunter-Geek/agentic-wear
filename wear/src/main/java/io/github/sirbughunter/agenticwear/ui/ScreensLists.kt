@@ -1,5 +1,8 @@
 package io.github.sirbughunter.agenticwear.ui
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -101,7 +104,7 @@ internal fun SessionsScreen(
                     item { BoundaryNote("Schedules live in Codex", "Scheduled task definitions are unavailable on this local host.") }
                     val runs = state.sessions.filter { it.source == "automation" }
                     if (runs.isNotEmpty()) item { AwSectionLabel("Recent automation runs") }
-                    items(runs, key = { "run:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect) }
+                    items(runs, key = { "run:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect, modifier = glideModifier()) }
                 }
                 "Activity" -> {
                     if (alerts.isEmpty()) item { BoundaryNote("No activity yet", "Task completions, errors and permission requests appear here.") }
@@ -124,16 +127,16 @@ internal fun SessionsScreen(
                         val recent = filtered.filterNot { it.pinned }
                         if (pinned.isNotEmpty()) {
                             item(key = "pinned-label") { AwSectionLabel("Pinned") }
-                            items(pinned, key = { "p:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect) }
+                            items(pinned, key = { "p:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect, modifier = glideModifier()) }
                         }
                         if (recent.isNotEmpty()) {
                             item(key = "recent-label") { AwSectionLabel("Recent") }
-                            items(recent, key = { "r:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect) }
+                            items(recent, key = { "r:${it.id}" }) { SessionRow(it, state.selectedThreadId, onSelect, modifier = glideModifier()) }
                         }
                     } else if (group == "Priority") {
-                        items(priority, key = { it.session.id }) { SessionRow(it.session, state.selectedThreadId, onSelect, it.reason) }
+                        items(priority, key = { it.session.id }) { SessionRow(it.session, state.selectedThreadId, onSelect, it.reason, glideModifier()) }
                     } else {
-                        items(filtered, key = { it.id }) { SessionRow(it, state.selectedThreadId, onSelect) }
+                        items(filtered, key = { it.id }) { SessionRow(it, state.selectedThreadId, onSelect, modifier = glideModifier()) }
                     }
                     if (group == "All" && state.sessions.none { it.source == "dot" }) item(key = "dot") { Box(Modifier.padding(top = 6.dp)) { DotCard(palette) } }
                     item {
@@ -174,8 +177,12 @@ private fun DotCard(palette: OrbPalette) {
     }
 }
 
+/** Lets chat rows glide to a new place and fade in or out when the list reorders. */
+private fun androidx.compose.foundation.lazy.LazyItemScope.glideModifier(): Modifier =
+    Modifier.animateItem(fadeInSpec = tween(220), placementSpec = spring(stiffness = Spring.StiffnessMediumLow), fadeOutSpec = tween(160))
+
 @Composable
-private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (String) -> Unit, reason: PriorityReason? = null) {
+private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (String) -> Unit, reason: PriorityReason? = null, modifier: Modifier = Modifier) {
     val ago = shortAgo(session.updatedAtMillis)
     val meta = buildString {
         append(reason?.label ?: session.status.label)
@@ -185,7 +192,7 @@ private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (St
     AwRowCard(
         onClick = { onSelect(session.id) },
         selected = session.id == selectedId,
-        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "${session.title}, $meta${sourceLabel(session.source)?.let { ", $it chat" }.orEmpty()}" },
+        modifier = modifier.semantics(mergeDescendants = true) { contentDescription = "${session.title}, $meta${sourceLabel(session.source)?.let { ", $it chat" }.orEmpty()}" },
     ) {
         StatusIndicator(session.status.kind())
         Column(Modifier.weight(1f)) {

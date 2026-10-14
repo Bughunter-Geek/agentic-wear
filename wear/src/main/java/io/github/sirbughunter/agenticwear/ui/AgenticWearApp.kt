@@ -17,6 +17,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -252,11 +253,15 @@ fun AgenticWearApp(
                     if (dismissedBySwipe) {
                         EnterTransition.None togetherWith ExitTransition.None
                     } else {
+                        // Shared Z-axis: the new screen grows in from behind while the old one recedes.
                         val forward = targetState.depth() >= initialState.depth()
                         val distance = if (forward) 1 else -1
-                        (fadeIn(tween(Aw.MotionDuration, easing = AwEase)) +
-                            slideInHorizontally(tween(Aw.MotionDuration, easing = AwEase)) { it / 9 * distance }) togetherWith
-                            (fadeOut(tween(160)) + slideOutHorizontally(tween(Aw.MotionDuration, easing = AwEase)) { -it / 14 * distance })
+                        val enterSpec = tween<Float>(Aw.MotionDuration, easing = AwEase)
+                        (fadeIn(enterSpec) +
+                            scaleIn(enterSpec, initialScale = if (forward) .92f else 1.06f, transformOrigin = TransformOrigin.Center) +
+                            slideInHorizontally(tween(Aw.MotionDuration, easing = AwEase)) { it / 12 * distance }) togetherWith
+                            (fadeOut(tween(160)) +
+                                scaleOut(tween(Aw.MotionDuration, easing = AwEase), targetScale = if (forward) 1.06f else .92f, transformOrigin = TransformOrigin.Center))
                     }
                 },
                 label = "screen",
