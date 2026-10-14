@@ -521,3 +521,7 @@ microphone, idle native allocation or request retry is needed for the countdown.
 Receiver 0.3.14 and the working Watch transport/readiness configuration remain
 unchanged. This is an app safeguard based on the observed tests, not a claim
 that the backend has a fixed 20-second cooldown. Physical acceptance is pending.
+
+### Private Watch build 101: calling tone
+
+The Watch plays a quiet local ringback tone after a catalog-verified native Dot call is ready to send `live.start`. The foreground voice service owns playback, so screen-off does not stop it. The matching `live.ready` acceptance event stops playback before activating voice. Cancellation, startup failure, audio-focus loss, end and service destruction stop and release it as well. A terminated tone cannot restart from late startup work. Cooldown stays silent. Playback availability never gates connection. Receiver 0.3.14 is unchanged; physical sound/routing acceptance belongs to the user.

@@ -6,6 +6,7 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.*
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -42,6 +43,8 @@ class LiveVoiceService : Service() {
     private var callId: String? = null
     private var ending = false
     private var nativeDotCall = false
+    private var toneGenerator: ToneGenerator? = null
+    private var callingTone: CallingTone? = null
     private var pollJob: Job? = null
     private var eventsJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -86,6 +89,16 @@ class LiveVoiceService : Service() {
             stopSelf(); return
         }
         nativeDotCall = false
+        callingTone = CallingTone(
+            startPlayback = {
+                // Optional local feedback: unavailable audio must not fail the voice call.
+                try {
+                    toneGenerator = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 35)
+                    if (toneGenerator?.startTone(ToneGenerator.TONE_SUP_RINGTONE) != true) stopCallingTonePlayback()
+                } catch (_: RuntimeException) { stopCallingTonePlayback() }
+            },
+            stopPlayback = ::stopCallingTonePlayback,
+        )
         val prefs = AppPreferences(this)
         if (prefs.pending || VoiceSessionService.sessionState.value.phase in setOf(VoiceSessionPhase.RECORDING, VoiceSessionPhase.TRANSCRIBING)) {
             state.value = LiveVoiceState("error", "Finish dictation before connecting live voice")
@@ -173,7 +186,7 @@ class LiveVoiceService : Service() {
                 }
                 if (event.optString("callId") != callId || ending) continue
                 when (event.optString("kind")) {
-                    "live.ready" -> { gate.accepted(); activateWhenReady() }
+                    "live.ready" -> { callingTone?.stop(); gate.accepted(); activateWhenReady() }
                     "live.answer" -> if (answerApplied) {
                         // A repeated answer must not renegotiate the established session.
                         VoiceTrace.event(VoiceTraceStage.ANSWER_DUPLICATE)
@@ -313,6 +326,7 @@ class LiveVoiceService : Service() {
                 val offer = offerJob.await().getOrThrow()
                 peer?.mute(gate.effectiveMute(state.value.muted))
                 val id = callId ?: return@launch
+                if (nativeDotCall) callingTone?.start()
                 VoiceTrace.event(VoiceTraceStage.START_SEND)
                 withContext(Dispatchers.IO) { signaling.send("live.start", id, JSONObject().put("threadId", thread).put("voice", voice).put("sdp", offer)) }
                 VoiceTrace.event(VoiceTraceStage.START_POSTED)
@@ -353,6 +367,7 @@ class LiveVoiceService : Service() {
         if (ending) return
         VoiceTrace.event(VoiceTraceStage.END)
         ending = true
+        callingTone?.stop()
         val id = callId
         if (id != null) NativeCallCooldownStore.ended(this, state.value.taskId, nativeDotCall)
         callId = null
@@ -379,7 +394,15 @@ class LiveVoiceService : Service() {
             } }
         }
     }
+    private fun stopCallingTonePlayback() {
+        val tone = toneGenerator ?: return
+        toneGenerator = null
+        // Tone cleanup is independent of mandatory call/audio cleanup.
+        try { tone.stopTone() } catch (_: RuntimeException) { /* Optional playback already unavailable. */ }
+        try { tone.release() } catch (_: RuntimeException) { /* Never retain the instance or block teardown. */ }
+    }
     private fun releaseAudio() {
+        callingTone?.stop()
         focus?.let(audio::abandonAudioFocusRequest); focus = null
         if (audio.mode == AudioManager.MODE_IN_COMMUNICATION) audio.mode = oldMode
         wakeLock?.takeIf { it.isHeld }?.release(); wakeLock = null
