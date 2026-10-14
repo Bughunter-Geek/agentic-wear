@@ -90,8 +90,20 @@
       }
     }, 2000);
     post({ action: 'query' });
+    let lastReadiness = null;
+    function readiness() {
+      const reason = stopped ? 'controller-retired' : !supported ? 'hook-unavailable' : !identity() ? 'selection-mismatch'
+        : owner ? 'ready' : hangup() ? 'previous-call-closing' : startControl() || profileControl() ? 'ready' : 'start-control-unavailable';
+      // Log transitions only, using fixed codes. No Dot identity, account data,
+      // private content or audio is included. General text readiness is separate.
+      if (reason !== lastReadiness) {
+        lastReadiness = reason;
+        console.info('Agentic Wear voice readiness: ' + reason);
+      }
+      return reason;
+    }
     return {
-      available: () => !stopped && supported && Boolean(identity()) && (Boolean(owner) || (!hangup() && Boolean(startControl() || profileControl()))),
+      available: () => readiness() === 'ready',
       async command(command) {
         if (stopped || command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
         if (command.action === 'start') {

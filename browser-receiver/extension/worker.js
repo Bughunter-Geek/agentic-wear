@@ -100,8 +100,16 @@ chrome.runtime.onMessage.addListener((message,sender)=>{
   return;
  }
  if(message.version!==1||message.kind!=='observation'||JSON.stringify(message).length>220000)return;
- const owner=owners.get(sender.url);if(owner&&owner.tabId!==sender.tab.id)return;
- owners.set(sender.url,{tabId:sender.tab.id,documentId:message.documentId,identity:message.identity});
+ const owner=owners.get(sender.url);
+ if(owner&&owner.tabId!==sender.tab.id){
+  // Duplicate Dot tabs used to pin routing to whichever observation arrived
+  // first, even when that stale tab could not start voice. Follow the visible,
+  // ready tab for the SAME selected Dot, only while no Watch lease owns it.
+  const leased=[...voiceMutes.values()].some(lease=>lease.tabId===owner.tabId);
+  if(sender.url!==DOT_URL||!message.identity||message.identity!==owner.identity||
+    message.visibility!=='visible'||message.nativeVoice!==true||owner.nativeVoice===true||leased)return;
+ }
+ owners.set(sender.url,{tabId:sender.tab.id,documentId:message.documentId,identity:message.identity,nativeVoice:message.nativeVoice===true});
  if(!protectedTabs.has(sender.tab.id)){protectedTabs.add(sender.tab.id);chrome.tabs.update(sender.tab.id,{autoDiscardable:false}).catch(()=>{protectedTabs.delete(sender.tab.id);chrome.action.setBadgeText({text:'TAB'});});}
  connect().postMessage(message);
 });

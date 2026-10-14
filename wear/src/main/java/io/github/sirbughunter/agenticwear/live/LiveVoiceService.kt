@@ -341,7 +341,7 @@ class LiveVoiceService : Service() {
                     VoiceTrace.event(VoiceTraceStage.CAPABILITY_RECEIVED)
                     check(catalog.optBoolean("realtimeApiAvailable")) {
                         when {
-                            catalog.optBoolean("nativeDot") -> "Dot voice unavailable. Enable Relay (Agentic Wear Cloud Receiver) in Chrome, open your Dot and choose Connect this Dot."
+                            catalog.optBoolean("nativeDot") -> "Dot voice isn't ready yet. Wait for the previous call to close, then retry. If it stays unavailable, check Relay and your Dot page in Chrome."
                             catalog.optBoolean("nativeBrowserVoice") -> "Browser voice unavailable. Enable Relay (Agentic Wear Cloud Receiver) in Chrome and open this chat."
                             else -> "This Codex host has no compatible live voice interface"
                         }

@@ -38,6 +38,16 @@ it('injects on in-page navigation to a chat and accepts observations only from v
 
 const dot='https://chatgpt.com/dots/home';
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
+it('a visible ready duplicate Dot replaces an unavailable owner without setup changes or stale-tab takeover',()=>{
+ const w=load([{id:1,url:dot},{id:2,url:dot}]);
+ const observe=(id,nativeVoice,visibility='hidden',identity='selected')=>w.hooks.message[0](
+  {version:1,kind:'observation',url:dot,documentId:'d'+id,identity,visibility,nativeVoice,turns:[]},
+  {id:'ext',frameId:0,url:dot,tab:{id}});
+ observe(1,false); observe(2,true); assert.equal(w.posted.length,1,'hidden duplicate cannot take ownership');
+ observe(2,true,'visible','other'); assert.equal(w.posted.length,1,'a different Dot cannot take ownership');
+ observe(2,true,'visible'); assert.equal(w.posted.at(-1).documentId,'d2');
+ const count=w.posted.length;observe(1,false,'visible');assert.equal(w.posted.length,count,'stale tab cannot overwrite ready state');
+});
 function voiceFixture(){
  const w=load([{id:2,url:dot}]); let muted=false; const updates=[];
  w.chrome.tabs.get=async()=>({id:2,mutedInfo:{muted,reason:muted?'extension':'user',extensionId:'ext'}});
@@ -49,6 +59,13 @@ function voiceFixture(){
   start(callId){w.hooks.native[0]({kind:'native-voice',action:'start',callId,threadId:'dot',documentId:'d',url:dot,expiresAt:Date.now()+30000});},
   close(callId){w.hooks.message[0]({version:1,kind:'native-voice-event',url:dot,documentId:'d',identity:'lumen',event:{callId,state:'closed'}},sender);}};
 }
+it('a duplicate Dot cannot replace a tab with an active Watch voice lease',async()=>{
+ const w=voiceFixture();w.start('first');await settle();
+ const count=w.posted.length;
+ w.hooks.message[0]({version:1,kind:'observation',url:dot,documentId:'other',identity:'lumen',visibility:'visible',nativeVoice:true,turns:[]},
+  {id:'ext',frameId:0,url:dot,tab:{id:3}});
+ assert.equal(w.posted.length,count);w.close('first');await settle();
+});
 it('a previous-call mute restoration cannot unmute a newly starting Watch call',async()=>{
  const w=voiceFixture();w.start('first');await settle();assert.equal(w.muted(),true);
  const get=w.chrome.tabs.get;let release, reads=0;

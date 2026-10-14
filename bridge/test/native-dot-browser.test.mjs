@@ -609,6 +609,24 @@ const startController = f => f.w.AgenticWearVoiceController.create({ documentId:
 const controllerStart = f => ({ documentId: 'document', url: f.w.location.href,
   action: 'start', callId: 'owned', threadId: 'dot:lumen', sdp: offer, expiresAt: Date.now() + 10000 });
 
+test('consecutive calls retain selection and distinguish a closing call from missing setup', async () => {
+  const f = controllerPage(); let controller;
+  const logs = []; f.w.console.info = value => logs.push(value);
+  try {
+    acknowledgeStarts(f); controller = startController(f); f.announce(true);
+    assert.equal(await controller.command(controllerStart(f)), true);
+    assert.equal(await controller.command({ ...controllerStart(f), action: 'stop' }), true);
+    const closing = f.w.document.createElement('button'); closing.setAttribute('aria-label', 'Hang up');
+    f.w.document.querySelector('main').append(closing);
+    assert.equal(controller.available(), false);
+    assert.equal(logs.at(-1), 'Agentic Wear voice readiness: previous-call-closing');
+    closing.remove(); assert.equal(controller.available(), true);
+    assert.equal(await controller.command({ ...controllerStart(f), callId: 'second' }), true);
+    assert.equal(logs.at(-1), 'Agentic Wear voice readiness: ready');
+    assert.equal(logs.some(value => value.includes(dotNamespace)), false);
+  } finally { controller?.stop(); f.dom.window.close(); }
+});
+
 test('native startup chooses the persistent toolbar rather than the profile panel', async () => {
   const f = controllerPage(); let controller;
   try {
