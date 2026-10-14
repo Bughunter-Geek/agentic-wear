@@ -1,112 +1,53 @@
 # Agentic Wear
 
-**Speak to Codex, follow a session, and receive completion or permission alerts from your Wear OS watch.**
+Speak to Codex, follow a session, and receive completion or permission alerts from a Wear OS watch. Agentic Wear is an unofficial Apache-2.0 companion; it is not affiliated with or endorsed by OpenAI.
 
-Agentic Wear is an unofficial, Apache-2.0-licensed companion that connects a watch to your own macOS Codex bridge. It is not affiliated with or endorsed by OpenAI; “Codex” describes compatibility with the Codex App Server.
+## Alpha 1 limited tester release
 
-[Download Alpha 0.6.30](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.30-alpha) · [Published source tag](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.30-alpha) · [Alpha testing guide](docs/alpha-testing.md)
+Two packages, two versions:
 
-<!-- Add a real-watch demo here when available. Identify the watch, app release,
-bridge revision, and Codex version. Do not imply hardware validation from an emulator. -->
+- **Watch 0.6.36 — build 118:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.36-alpha).
+- **Receiver / Mac companion 0.3.15:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.36-alpha/agentic-wear-mac-0.3.15.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
 
-## Alpha 1 development preview
+Use both matching packages. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.36-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.36-alpha); an unpinned default-branch checkout may predate this implementation.
 
-**Alpha 1 is the proposed name for the next preview. Core features mostly work in the tested development setup, but design and stability are unfinished, some features are missing, and security testing and hardening need more time.** It is intended for willing early testers who understand these limitations.
+The current source and receiver have explicit per-browser Dot selection and no maintainer Dot default. A packaging guard checks the committed source and staged receiver. Older source tags, downloads and caches are unchanged and may retain the former default; use this release rather than rebuilding an old receiver. Historical tags are not rewritten.
 
-As checked on October 14, 2026, the newest published alpha is **0.6.30**, with Watch build 111. Alpha 1 remains a proposed preview name. Read [what to expect](docs/alpha-preview-status.md) and the receiver privacy/update instructions below before installing or mixing components.
+## Tester prerequisites and setup
 
-## Current status
+Use your own signed-in Chrome and Codex accounts, an awake/online compatible Mac companion, a paired watch, and the deployment owner's existing relay/Firebase setup. This is a self-hosted developer Alpha, not an install-and-go hosted service. Follow the matching [Mac package setup](docs/mac-package-setup.md), [self-hosted setup](docs/self-hosted-setup.md), [distribution](docs/distribution.md) and [testing](docs/testing.md) instructions. A tester handoff must include the matching Mac bridge revision; the Watch APK alone is insufficient.
 
-**Early alpha — not a production-stability claim.** Alpha **0.6.30** was published October 14, 2026, with `versionCode 111`. Its release notes report local build, lint, signing and integrity checks; physical-watch acceptance remains pending in those notes. This documentation update did not run those checks again.
+1. Install the matching Mac bridge and native messaging helper, then pair the Watch using the existing authenticated pairing flow. Keep private configuration, Dot targets and credentials outside source and downloads.
+2. In Chrome, enable **Agentic Wear Cloud Receiver**, also called **Relay**. Older public packages display **Agentic Cloud Receiver**. This extension is separate from the encrypted relay service.
+3. Open your own Dot at `https://chatgpt.com/dots/home`. With no call active, open the extension popup and choose **Connect this Dot**. Opening the popup alone does not select a Dot. Selection stays in this browser's extension-local storage. Missing, malformed or mismatched selection blocks Dot history, sending and voice.
+4. The Mac companion's private target configuration must match that Dot. Receiver selection does not automatically rewrite companion configuration. Finish both sides before testing; use the existing matching configuration for an in-place update.
+5. For ordinary cloud chats, keep the selected supported `chatgpt.com/local/...` page open in Chrome with Relay enabled. Local Codex tasks use their native App Server route.
 
-The default branch currently predates the published alpha implementation. **Use the `v0.6.30-alpha` tag for the published implementation and setup reference**, not an unpinned checkout of `main`. Release-specific documentation links are pinned to that tag so readers can inspect the matching implementation.
+## In-place updates
 
-The earlier [0.6.25 release notes](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.25-alpha) report fixes for the disappearing Send button, interrupted-delivery retries, and replies to sessions controlled by another client, with 21 added regression tests and an emulator live-relay check. Those are historical release results, not new validation of 0.6.30.
+Preserve the extension public key/ID, Chrome storage selection, native-host registration, helper bundle, watch pairing, signing identity and private configuration. Back up existing files privately. End calls before any approved extension reload or bridge restart. Never remove a working installation to apply a patch or load a lower-numbered receiver over it.
 
-## What the published alpha includes
+Receiver/Mac companion **0.3.15** is newer than both formerly documented receiver series. Keep one matching release version for the bridge, helper and extension; do not mix older components. This update does not replace the deployed relay service. The [provenance checkpoint](docs/receiver-provenance.md) records the previous mismatch without prescribing another version series.
 
-- **Voice and text prompts:** tap to record, review and edit the transcript before sending, or reply through the Wear keyboard. Local multilingual Whisper on your private Apple-silicon Mac is the default transcription route; hosted transcription and device speech are optional alternatives.
-- **Live Codex sessions:** choose a recent session, read role-aware streamed output and Markdown, and send follow-up prompts. Queueing and explicit steering respect the session's state and supported controls.
-- **Useful terminal alerts:** completion, failure, interruption, and permission states include the session and time. Intermediate reasoning, tool progress, and streamed text are not treated as a finished turn.
-- **Bounded approval controls:** existing desktop/iPhone-controlled sessions are alert-only for approvals. Accept/decline controls are limited to sessions created by the paired watch bridge.
-- **Private bridge and relay transport:** endpoint-authenticated pairing, encrypted watch–bridge payloads, content-free Firebase wake messages, and a reconnecting macOS background service.
-- **Signed alpha updates:** a GitHub-based updater checks the APK's checksum, package, version, and signing identity before handing installation to Wear OS. Updates require the owner's confirmation.
+Watch updates use **Settings → App updates**, verify checksum/package/version/signing identity, and require the owner's system-installer confirmation. Existing tester private updates do not publish a public Alpha or grant broad launch authority.
 
-See the [release README](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/README.md) for the fuller feature and setup reference.
+## Voice routes and limits
 
-## Getting started
+- **Local:** native Codex WebRTC voice attached to the selected local task. Tool availability follows that task/runtime. Cross-chat tools have their own scope; voice does not grant unrestricted access.
+- **Dot:** Chrome owns account identity and native call creation/attachment; Watch WebRTC owns microphone/speaker media. Relay must be enabled and the same Dot selected/configured. Existing calls are not taken over.
+- **Ordinary cloud:** a private ephemeral Mac voice companion forwards substantive requests to one selected cloud chat and speaks only its matched final reply. The cloud chat retains its model, settings and tools. The companion disables inherited local tools. Greetings/clarifications remain in the call; the full spoken transcript is not automatically saved to the cloud thread. Uncertain sends are not automatically repeated.
+- **Dictation:** explicit record/review/send, separate from live voice; local Whisper is the default transcription route. See [privacy](PRIVACY.md) for external media and data flows.
 
-**This is not a standalone watch chatbot or a turnkey hosted service.** You need an authenticated bridge on your own Mac, a compatible Codex installation, and a configured relay. Self-hosting requires your own Cloudflare and Firebase configuration. Installing the APK alone does not provide those services or access to a maintainer's Mac.
+## Approval controls and known availability issues
 
-### Already paired and configured
+All currently supported approval cards lack a complete authority display, so Alpha 1 keeps them **alert-only**, even if Watch controls were previously enabled in Settings. Review and decide in Codex. The bridge rejects direct/stale approval responses too; ownership checks remain intact. Native Codex approval and ordinary voice/chat continue on their existing routes.
 
-Open **Settings → App updates**, or download `agentic-wear.apk` from the [0.6.30 release](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.30-alpha). Follow the [alpha testing guide](docs/alpha-testing.md) for first installation, checksum verification, and signing precautions.
+The independent source audit found three issues. The incomplete-authority approval issue is contained in this matching Mac release. Two availability findings are deferred to Alpha 1.1: a malicious configured relay can exhaust bridge memory by flooding queued envelopes during slow work; sufficiently large Unicode chat history can exceed the native messaging byte limit and repeatedly disconnect receiver tabs/calls. No arbitrary execution or plaintext disclosure was demonstrated by that audit; it was partial coverage, not a claim that no vulnerabilities remain.
 
-Updating the Watch APK does not update the Mac bridge or Chrome receiver. Keep those components compatible with the release, and preserve the existing pairing and signing identity. Apply the receiver privacy update through the separate instructions below.
+## Scope and release gate
 
-### Dot receiver setup and existing-user privacy update
+Code targets `minSdk 31` and private live builds retain ARM32/ARM64. That is not proof of Wear OS 4 or all form factors. The documented visual baseline is a round Wear OS 7 watch; older OS versions, square displays, handover/reconnect and broader reliability remain tester-specific acceptance items. No emulator result substitutes for physical acceptance.
 
-Dot access uses your own signed-in Chrome browser and a compatible private Mac companion configured for the same Dot. The corrected receiver has no personal Dot selected by default. Open your Dot page, open the receiver popup and choose **Connect this Dot**. Chrome's `storage` permission remembers that selection in this browser. Missing or mismatched selection blocks Dot history, sending and voice. Keep the companion's target configuration and credentials outside public source and downloads.
+Before packaging, run `npm --prefix bridge run check:receiver-package`. The native-helper bundler and release preparation also run this guard against both committed receiver source and working files. It requires explicit selection files/storage and rejects literal Dot defaults without printing identifiers. Synthetic fixtures replace the known personal identifier; historical source is not rewritten.
 
-The original receiver **0.3.5** contained a maintainer-specific Dot namespace. The corrected public receiver **0.3.5.1** removes that default and is available in the replaced [receiver ZIP on the latest release 0.6.30](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.30-alpha/agentic-cloud-receiver-0.3.5.zip). Its filename remains `agentic-cloud-receiver-0.3.5.zip`; check `extension/manifest.json` for version **0.3.5.1**. Previously downloaded or cached copies may retain the original default.
-
-**The receiver ZIPs on Watch releases 0.6.27, 0.6.28, 0.6.29 and 0.6.30 have been replaced with the corrected receiver 0.3.5.1. Fresh downloads and their checksums were verified.** APKs and updater assets were preserved. The original source tags were not rewritten; the 0.6.30 source tag retains the original receiver default. For receiver setup, use the corrected ZIP linked above rather than copying the unmodified receiver from a source tag. Old downloads, mirrors and caches may retain the original default.
-
-Existing **Agentic Wear Cloud Receiver 0.3.14** installations should receive the privacy patch **in place**, keeping the current extension public key/ID, native-host registration, helper bundle and private pairing/target configuration. The local maintenance version **0.3.14.1** is an in-place update for that installation series; it is not a separate public download. Do not remove the working extension or load the lower-numbered public package over it. Back up the existing files privately, apply the scoped update and approved `storage` permission, end any call, then reload the existing extension and select your own Dot. Reloading before the installed files are patched does not apply the fix.
-
-This browser extension is sometimes called "Relay" by existing users. Updating it does not replace the deployed encrypted relay service or update the Watch APK.
-
-### New self-hosted setup
-
-Use a fresh directory rather than changing an existing working checkout:
-
-```bash
-git clone --branch v0.6.30-alpha --depth 1 \
-  https://github.com/Bughunter-Geek/agentic-wear.git agentic-wear-alpha-0.6.30
-cd agentic-wear-alpha-0.6.30
-```
-
-Then follow the **Prerequisites** and numbered setup sections in the [tagged README](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/README.md): configure Firebase, deploy your relay, build and pair the bridge, and build/install the watch client for that deployment.
-
-The documented build toolchain is Node.js 22+, JDK 17, Android SDK 37, and Android Studio. Automatic local Whisper setup requires an Apple-silicon Mac. The integration uses experimental Codex App Server surfaces; check the matching release documentation for the required Codex version rather than assuming compatibility.
-
-Local Whisper does not incur a transcription API charge, but Codex usage and any chosen hosted transcription or infrastructure remain separate. Smart voice revision uses the bridge owner's Codex allowance.
-
-## Architecture and privacy
-
-```text
-Wear OS watch ⇄ encrypted relay + FCM wake ⇄ private macOS bridge ⇄ Codex App Server
-                                                   └──────────→ local Whisper
-```
-
-Local transcription runs on the paired bridge owner's Mac. Hosted transcription is opt-in. Encryption protects application payloads through the relay, not compromised endpoints or all metadata: the relay can observe information such as timing and ciphertext sizes. Bridge-to-watch envelopes expire after 24 hours; offline watch audio is not queued by the relay.
-
-The bridge observes sessions on its connected Codex daemon. It is not a direct iPhone-to-watch link and cannot observe unrelated ChatGPT conversations or a different Codex host.
-
-Review the release's [Architecture](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/docs/architecture.md), [Protocol](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/docs/protocol.md), [Privacy](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/PRIVACY.md), and [Security](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/SECURITY.md) documentation before deployment. Do not publish pairing codes, credentials, private prompts, or unredacted logs.
-
-## Known limits and useful testing
-
-Real-watch reliability, battery impact, background delivery, and compatibility across watch/OS/Codex versions need device-specific evidence. An emulator result is not a substitute for those checks. The documented emulator baseline is a 454 × 454 round Wear OS 7 / Android 17 device.
-
-External testers and contributors are welcome. Start with the [alpha testing guide](docs/alpha-testing.md), use synthetic prompts in a disposable project, and report the exact versions, reproduction steps, and observed result. The highest-value reports cover first-time setup, Send-button reachability, duplicate or stalled delivery, background alerts, and same-key updates. A useful result can be a failure report; no positive review is expected.
-
-## Development
-
-Run these commands from the checkout you intend to test after installing its dependencies:
-
-```bash
-npm --prefix bridge run check
-npm --prefix bridge test
-npm --prefix relay run check
-npm --prefix relay test
-./gradlew :wear:lintDebug :wear:assembleDebug
-```
-
-Read [Contributing](CONTRIBUTING.md) and the [release testing guide](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/docs/testing.md). Preserve terminal-event notification rules, approval ownership boundaries, and signing identity. Build success, emulator QA, and physical-watch acceptance must be reported separately.
-
-## License and acknowledgements
-
-Apache-2.0. See [LICENSE](LICENSE).
-
-Agentic Wear is independently implemented, with credit to projects that helped establish this category, including SmartCodex. See the release's [Acknowledgements](https://github.com/Bughunter-Geek/agentic-wear/blob/v0.6.30-alpha/ACKNOWLEDGEMENTS.md).
+**OpenAI distribution permission is still pending; this release does not claim approval or endorsement.** Free/open-source distribution does not establish platform or artwork rights. Bundled Dot-avatar rights are not established by this repository's license. A minimal tester candidate can omit those PNGs and use existing code-drawn neutral orbs; see [the omission path](docs/tester-avatar-omission.md). Neither this source correction nor working voice establishes redistribution permission or security clearance.
