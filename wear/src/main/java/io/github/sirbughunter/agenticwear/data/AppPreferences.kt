@@ -25,6 +25,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("live_voice_colour", "Teal") ?: "Teal"
         set(value) = prefs.edit { putString("live_voice_colour", value) }
 
+    var dotAvatar: String
+        get() = prefs.getString("dot_avatar", "Felipe") ?: "Felipe"
+        set(value) = prefs.edit { putString("dot_avatar", value) }
+
     var relayUrl: String
         get() = prefs.getString(KEY_RELAY_URL, null).orEmpty().ifEmpty { BuildConfig.DEFAULT_RELAY_URL }
         set(value) = prefs.edit { putString(KEY_RELAY_URL, RelayUrlPolicy.normalize(value)) }

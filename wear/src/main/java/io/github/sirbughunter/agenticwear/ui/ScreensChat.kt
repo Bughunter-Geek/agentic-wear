@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -70,6 +71,8 @@ import io.github.sirbughunter.agenticwear.model.currentSubmission
 import io.github.sirbughunter.agenticwear.model.visibleSubmissions
 import io.github.sirbughunter.agenticwear.model.submittedChatMessages
 import io.github.sirbughunter.agenticwear.model.submissionStatusLabel
+import io.github.sirbughunter.agenticwear.data.AppPreferences
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -97,8 +100,35 @@ internal fun ChatScreen(
         it.kind == ChatMessageKind.PERMISSION && it.canControl && !it.resolved && state.approvalMode == ApprovalMode.ALLOW_CONTROLS
     }
     val isWorking = submission == null && chat?.status == SessionStatus.ACTIVE
-    val agentThinking = isWorking && !hasPendingPermission && state.error == null
-    val submissionLabel = if (hasPendingPermission) null else submission?.let { submissionStatusLabel(it, state.pending, chat) }
+    val isDot = state.selectedSession?.source == "dot" || chat?.threadId?.startsWith("dot:") == true
+    // A Dot is thinking from the moment it has the message until its reply lands.
+    val dotThinking = isDot && !hasPendingPermission && state.error == null &&
+        (chat?.status == SessionStatus.ACTIVE || submission?.phase == SubmissionPhase.ACCEPTED || submission?.phase == SubmissionPhase.RUNNING)
+    val agentThinking = if (isDot) dotThinking else isWorking && !hasPendingPermission && state.error == null
+    val submissionLabel = if (hasPendingPermission || dotThinking) null else submission?.let { submissionStatusLabel(it, state.pending, chat) }
+    val context = LocalContext.current
+    val dotAvatar = remember { DotAvatar.fromLabel(AppPreferences(context).dotAvatar) }
+    val dotName = (chat?.title ?: state.selectedSession?.title)?.takeIf { it.isNotBlank() && it.length <= 14 } ?: "Your dot"
+    // A newly arrived Dot reply plays the response bounce for a moment.
+    val lastAnswerId = messages.lastOrNull { it.role == ChatRole.ASSISTANT && it.phase == ChatPhase.FINAL_ANSWER }?.id
+    var dotResponding by remember { mutableStateOf(false) }
+    val seenAnswer = remember(state.selectedThreadId) { arrayOfNulls<String>(1) }
+    LaunchedEffect(state.selectedThreadId, lastAnswerId) {
+        val first = seenAnswer[0] == null
+        val changed = seenAnswer[0] != lastAnswerId
+        seenAnswer[0] = lastAnswerId ?: ""
+        if (isDot && !first && changed && lastAnswerId != null) {
+            dotResponding = true
+            delay(2600)
+            dotResponding = false
+        }
+    }
+    val dotMood = when {
+        hasPendingPermission -> DotMood.NEEDS
+        dotThinking -> DotMood.THINKING
+        dotResponding -> DotMood.RESPONDING
+        else -> DotMood.IDLE
+    }
     val followRevision = ChatFollowRevision(messages, agentThinking, state.error, state.sendNotice, submissionLabel)
     val lastContentIndex = (
         1 +
@@ -153,6 +183,9 @@ internal fun ChatScreen(
         AwLazyColumn(state = listState, topPadding = 30.dp, bottomPadding = if (hasActionablePermission) 40.dp else 72.dp, spacing = 0.dp) {
             item(key = "header") {
                 Column(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (isDot) {
+                        DotFigure(dotAvatar, dotMood, Modifier.padding(top = 6.dp, bottom = 4.dp).size(46.dp))
+                    }
                     Text(
                         chat?.title ?: state.selectedSession?.title ?: "Codex chat",
                         style = AwType.Title.copy(fontSize = 13.5.sp),
@@ -165,6 +198,7 @@ internal fun ChatScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         when {
                             hasPendingPermission -> { StatusIndicator(StatusKind.Attention); Text("Needs approval", color = Aw.Attention, fontSize = 11.sp) }
+                            dotThinking -> ShimmerText("Thinking", fontSize = 11.sp)
                             submissionLabel != null -> Text(submissionLabel, style = AwType.Caption, textAlign = TextAlign.Center)
                             state.pending && chat == null -> { StatusIndicator(StatusKind.Working); ShimmerText("Loading recent replies", fontSize = 11.sp) }
                             chat?.status == SessionStatus.ACTIVE -> { StatusIndicator(StatusKind.Working); ShimmerText("Working", fontSize = 11.sp) }
@@ -226,7 +260,10 @@ internal fun ChatScreen(
                 }
             }
             if (agentThinking) {
-                item(key = "agent-thinking") { ThinkingRow(palette, Modifier.padding(bottom = 11.dp)) }
+                item(key = "agent-thinking") {
+                    if (isDot) DotThinkingRow(dotAvatar, "$dotName is thinking", Modifier.padding(bottom = 11.dp))
+                    else ThinkingRow(palette, Modifier.padding(bottom = 11.dp))
+                }
             }
             submissionLabel?.let { label ->
                 item(key = "submission-status") {
@@ -322,6 +359,21 @@ private suspend fun LazyListState.scrollChatToBottom(lastContentIndex: Int, anim
     val target = layout.visibleItemsInfo.firstOrNull { it.index == lastContentIndex } ?: return
     val remaining = (target.offset + target.size + layout.afterContentPadding - layout.viewportEndOffset).coerceAtLeast(0)
     if (remaining > 0) scrollBy(remaining.toFloat())
+}
+
+@Composable
+private fun DotThinkingRow(avatar: DotAvatar, label: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+            .semantics { stateDescription = label; liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        DotFigure(avatar, DotMood.THINKING, Modifier.padding(top = 4.dp).size(26.dp))
+        ShimmerText(label, fontSize = 12.5.sp)
+    }
 }
 
 @Composable

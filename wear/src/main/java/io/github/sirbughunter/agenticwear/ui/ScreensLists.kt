@@ -135,7 +135,7 @@ internal fun SessionsScreen(
                     } else {
                         items(filtered, key = { it.id }) { SessionRow(it, state.selectedThreadId, onSelect) }
                     }
-                    if (group == "All") item(key = "dot") { Box(Modifier.padding(top = 6.dp)) { DotCard(palette) } }
+                    if (group == "All" && state.sessions.none { it.source == "dot" }) item(key = "dot") { Box(Modifier.padding(top = 6.dp)) { DotCard(palette) } }
                     item {
                         Text(
                             buildString {
@@ -163,12 +163,14 @@ private fun DotCard(palette: OrbPalette) {
             .background(Color(0xFF0F0F0F))
             .border(1.dp, Aw.LineStrong.copy(alpha = .14f), Aw.CardShape)
             .padding(horizontal = 12.dp, vertical = 8.dp)
-            .semantics(mergeDescendants = true) { contentDescription = "Your dot. Not linked yet. Needs a supported account link." },
+            .semantics(mergeDescendants = true) { contentDescription = "Your dot. Open your Dot in Chrome on your Mac to show it here." },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        CloudOrb(palette, OrbMode.Disabled, 0f, 0f, Modifier.size(26.dp).graphicsLayer { alpha = .55f })
-        AwRowText("Your dot", "Not linked yet · needs a supported account link", Modifier.weight(1f), subtitleColor = Aw.TextTertiary, titleLines = 1)
+        val context = LocalContext.current
+        val avatar = remember { DotAvatar.fromLabel(AppPreferences(context).dotAvatar) }
+        DotFigure(avatar, DotMood.FROZEN, Modifier.size(28.dp))
+        AwRowText("Your dot", "Open your Dot in Chrome on your Mac", Modifier.weight(1f), subtitleColor = Aw.TextTertiary, titleLines = 1)
     }
 }
 
@@ -190,7 +192,11 @@ private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (St
             Text(session.title, style = AwType.Row, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Icon(sessionSourceIcon(session.source), contentDescription = null, tint = Aw.TextTertiary, modifier = Modifier.size(11.dp))
+                if (session.source == "dot") {
+                    val context = LocalContext.current
+                    val avatar = remember { DotAvatar.fromLabel(AppPreferences(context).dotAvatar) }
+                    DotFigure(avatar, if (session.status == SessionStatus.ACTIVE) DotMood.THINKING else DotMood.IDLE, Modifier.size(13.dp))
+                } else Icon(sessionSourceIcon(session.source), contentDescription = null, tint = Aw.TextTertiary, modifier = Modifier.size(11.dp))
                 Text(meta, color = session.status.textColor, fontSize = 10.5.sp, lineHeight = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }

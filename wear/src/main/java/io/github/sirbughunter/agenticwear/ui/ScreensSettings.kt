@@ -74,6 +74,7 @@ internal fun SettingsScreen(
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context) }
     var colour by remember { mutableStateOf(LiveVoiceColour.fromLabel(preferences.liveVoiceColour)) }
+    var dotAvatar by remember { mutableStateOf(DotAvatar.fromLabel(preferences.dotAvatar)) }
     Box(Modifier.fillMaxSize().background(Aw.Bg)) {
         AwScrollColumn(bottomPadding = 40.dp) {
             AwScreenTitle("Settings")
@@ -113,10 +114,10 @@ internal fun SettingsScreen(
             AwToggleRow("Sounds in app", "Reply pop and error tone through media volume while the app is open", state.popSoundEnabled, onPopSound)
 
             AwSectionLabel("Your dot")
-            AwRowCard(onClick = {}, enabled = false) {
-                Icon(Icons.Rounded.Link, contentDescription = null, tint = Aw.TextTertiary, modifier = Modifier.size(16.dp))
-                AwRowText("Not linked", "Needs a supported account link from your Mac. Use your dot in the ChatGPT app meanwhile.",
-                    Modifier.weight(1f), subtitleColor = Aw.TextTertiary)
+            Text("Pick the figure that matches your Dot", style = AwType.Micro, textAlign = TextAlign.Center)
+            DotAvatarPicker(dotAvatar) { choice ->
+                dotAvatar = choice
+                preferences.dotAvatar = choice.label
             }
 
             AwRowCard(onClick = {}, enabled = false, minHeight = 46.dp) {
@@ -135,6 +136,30 @@ internal fun SettingsScreen(
                 style = AwType.Micro, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 6.dp),
             )
             Text("${BuildConfig.RELEASE_CHANNEL} ${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}", style = AwType.Micro, textAlign = TextAlign.Center)
+        }
+    }
+}
+
+@Composable
+private fun DotAvatarPicker(selected: DotAvatar, onPick: (DotAvatar) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+        DotAvatar.entries.chunked(4).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                row.forEach { avatar ->
+                    val on = avatar == selected
+                    Box(
+                        Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .clickable(role = Role.RadioButton) { onPick(avatar) }
+                            .semantics { this.selected = on; contentDescription = "${avatar.label} dot" }
+                            .border(2.dp, if (on) Aw.Text else Color.Transparent, CircleShape)
+                            .padding(5.dp),
+                    ) {
+                        DotFigure(avatar, if (on) DotMood.RESPONDING else DotMood.IDLE, Modifier.fillMaxSize())
+                    }
+                }
+            }
         }
     }
 }
