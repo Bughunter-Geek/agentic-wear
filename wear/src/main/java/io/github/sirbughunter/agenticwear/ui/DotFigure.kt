@@ -59,11 +59,32 @@ internal enum class DotMood { IDLE, THINKING, RESPONDING, NEEDS, FROZEN, LISTENI
  */
 internal val DOT_REACTIONS = listOf("👍", "✅", "💡", "🔍", "🚀", "🤝", "🙌", "🎉", "❤️", "🤔", "👀", "😂", "🙏", "🔥", "✨", "🫡", "🪄", "🧪", "🐛", "🫠", "🍳", "🧹")
 
-private val THINKING_EXPRESSIONS = listOf("💡", "🔍", "🤔", "🧪")
+/** An orb palette in the Dot's own colour, so an orb shown for a Dot matches it. */
+internal fun DotAvatar.orbPalette(): OrbPalette {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(android.graphics.Color.rgb((glow.red * 255).toInt(), (glow.green * 255).toInt(), (glow.blue * 255).toInt()), hsv)
+    fun hsv(h: Float, s: Float, v: Float) = Color(android.graphics.Color.HSVToColor(floatArrayOf(((h % 360f) + 360f) % 360f, s.coerceIn(0f, 1f), v.coerceIn(0f, 1f))))
+    return OrbPalette(
+        deep = hsv(hsv[0], hsv[1] * 1.08f, hsv[2] * .62f),
+        base = glow,
+        light = hsv(hsv[0], hsv[1] * .12f, 1f),
+        accent = hsv(hsv[0] + 28f, hsv[1] * .55f, 1f),
+    )
+}
+
+/** The Dot mood that matches a live-call orb mode. */
+internal fun OrbMode.toDotMood(): DotMood = when (this) {
+    OrbMode.Listening -> DotMood.LISTENING
+    OrbMode.Speaking -> DotMood.SPEAKING
+    OrbMode.Thinking -> DotMood.THINKING
+    OrbMode.Approval -> DotMood.NEEDS
+    OrbMode.Muted, OrbMode.Reconnecting, OrbMode.Disabled -> DotMood.FROZEN
+    else -> DotMood.IDLE
+}
 
 /** The expression for a mood when the Dot hasn't chosen its own; thinking cycles through ideas. */
 internal fun defaultDotExpression(mood: DotMood, seconds: Float): String? = when (mood) {
-    DotMood.THINKING -> THINKING_EXPRESSIONS[((seconds / 3.6f).toInt()).mod(THINKING_EXPRESSIONS.size)]
+    DotMood.THINKING -> "💡"
     DotMood.RESPONDING -> "✨"
     DotMood.NEEDS -> "👀"
     DotMood.SLEEPING -> "💤"
@@ -305,7 +326,7 @@ internal fun DotCallFigure(
     Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
         if (orbVisible) CloudOrb(
             palette = palette, mode = OrbMode.Thinking, userLevel = 0f, agentLevel = 0f,
-            modifier = Modifier.fillMaxSize(.45f).graphicsLayer {
+            modifier = Modifier.fillMaxSize(.62f).graphicsLayer {
                 val k = smoothStep(reveal / .6f)
                 val sc = 1f + .25f * k
                 scaleX = sc; scaleY = sc

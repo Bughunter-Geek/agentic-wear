@@ -122,6 +122,11 @@ class LiveVoiceActivity : ComponentActivity() {
                         kotlinx.coroutines.delay(250)
                     }
                 }
+                // A Dot call is known from the selected chat before the call's task id arrives.
+                val isDotCall = state.taskId.ifBlank { thread.orEmpty() }.startsWith("dot:")
+                val dotLook = remember(isDotCall) { if (isDotCall) io.github.sirbughunter.agenticwear.ui.DotAvatar.fromLabel(preferences.dotAvatar) else null }
+                val callPalette = remember(dotLook) { dotLook?.orbPalette() ?: palette }
+                val callDot = if (preferences.dotCallVisual == "Orb") null else dotLook
                 val canConnect = BuildConfig.LIVE_VOICE_RUNTIME && thread != null && state.phase != "ending" && !creating && cooldownSeconds == 0
 
                 fun start() {
@@ -170,7 +175,8 @@ class LiveVoiceActivity : ComponentActivity() {
                             CallInProgress(
                                 state = state,
                                 title = title,
-                                palette = palette,
+                                palette = callPalette,
+                                dotAvatar = callDot,
                                 controlsEnabled = true,
                                 canOpenTask = taskToOpen != null,
                                 onOpenTask = ::openTask,
@@ -187,7 +193,7 @@ class LiveVoiceActivity : ComponentActivity() {
                             CallIdle(
                                 state = state,
                                 title = title,
-                                palette = palette,
+                                palette = callPalette,
                                 canConnect = canConnect,
                                 cooldownSeconds = cooldownSeconds,
                                 creating = creating,
@@ -319,6 +325,7 @@ private fun CallInProgress(
     state: LiveVoiceState,
     title: String,
     palette: io.github.sirbughunter.agenticwear.ui.OrbPalette,
+    dotAvatar: io.github.sirbughunter.agenticwear.ui.DotAvatar?,
     controlsEnabled: Boolean,
     canOpenTask: Boolean,
     onOpenTask: () -> Unit,
@@ -348,10 +355,7 @@ private fun CallInProgress(
                 }
             }
         }
-        val context = androidx.compose.ui.platform.LocalContext.current
-        val prefs = remember { AppPreferences(context) }
-        val dotAvatar = remember { if (prefs.dotCallVisual == "Orb") null else io.github.sirbughunter.agenticwear.ui.DotAvatar.fromLabel(prefs.dotAvatar) }
-        if (dotAvatar != null && state.taskId.startsWith("dot:")) {
+        if (dotAvatar != null) {
             val figure = orb * 1.45f
             val mode = state.orbMode()
             io.github.sirbughunter.agenticwear.ui.DotCallFigure(
@@ -441,15 +445,8 @@ private fun CallIdle(
         AwScrollColumn(topPadding = 30.dp, bottomPadding = 76.dp) {
             Text("Live voice", style = AwType.Title)
             Text(title, style = AwType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-            val context = androidx.compose.ui.platform.LocalContext.current
-            val prefs = remember { AppPreferences(context) }
-            if (state.taskId.startsWith("dot:") && prefs.dotCallVisual != "Orb") {
-                io.github.sirbughunter.agenticwear.ui.DotFigure(
-                    io.github.sirbughunter.agenticwear.ui.DotAvatar.fromLabel(prefs.dotAvatar),
-                    if (state.phase == "error") io.github.sirbughunter.agenticwear.ui.DotMood.FROZEN else io.github.sirbughunter.agenticwear.ui.DotMood.IDLE,
-                    Modifier.padding(vertical = 6.dp).size(58.dp),
-                )
-            } else CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
+            // Before a call a Dot appears as its orb, in its own colour; the call turns it into the Dot.
+            CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
             val message = when {
                 cooldownSeconds > 0 -> "Lumen is finishing its previous call. Ready in ${cooldownSeconds}s."
                 !BuildConfig.LIVE_VOICE_RUNTIME -> "This build doesn’t include the live voice runtime."

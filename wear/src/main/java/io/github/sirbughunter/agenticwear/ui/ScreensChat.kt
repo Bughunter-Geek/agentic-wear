@@ -242,7 +242,7 @@ internal fun ChatScreen(
                         }
                     }
                     if (isDot) AnimatedContent(
-                        targetState = dotExpression?.let(::dotReactionLabel).orEmpty(),
+                        targetState = if (dotMood == DotMood.THINKING) "" else dotExpression?.let(::dotReactionLabel).orEmpty(),
                         transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
                         modifier = Modifier.padding(top = 2.dp).heightIn(min = 12.dp),
                         label = "dot reaction label",
