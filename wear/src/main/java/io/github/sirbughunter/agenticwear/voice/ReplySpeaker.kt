@@ -12,6 +12,10 @@ class ReplySpeaker(context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
     private var ready = false
+    private var initializationFailed = false
+    private val playback = SpeechPlaybackGate()
+    private var onStarted: (() -> Unit)? = null
+    private var startTimeout: Runnable? = null
     private var queued: (() -> Unit)? = null
     private var onDone: (() -> Unit)? = null
     private var onError: (() -> Unit)? = null
@@ -21,6 +25,7 @@ class ReplySpeaker(context: Context) {
         tts = TextToSpeech(context.applicationContext) { status ->
             main.post {
                 ready = status == TextToSpeech.SUCCESS
+                initializationFailed = !ready
                 val engine = tts
                 if (ready && engine != null) {
                     engine.setAudioAttributes(
@@ -30,7 +35,14 @@ class ReplySpeaker(context: Context) {
                             .build(),
                     )
                     engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                        override fun onStart(utteranceId: String?) = Unit
+                        override fun onStart(utteranceId: String?) {
+                            main.post {
+                                if (playback.started(utteranceId)) {
+                                    startTimeout?.let(main::removeCallbacks); startTimeout = null
+                                    onStarted?.also { onStarted = null }?.invoke()
+                                }
+                            }
+                        }
                         override fun onDone(utteranceId: String?) { main.post { finish(utteranceId, error = false) } }
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) { main.post { finish(utteranceId, error = true) } }
@@ -39,7 +51,7 @@ class ReplySpeaker(context: Context) {
                     queued?.also { queued = null }?.invoke()
                 } else {
                     queued = null
-                    onError?.also { clearCallbacks() }?.invoke()
+                    finish(currentUtterance, error = true)
                 }
             }
         }
@@ -48,25 +60,36 @@ class ReplySpeaker(context: Context) {
     private var currentUtterance: String? = null
 
     private fun finish(utteranceId: String?, error: Boolean) {
-        if (utteranceId != currentUtterance) return
+        val played = playback.finish(utteranceId) ?: return
         currentUtterance = null
-        val callback = if (error) onError else onDone
+        queued = null
+        val callback = if (error || !played) onError else onDone
         clearCallbacks()
         callback?.invoke()
     }
 
-    private fun clearCallbacks() { onDone = null; onError = null }
+    private fun clearCallbacks() {
+        startTimeout?.let(main::removeCallbacks); startTimeout = null
+        onDone = null; onError = null; onStarted = null
+    }
 
     /** Speaks [text]; [done] runs when finished, [failed] if speech cannot run. A newer call replaces the old one silently. */
-    fun speak(text: String, done: () -> Unit, failed: () -> Unit) {
+    fun speak(text: String, done: () -> Unit, failed: () -> Unit, started: () -> Unit = {}) {
         stop()
+        val id = "reply-${++utteranceCounter}"
+        currentUtterance = id
+        playback.begin(id)
         onDone = done
         onError = failed
+        onStarted = started
+        if (initializationFailed) { finish(id, error = true); return }
+        // A missing engine/voice or stalled synthesis must not look like audible speech forever.
+        startTimeout = Runnable { finish(id, error = true) }.also { main.postDelayed(it, 10_000L) }
         val start = {
-            val id = "reply-${++utteranceCounter}"
-            currentUtterance = id
-            val result = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
-            if (result != TextToSpeech.SUCCESS) { currentUtterance = null; onError?.also { clearCallbacks() }?.invoke() }
+            try {
+                val result = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+                if (result != TextToSpeech.SUCCESS) finish(id, error = true)
+            } catch (_: RuntimeException) { finish(id, error = true) }
         }
         if (ready) start() else queued = start
     }
@@ -75,6 +98,7 @@ class ReplySpeaker(context: Context) {
     fun stop() {
         queued = null
         currentUtterance = null
+        playback.stop()
         clearCallbacks()
         runCatching { tts?.stop() }
     }
@@ -83,5 +107,7 @@ class ReplySpeaker(context: Context) {
         stop()
         runCatching { tts?.shutdown() }
         tts = null
+        ready = false
+        initializationFailed = true
     }
 }

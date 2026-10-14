@@ -38,6 +38,9 @@ class BargeInMonitor {
         }.getOrNull() ?: return false
         if (record.state != AudioRecord.STATE_INITIALIZED) { record.release(); return false }
         val aec = runCatching { if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(record.audioSessionId)?.also { it.enabled = true } else null }.getOrNull()
+        // Raw speaker echo must never be treated as the user's interruption.
+        val safeEcho = runCatching { safeAutomaticBargeIn(aec != null, aec?.enabled == true, aec?.hasControl() == true) }.getOrDefault(false)
+        if (!safeEcho) { aec?.release(); record.release(); return false }
         val ns = runCatching { if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(record.audioSessionId)?.also { it.enabled = true } else null }.getOrNull()
         return try {
             record.startRecording()

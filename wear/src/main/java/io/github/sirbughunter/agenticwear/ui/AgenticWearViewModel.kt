@@ -356,6 +356,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun stopVoiceLoop() = dispatchVoiceLoop(VoiceLoopEvent.Stop)
+    fun interruptVoiceLoop() = dispatchVoiceLoop(VoiceLoopEvent.BargeIn)
 
     @Synchronized
     private fun dispatchVoiceLoop(event: VoiceLoopEvent) {
@@ -393,11 +394,22 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
                 dispatchVoiceLoop(VoiceLoopEvent.Submitted)
             }
             is VoiceLoopEffect.Speak -> {
-                startBargeInMonitor()
                 speaker().speak(
                 speechPlainText(effect.text),
-                done = { dispatchVoiceLoop(VoiceLoopEvent.SpeechDone) },
-                failed = { dispatchVoiceLoop(VoiceLoopEvent.Fail("Couldn't read the reply aloud. Voice conversation stopped.")) },
+                started = {
+                    if (_state.value.voiceLoop == VoiceLoopPhase.SPEAKING) {
+                        sendLoopTrace(VoiceLoopPhase.SPEAKING, "playback_started")
+                        startBargeInMonitor()
+                    }
+                },
+                done = {
+                    sendLoopTrace(VoiceLoopPhase.SPEAKING, "playback_done")
+                    dispatchVoiceLoop(VoiceLoopEvent.SpeechDone)
+                },
+                failed = {
+                    sendLoopTrace(VoiceLoopPhase.SPEAKING, "playback_failed")
+                    dispatchVoiceLoop(VoiceLoopEvent.Fail("Couldn't read the reply aloud. Voice conversation stopped."))
+                },
                 )
             }
             VoiceLoopEffect.StopAll -> stopVoiceLoopWork()
@@ -421,11 +433,15 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         val monitor = BargeInMonitor().also { bargeMonitor = it }
         val detector = BargeInDetector()
         bargeJob = viewModelScope.launch(Dispatchers.IO) {
-            monitor.run { level ->
+            val monitored = monitor.run { level ->
                 if (detector.update(level, SystemClock.elapsedRealtime())) {
                     monitor.stop()
                     viewModelScope.launch { if (bargeMonitor === monitor) dispatchVoiceLoop(VoiceLoopEvent.BargeIn) }
                 }
+            }
+            if (!monitored) viewModelScope.launch {
+                if (bargeMonitor === monitor && _state.value.voiceLoop == VoiceLoopPhase.SPEAKING)
+                    sendLoopTrace(VoiceLoopPhase.SPEAKING, "barge_in_unavailable")
             }
         }
     }
@@ -433,6 +449,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     private fun stopBargeInMonitor() {
         bargeMonitor?.stop()
         bargeMonitor = null
+        bargeJob?.cancel()
         bargeJob = null
     }
 

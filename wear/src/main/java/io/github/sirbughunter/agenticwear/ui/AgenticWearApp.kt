@@ -334,6 +334,7 @@ fun AgenticWearApp(
                 level = state.voiceLevel,
                 palette = orbPalette,
                 onFinishListening = viewModel::endPushToTalk,
+                onInterruptSpeaking = viewModel::interruptVoiceLoop,
                 onStop = viewModel::stopVoiceLoop,
             )
         }
@@ -361,6 +362,7 @@ private fun VoiceLoopScreen(
     level: Float,
     palette: OrbPalette,
     onFinishListening: () -> Unit,
+    onInterruptSpeaking: () -> Unit,
     onStop: () -> Unit,
 ) {
     BackHandler(onBack = onStop)
@@ -380,8 +382,14 @@ private fun VoiceLoopScreen(
             Spacer(Modifier.height(8.dp))
             Box(
                 Modifier.size(104.dp).clip(CircleShape)
-                    .clickable(enabled = phase == VoiceLoopPhase.LISTENING, role = Role.Button, onClick = onFinishListening)
-                    .semantics { contentDescription = if (phase == VoiceLoopPhase.LISTENING) "Finish speaking" else voiceLoopLabel(phase) },
+                    .clickable(enabled = phase == VoiceLoopPhase.LISTENING || phase == VoiceLoopPhase.SPEAKING, role = Role.Button) {
+                        if (phase == VoiceLoopPhase.SPEAKING) onInterruptSpeaking() else onFinishListening()
+                    }
+                    .semantics { contentDescription = when (phase) {
+                        VoiceLoopPhase.LISTENING -> "Finish speaking"
+                        VoiceLoopPhase.SPEAKING -> "Interrupt reply"
+                        else -> voiceLoopLabel(phase)
+                    } },
             ) {
                 CloudOrb(
                     palette = palette,
@@ -403,6 +411,7 @@ private fun VoiceLoopScreen(
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
             if (phase == VoiceLoopPhase.LISTENING) Text("Tap the orb when done", style = AwType.Micro)
+            if (phase == VoiceLoopPhase.SPEAKING) Text("Tap the orb to interrupt", style = AwType.Micro)
         }
         AwEdgeButton("Stop", onClick = onStop, primary = false)
     }
