@@ -2341,7 +2341,7 @@ describe("AppServerClient session delivery", () => {
       .resolves.toBeUndefined();
   });
 
-  it("grants the exact requested permission profile for only the current turn", async () => {
+  it("keeps undisclosed permission profiles alert-only in Alpha", async () => {
     const approvals: Array<{ approvalId: string; canControl: boolean }> = [];
     const longReason = `Allow this turn to write its test artifact? ${"detail ".repeat(120)}`;
     const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async (event) => {
@@ -2376,23 +2376,24 @@ describe("AppServerClient session delivery", () => {
       permissions,
     });
     const permissionSnapshot = await target.chatSnapshot("thread-1");
-    target.respondToApproval("permission-1", "accept");
+    expect(() => target.respondToApproval("permission-1", "accept")).toThrow("no longer active");
+    expect(() => target.respondToApproval("permission-1", "decline")).toThrow("no longer active");
 
-    expect(approvals).toEqual([{ approvalId: "permission-1", canControl: true }]);
+    expect(approvals).toEqual([{ approvalId: "permission-1", canControl: false }]);
     expect(permissionSnapshot.messages).toEqual([expect.objectContaining({
       id: "permission-1",
       turnId: "turn-1",
       role: "assistant",
       kind: "permission",
-      text: longReason.trim(),
+      text: expect.stringContaining("Review and respond in Codex"),
       approvalId: "permission-1",
-      canControl: true,
+      canControl: false,
       resolved: false,
     })]);
-    expect(writes).toEqual([{ id: 41, result: { permissions, scope: "turn" } }]);
+    expect(writes).toEqual([]);
   });
 
-  it("declines permission requests with an empty one-turn grant", async () => {
+  it("cannot answer a permission RPC with incomplete authority from the Watch", async () => {
     const target = new AppServerClient(new Set(["thread-1"]), async () => {}, async () => {});
     const internals = target as unknown as ClientInternals;
     const writes: Array<Record<string, unknown>> = [];
@@ -2412,9 +2413,39 @@ describe("AppServerClient session delivery", () => {
       reason: null,
       permissions: { network: { enabled: true }, fileSystem: null },
     });
-    target.respondToApproval("permission-2", "decline");
+    expect(() => target.respondToApproval("permission-2", "decline")).toThrow("no longer active");
+    expect(writes).toEqual([]);
+  });
 
-    expect(writes).toEqual([{ id: 42, result: { permissions: {}, scope: "turn" } }]);
+  it.each([
+    ["item/commandExecution/requestApproval", { command: "harmless-looking", cwd: "/tmp", additionalPermissions: { network: { enabled: true } } }],
+    ["item/commandExecution/requestApproval", { command: "printf sensitive", cwd: "/tmp", networkApprovalContext: { host: "example.test" } }],
+    ["item/commandExecution/requestApproval", { command: "id", cwd: "/tmp", proposedExecpolicyAmendment: ["id"] }],
+    ["item/commandExecution/requestApproval", { command: "id", cwd: "/tmp", proposedNetworkPolicyAmendments: [{ host: "example.test" }] }],
+    ["item/fileChange/requestApproval", { grantRoot: "/", changes: [{ path: "/sensitive", diff: "hidden" }] }],
+    ["item/commandExecution/requestApproval", { command: null, cwd: null }],
+    ["execCommandApproval", { command: "id", cwd: "/tmp" }],
+    ["applyPatchApproval", { grantRoot: "/" }],
+  ])("never grants hidden or unsupported authority for %s", async (method, fields) => {
+    const events: Array<{canControl:boolean;detail:string}> = [];
+    const target = new AppServerClient(new Set(["thread-1"]), async()=>{}, async event=>{events.push(event);});
+    const internals = target as unknown as ClientInternals;
+    internals.request = vi.fn(async method=>method === "thread/read" ? {thread:thread("active")} : {data:[],nextCursor:null});
+    const write = vi.fn(); internals.write = write;
+    await internals.handleServerRequest(44, String(method), {threadId:"thread-1",turnId:"turn-1",itemId:"hidden-authority",startedAtMs:1_787_900_000_000,reason:"Only a harmless check",...fields});
+    expect(events).toHaveLength(1); expect(events[0]).toMatchObject({canControl:false,detail:expect.stringContaining("Review and respond in Codex")});
+    expect(()=>target.respondToApproval("hidden-authority","accept")).toThrow();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale approval authority and removes it on an alert-only replacement", async()=>{
+    const target = new AppServerClient(new Set(["thread-1"]),async()=>{},async()=>{});
+    const internals = target as unknown as ClientInternals & {approvals:Map<string,unknown>};
+    internals.request=vi.fn(async()=>({thread:thread("active")}));const write=vi.fn();internals.write=write;
+    internals.approvals.set("stale",{rpcId:45,method:"permissions",threadId:"thread-1",requestedPermissions:{network:{enabled:true}}});
+    expect(()=>target.respondToApproval("stale","accept")).toThrow("Review and approve in Codex");
+    await internals.handleServerRequest(46,"item/fileChange/requestApproval",{threadId:"thread-1",turnId:"turn-1",itemId:"stale",startedAtMs:1_787_900_000_000,reason:"Harmless",grantRoot:"/"});
+    expect(internals.approvals.has("stale")).toBe(false);expect(()=>target.respondToApproval("stale","accept")).toThrow("no longer active");expect(write).not.toHaveBeenCalled();
   });
 
   it("keeps permission requests from another client's thread alert-only", async () => {

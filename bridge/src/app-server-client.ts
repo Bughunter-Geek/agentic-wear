@@ -279,6 +279,9 @@ const additionalFileSystemPermissionsSchema = z.object({
     access: z.enum(["read", "write", "deny"]),
   }).strict()).max(128).nullable().optional(),
 }).strict();
+// Alpha 1: Watch approval cards do not yet show complete concrete authority.
+const WATCH_APPROVAL_CONTROLS_SUPPORTED = false;
+
 const permissionProfileSchema = z.object({
   network: z.object({ enabled: z.boolean().nullable().optional() }).strict().nullable().optional(),
   fileSystem: additionalFileSystemPermissionsSchema.nullable().optional(),
@@ -1611,6 +1614,7 @@ export class AppServerClient {
     const pending = this.approvals.get(approvalId);
     if (!pending) throw new Error("That approval is no longer active");
     if (!this.watchOwnedThreadIds.has(pending.threadId)) throw new Error("Desktop-owned approvals are alert-only");
+    if (!WATCH_APPROVAL_CONTROLS_SUPPORTED) throw new Error("Review and approve in Codex; Watch approval controls are unavailable in this Alpha");
     const result = pending.method === "permissions"
       ? {
           permissions: decision === "accept" ? pending.requestedPermissions : {},
@@ -1860,7 +1864,8 @@ export class AppServerClient {
       ? permissionProfileSchema.safeParse(parsed.data.permissions)
       : null;
     const grantedPermissions = requestedPermissions?.success === true ? requestedPermissions.data : null;
-    const canControl = supported && (!permissionRequest || grantedPermissions !== null) &&
+    this.approvals.delete(approvalId); // A replacement request cannot retain stale authority.
+    const canControl = WATCH_APPROVAL_CONTROLS_SUPPORTED && supported && (!permissionRequest || grantedPermissions !== null) &&
       this.watchOwnedThreadIds.has(parsed.data.threadId) &&
       (!parsed.data.availableDecisions || ["accept", "decline"].every((value) => parsed.data.availableDecisions?.includes(value)));
     if (canControl) {
@@ -1881,8 +1886,8 @@ export class AppServerClient {
       this.noteDerivedState(pending.threadId);
     }
     const detail = sanitizePublicText(
-      parsed.data.reason ?? parsed.data.command ??
-        (method.includes("fileChange") ? "Allow the proposed file changes?" : "The agent needs your permission."),
+      `${parsed.data.reason ?? parsed.data.command ??
+        (method.includes("fileChange") ? "The agent proposes file changes." : "The agent needs your permission.")} Review and respond in Codex; Watch approval controls are unavailable in this Alpha.`,
     );
     if (supported) {
       const permissionMessage: CachedChatMessage = {
