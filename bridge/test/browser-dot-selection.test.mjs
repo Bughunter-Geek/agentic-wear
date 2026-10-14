@@ -65,3 +65,22 @@ test('selection refuses an active call, mixed accounts and another page without 
     finally { f.dom.window.close(); f.page.window.close(); }
   }
 });
+
+test('disconnect/reconnect accepts the generic toolbar plus one named Dot profile', async () => {
+  const f = await choose(body.replace('<main>', '<main><button data-orbit-profile-trigger="true" aria-label="Toggle profile"></button>'));
+  try {
+    assert.equal(f.writes.length, 1);
+    f.dom.window.document.getElementById('disconnect').click(); await flush();
+    assert.equal(f.saved(), undefined);
+    f.dom.window.document.getElementById('connect').click(); await flush();
+    assert.equal(f.writes.length, 2);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.saved())), selection);
+  } finally { f.dom.window.close(); f.page.window.close(); }
+});
+test('generic toolbar does not authorize missing or ambiguous named profiles', async () => {
+  for (const html of [body.replace('Open Fixture’s profile', 'Toggle profile'), body.replace('</main>', '<button data-orbit-profile-trigger="true" aria-label="Open Foreign’s profile"></button></main>')]) {
+    const f = await choose(html);
+    try { assert.equal(f.writes.length, 0); }
+    finally { f.dom.window.close(); f.page.window.close(); }
+  }
+});

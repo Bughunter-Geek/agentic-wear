@@ -22,10 +22,13 @@ document.getElementById('connect').addEventListener('click', async () => {
         if (!rows.length) return null;
         const match = /^([a-f0-9]{32})~\1~CalpicoMessage~/.exec(rows[0].dataset.messageId);
         if (!match || !rows.every(row => row.dataset.messageId.startsWith(`${match[1]}~${match[1]}~CalpicoMessage~`))) return null;
-        const profiles = [...document.querySelectorAll('[data-orbit-profile-trigger=true]')];
+        // The page also has a generic "Toggle profile" toolbar control.
+        // Only a named Dot profile verifies identity; multiple named profiles stay ambiguous.
+        const profiles = [...document.querySelectorAll('[data-orbit-profile-trigger=true]')]
+          .map(profile => (profile.getAttribute('aria-label') || '').replace(/^(Open|Close) /, ''))
+          .filter(label => label.length <= 200 && /.+[’']s profile$/.test(label));
         if (profiles.length !== 1) return null;
-        const profileLabel = (profiles[0].getAttribute('aria-label') || '').replace(/^(Open|Close) /, '');
-        if (profileLabel.length > 200 || !/.+[’']s profile$/.test(profileLabel)) return null;
+        const profileLabel = profiles[0];
         return { namespace: match[1], profileLabel };
       },
     });
