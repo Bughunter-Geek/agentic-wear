@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.39 Alpha — Watch build 121, updater-only bootstrap
+
+- Public updates remain available. Paired Watches can opt into their authenticated private test feed in Settings; opt-in defaults off and is cleared when disconnecting.
+- Choose the highest eligible version across enabled feeds, preferring public on equal versions. Promotion of an already installed build does not trigger another installation.
+- Cache feed origin and revalidate pairing, opt-in, expiry, checksum routes and redirect boundaries before private downloads and installation. Credentials are never sent to public sources.
+- Add exact-APK public-promotion preparation requiring matching private publication and physical Watch acceptance receipts; no rebuild or automatic publication.
+- Voice runtime and Mac packages are unchanged from the published 0.6.38 baseline. Sustained-call corrections remain private candidates.
+
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
 ## 0.6.38-alpha — 2026-10-14

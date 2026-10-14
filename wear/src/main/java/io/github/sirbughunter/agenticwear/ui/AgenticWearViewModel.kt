@@ -110,6 +110,7 @@ data class WearUiState(
     val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.BRIDGE_WHISPER,
     val approvalMode: ApprovalMode = ApprovalMode.ALERT_ONLY,
     val collapseUpdates: Boolean = true,
+    val privateTestUpdates: Boolean = false,
     val popSoundEnabled: Boolean = true,
     val voiceLoop: io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase = io.github.sirbughunter.agenticwear.voice.VoiceLoopPhase.IDLE,
     val speakingMessageId: String? = null,
@@ -221,7 +222,8 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         }
         viewModelScope.launch {
             io.github.sirbughunter.agenticwear.update.UpdateDownloadService.snapshot.collect { download ->
-                if (!_state.value.demo && download.update.stage != UpdateStage.IDLE) {
+                if (!_state.value.demo && download.update.stage != UpdateStage.IDLE &&
+                    (download.update.release?.let(updateManager::isReleaseEligible) != false)) {
                     downloadedUpdate = download.apk
                     _state.update { it.copy(appUpdate = download.update) }
                     if (download.update.stage == UpdateStage.READY && updateForeground && autoInstallRequested) {
@@ -318,6 +320,19 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     fun setApprovalMode(mode: ApprovalMode) {
         preferences.approvalMode = mode
         _state.update { current -> current.copy(approvalMode = mode) }
+    }
+
+    fun setPrivateTestUpdates(enabled: Boolean) {
+        updateCheckGeneration += 1
+        updateCheckJob?.cancel()
+        if (_state.value.appUpdate.stage == UpdateStage.DOWNLOADING)
+            io.github.sirbughunter.agenticwear.update.UpdateDownloadService.cancel(getApplication())
+        autoInstallRequested = false
+        updateManager.setPrivateTestsEnabled(enabled)
+        downloadedUpdate = null
+        _state.update { it.copy(privateTestUpdates = updateManager.privateTestsEnabled,
+            appUpdate = UpdateUiState(enabled = updateManager.enabled)) }
+        checkForUpdate(silent = false, force = true)
     }
 
     fun setCollapseUpdates(enabled: Boolean) {
@@ -1060,6 +1075,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun disconnect() {
+        setPrivateTestUpdates(false)
         cancelRecording()
         cancelTranscriptionTimerJob()
         _state.update { current ->
@@ -1589,6 +1605,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun continueInstall() {
+        val release = _state.value.appUpdate.release
+        if (release == null || !updateManager.isReleaseEligible(release)) {
+            downloadedUpdate = null
+            _state.update { it.copy(appUpdate = UpdateUiState(enabled = updateManager.enabled, stage = UpdateStage.ERROR,
+                message = "Update expired or its channel is disabled. Check again.")) }
+            return
+        }
         val apk = downloadedUpdate
         if (apk == null || !apk.isFile) {
             _state.update { current ->
@@ -1609,6 +1632,13 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun launchDownloadedInstaller() {
+        val release = _state.value.appUpdate.release
+        if (release == null || !updateManager.isReleaseEligible(release)) {
+            downloadedUpdate = null
+            _state.update { it.copy(appUpdate = UpdateUiState(enabled = updateManager.enabled, stage = UpdateStage.ERROR,
+                message = "Update expired or its channel is disabled. Check again.")) }
+            return
+        }
         val apk = downloadedUpdate
         if (apk == null || !apk.isFile) {
             _state.update { current ->
@@ -1742,6 +1772,7 @@ class AgenticWearViewModel(application: Application) : AndroidViewModel(applicat
         return WearUiState(
             screen = destination,
             isPaired = paired,
+            privateTestUpdates = updateManager.privateTestsEnabled,
             sessions = preferences.sessions,
             localInventoryComplete = preferences.localInventoryComplete,
             models = preferences.models,

@@ -42,6 +42,15 @@ class AppUpdateHttpPolicyTest {
         assertNull(newestAvailableRelease(listOf(current), 31))
     }
 
+    @Test fun `public promotion wins equal version without reinstalling`() {
+        val public = release(122)
+        val private = public.copy(origin = UpdateOrigin.PRIVATE)
+        assertEquals(public, newestAvailableRelease(listOf(private, public), 121))
+        assertEquals(public, newestAvailableRelease(listOf(public, private), 121))
+        assertEquals(private.copy(versionCode = 123), newestAvailableRelease(listOf(public, private.copy(versionCode = 123)), 121))
+        assertNull(newestAvailableRelease(listOf(public, private), 122))
+    }
+
     private fun release(versionCode: Int) = AppRelease(
         versionCode = versionCode,
         versionName = "0.6.$versionCode",

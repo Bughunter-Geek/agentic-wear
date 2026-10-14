@@ -9,3 +9,12 @@ internal fun privateUpdateUrlAllowed(candidate: URL, relay: URL, pairId: String)
     val prefix = relay.path.trimEnd('/') + "/v1/pairs/$pairId/private-update/"
     return candidate.path == prefix + "manifest" || candidate.path.matches(Regex(Regex.escape(prefix) + "apk/[a-f0-9]{64}"))
 }
+
+/** Public sources never request the credential-bearing pair routes, including encoded paths. */
+internal fun publicUpdateUrlAllowed(candidate: URL): Boolean {
+    val path = candidate.path.lowercase()
+    return !path.contains("/v1/pairs/") && !path.contains("/private-update/") && !path.contains("%")
+}
+
+internal fun privateUpdateReleaseAllowed(apk: URL, sha256: String, expiresAt: Long?, now: Long): Boolean =
+    expiresAt != null && expiresAt > now && sha256.matches(Regex("[a-f0-9]{64}")) && apk.path.endsWith("/apk/$sha256")

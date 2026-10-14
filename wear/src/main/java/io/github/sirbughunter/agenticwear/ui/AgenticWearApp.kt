@@ -247,6 +247,7 @@ fun AgenticWearApp(
                     onEngine = viewModel::setTranscriptionEngine,
                     onApprovalMode = viewModel::setApprovalMode,
                     onCollapseUpdates = viewModel::setCollapseUpdates,
+                    onPrivateTestUpdates = viewModel::setPrivateTestUpdates,
                     onPopSound = viewModel::setPopSoundEnabled,
                     onUpdate = viewModel::onUpdateAction,
                     onDisconnect = viewModel::disconnect,

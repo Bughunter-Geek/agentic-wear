@@ -52,6 +52,7 @@ import io.github.sirbughunter.agenticwear.data.AppPreferences
 import io.github.sirbughunter.agenticwear.live.LiveVoiceColour
 import io.github.sirbughunter.agenticwear.model.ApprovalMode
 import io.github.sirbughunter.agenticwear.model.TranscriptionEngine
+import io.github.sirbughunter.agenticwear.update.UpdateOrigin
 import io.github.sirbughunter.agenticwear.update.UpdateStage
 import io.github.sirbughunter.agenticwear.update.UpdateUiState
 import kotlinx.coroutines.launch
@@ -66,6 +67,7 @@ internal fun SettingsScreen(
     onEngine: (TranscriptionEngine) -> Unit,
     onApprovalMode: (ApprovalMode) -> Unit,
     onCollapseUpdates: (Boolean) -> Unit,
+    onPrivateTestUpdates: (Boolean) -> Unit,
     onPopSound: (Boolean) -> Unit,
     onUpdate: () -> Unit,
     onDisconnect: () -> Unit,
@@ -84,6 +86,7 @@ internal fun SettingsScreen(
             Text("Installed ${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
                 style = AwType.Micro, textAlign = TextAlign.Center)
             UpdateRow(state.appUpdate, onUpdate)
+            if (state.isPaired) AwToggleRow("Private test updates", "Include signed tests from your paired Mac", state.privateTestUpdates, onPrivateTestUpdates)
 
             AwSectionLabel("Live voice")
             AwRowCard(onClick = onLiveCall) {
@@ -199,11 +202,12 @@ private fun UpdateRow(update: UpdateUiState, onClick: () -> Unit) {
     if (!update.enabled) {
         AwRowCard(onClick = {}, enabled = false) {
             Icon(Icons.Rounded.Download, contentDescription = null, tint = Aw.TextTertiary, modifier = Modifier.size(16.dp))
-            AwRowText("Updates unavailable", if (BuildConfig.PRIVATE_UPDATES_ONLY) "Connect your Mac to check for private updates" else "Updates are not configured for this build", Modifier.weight(1f))
+            AwRowText("Updates unavailable", "Updates are not configured for this build", Modifier.weight(1f))
         }
         return
     }
-    val release = "${BuildConfig.RELEASE_CHANNEL} ${update.release?.versionName.orEmpty()}".trim()
+    val channel = if (update.release?.origin == UpdateOrigin.PRIVATE) "Private test" else BuildConfig.RELEASE_CHANNEL
+    val release = "$channel ${update.release?.versionName.orEmpty()}".trim()
     val title = when (update.stage) {
         UpdateStage.IDLE -> "Check for updates"
         UpdateStage.CHECKING -> "Checking for updates…"
@@ -214,8 +218,8 @@ private fun UpdateRow(update: UpdateUiState, onClick: () -> Unit) {
         UpdateStage.ERROR -> "Update unavailable"
     }
     val subtitle = when (update.stage) {
-        UpdateStage.IDLE -> if (BuildConfig.PRIVATE_UPDATES_ONLY) "Signed builds from your paired private relay" else "Signed ${BuildConfig.RELEASE_CHANNEL.lowercase()} builds from GitHub"
-        UpdateStage.CHECKING -> if (BuildConfig.PRIVATE_UPDATES_ONLY) "Checking private channel · tap to restart" else "Checking two sources · tap to restart"
+        UpdateStage.IDLE -> "Signed ${BuildConfig.RELEASE_CHANNEL.lowercase()} builds · private tests optional"
+        UpdateStage.CHECKING -> "Checking enabled sources · tap to restart"
         UpdateStage.AVAILABLE -> "$release · tap to download and install"
         UpdateStage.DOWNLOADING -> if (update.progress > 0) "${update.progress}% · tap to cancel" else "Starting download · tap to cancel"
         UpdateStage.READY -> "$release · ${update.message ?: "Tap to open the system installer"}"

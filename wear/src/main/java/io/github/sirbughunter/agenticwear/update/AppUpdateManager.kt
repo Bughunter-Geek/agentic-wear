@@ -27,6 +27,10 @@ import org.json.JSONObject
 
 enum class UpdateStage { IDLE, CHECKING, AVAILABLE, DOWNLOADING, READY, CURRENT, ERROR }
 
+enum class UpdateOrigin { PUBLIC, PRIVATE }
+
+internal data class UpdateSource(val url: URL, val origin: UpdateOrigin)
+
 data class AppRelease(
     val versionCode: Int,
     val versionName: String,
@@ -34,6 +38,8 @@ data class AppRelease(
     val sha256: String,
     val apkSize: Long?,
     val expiresAt: Long? = null,
+    val origin: UpdateOrigin = UpdateOrigin.PUBLIC,
+    val manifestUrl: String? = null,
 )
 
 data class UpdateUiState(
@@ -51,24 +57,46 @@ internal fun updateManifestCandidates(primary: String, fallback: String): List<S
     listOf(primary, fallback).map(String::trim).filter(String::isNotEmpty).distinct()
 
 internal fun newestAvailableRelease(releases: Iterable<AppRelease>, installedVersionCode: Int): AppRelease? =
-    releases.maxByOrNull(AppRelease::versionCode)?.takeIf { it.versionCode > installedVersionCode }
+    releases.maxWithOrNull(compareBy<AppRelease> { it.versionCode }.thenBy { it.origin == UpdateOrigin.PUBLIC })?.takeIf { it.versionCode > installedVersionCode }
 
 class AppUpdateManager(private val context: Context) {
     private val pairingStore = SecurePairingStore(context)
-    private val manifestUrls: List<URL> get() = if (BuildConfig.PRIVATE_UPDATES_ONLY) {
-        pairingStore.read()?.let { listOf(validatedUrl(it.relayUrl.trimEnd('/') + "/v1/pairs/${it.pairId}/private-update/manifest")) } ?: emptyList()
-    } else updateManifestCandidates(
-        BuildConfig.UPDATE_MANIFEST_URL,
-        BuildConfig.UPDATE_MANIFEST_FALLBACK_URL,
-    ).map(::validatedUrl)
     private val updatePreferences = context.getSharedPreferences(UPDATE_PREFERENCES, Context.MODE_PRIVATE)
+    val privateTestsEnabled: Boolean get() = pairingStore.read()?.let {
+        updatePreferences.getString("private_test_pair", null) == it.pairId
+    } == true
+
+    fun setPrivateTestsEnabled(enabled: Boolean) {
+        val pair = pairingStore.read()
+        updatePreferences.edit().apply {
+            if (enabled && pair != null) putString("private_test_pair", pair.pairId)
+            else remove("private_test_pair")
+            remove(KEY_CACHED_RELEASE)
+        }.commit()
+        cancelActiveChecks()
+        cancelDownload(discardPartial = true)
+    }
+
+    private val manifestSources: List<UpdateSource> get() = buildList {
+        updateManifestCandidates(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_MANIFEST_FALLBACK_URL)
+            .forEach { add(UpdateSource(validatedUrl(it), UpdateOrigin.PUBLIC)) }
+        if (privateTestsEnabled) pairingStore.read()?.let {
+            add(UpdateSource(validatedUrl(it.relayUrl.trimEnd('/') + "/v1/pairs/${it.pairId}/private-update/manifest"), UpdateOrigin.PRIVATE))
+        }
+    }
     private val activeChecks = ConcurrentHashMap.newKeySet<ManifestCheckRun>()
-    val enabled: Boolean get() = manifestUrls.isNotEmpty()
+    val enabled: Boolean get() = manifestSources.isNotEmpty()
 
     fun cachedRelease(): AppRelease? {
         val encoded = updatePreferences.getString(KEY_CACHED_RELEASE, null) ?: return null
-        val baseUrl = manifestUrls.firstOrNull() ?: return null
-        val release = runCatching { parseManifest(encoded, baseUrl) }.getOrNull()
+        val release = runCatching {
+            val json = JSONObject(encoded)
+            val origin = UpdateOrigin.valueOf(json.optString("origin", "PUBLIC"))
+            val base = json.optString("manifestUrl").takeIf(String::isNotBlank)
+                ?: manifestSources.firstOrNull { it.origin == origin }?.url?.toString()
+                ?: throw IOException("Update source is unavailable")
+            parseManifest(encoded, UpdateSource(validatedUrl(base), origin))
+        }.getOrNull()
         if (release == null || release.versionCode <= BuildConfig.VERSION_CODE) {
             updatePreferences.edit().remove(KEY_CACHED_RELEASE).apply()
             return null
@@ -82,21 +110,23 @@ class AppUpdateManager(private val context: Context) {
 
     fun checkForUpdate(): AppRelease? {
         check(enabled) { "App updates are not configured for this build" }
+        val sources = manifestSources
         val check = ManifestCheckRun()
         activeChecks += check
-        val executor = Executors.newFixedThreadPool(manifestUrls.size) { task ->
+        val executor = Executors.newFixedThreadPool(sources.size) { task ->
             Thread(task, "agentic-wear-ota-${UPDATE_THREAD_SEQUENCE.incrementAndGet()}").apply {
                 isDaemon = true
             }
         }
         val completion = ExecutorCompletionService<ManifestAttempt>(executor)
-        val futures = manifestUrls.map { manifestUrl ->
-            completion.submit { fetchManifest(manifestUrl, check) }
+        val futures = sources.map { source ->
+            completion.submit { fetchManifest(source, check) }
         }
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CHECK_DEADLINE_MS)
         var completed = 0
         var validNoUpdate = false
         var lastError: IOException? = null
+        val releases = mutableListOf<AppRelease>()
         try {
             while (completed < futures.size) {
                 val remainingNanos = deadlineNanos - System.nanoTime()
@@ -105,16 +135,17 @@ class AppUpdateManager(private val context: Context) {
                 completed += 1
                 val attempt = finished.get()
                 attempt.release?.let { release ->
-                    if (release.versionCode > BuildConfig.VERSION_CODE) {
-                        rememberRelease(release)
-                        return release
-                    }
+                    releases += release
                     validNoUpdate = true
                 }
                 if (attempt.missing) validNoUpdate = true
                 if (attempt.error != null) lastError = attempt.error
             }
-            cachedRelease()?.let { return it }
+            cachedRelease()?.let { releases += it }
+            newestAvailableRelease(releases.filter { runCatching { validateRelease(it) }.isSuccess }, BuildConfig.VERSION_CODE)?.let {
+                rememberRelease(it)
+                return it
+            }
             if (validNoUpdate) return null
             if (completed < futures.size) {
                 throw SocketTimeoutException("Update check timed out. Tap to retry.")
@@ -128,8 +159,8 @@ class AppUpdateManager(private val context: Context) {
         }
     }
 
-    private fun fetchManifest(manifestUrl: URL, check: ManifestCheckRun): ManifestAttempt = try {
-        val connection = openManifestConnection(manifestUrl, check)
+    private fun fetchManifest(source: UpdateSource, check: ManifestCheckRun): ManifestAttempt = try {
+        val connection = openManifestConnection(source, check)
             ?: return ManifestAttempt(missing = true)
         val body = try {
             connection.useConnection {
@@ -138,7 +169,7 @@ class AppUpdateManager(private val context: Context) {
         } finally {
             check.forget(connection)
         }
-        ManifestAttempt(release = parseManifest(body, manifestUrl))
+        ManifestAttempt(release = parseManifest(body, source))
     } catch (error: IOException) {
         ManifestAttempt(error = error)
     } catch (error: Throwable) {
@@ -151,6 +182,8 @@ class AppUpdateManager(private val context: Context) {
             .put("versionName", release.versionName)
             .put("apkUrl", release.apkUrl)
             .put("sha256", release.sha256)
+            .put("origin", release.origin.name)
+            .put("manifestUrl", release.manifestUrl)
             .apply { release.apkSize?.let { put("apkSize", it) }; release.expiresAt?.let { put("expiresAt", it) } }
             .toString()
         updatePreferences.edit().putString(KEY_CACHED_RELEASE, encoded).commit()
@@ -163,6 +196,7 @@ class AppUpdateManager(private val context: Context) {
     fun cancelDownload(discardPartial: Boolean = false) { discardPartialDownload = discardPartialDownload || discardPartial; downloadCancelled = true; downloadConnection?.disconnect() }
 
     fun download(release: AppRelease, onProgress: (Int) -> Unit): File {
+        validateRelease(release)
         val deadline = android.os.SystemClock.elapsedRealtime() + 10 * 60_000L
         val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
         val stem = "agentic-wear-${release.versionCode}-${release.sha256.take(16)}"
@@ -170,8 +204,9 @@ class AppUpdateManager(private val context: Context) {
         val network = runCatching { updateNetwork.acquire() }.getOrNull()
         return try {
             verifiedUpdateDownload(File(updatesDir, "$stem.partial.apk"), File(updatesDir, "$stem.apk"), release, MAX_APK_BYTES,
-                open = { offset -> openConnection(validatedUrl(release.apkUrl), APK_MIME_TYPE, offset, network).also { downloadConnection = it } },
+                open = { offset -> openConnection(validatedUrl(release.apkUrl), APK_MIME_TYPE, release.origin, offset, network).also { downloadConnection = it } },
                 checkActive = {
+                    validateRelease(release)
                     if (downloadCancelled) throw UpdateDownloadCancelled(discardPartialDownload)
                     if (android.os.SystemClock.elapsedRealtime() >= deadline) throw UpdateDownloadCancelled(false)
                 }, onProgress = onProgress, verifyPackage = { verifyPackage(it, release) })
@@ -196,7 +231,9 @@ class AppUpdateManager(private val context: Context) {
         return true
     }
 
-    private fun parseManifest(body: String, baseUrl: URL): AppRelease {
+    private fun parseManifest(body: String, source: UpdateSource): AppRelease {
+        validateSourceUrl(source.url, source.origin)
+        val baseUrl = source.url
         val json = runCatching { JSONObject(body) }
             .getOrElse { throw IOException("Update manifest is not valid JSON", it) }
         val versionCode = json.optInt("versionCode", -1)
@@ -215,26 +252,41 @@ class AppUpdateManager(private val context: Context) {
             .getOrElse { throw IOException("Update manifest has an invalid APK URL", it) }
         validatedUrl(resolvedApkUrl.toString())
         val expiresAt = json.optLong("expiresAt", -1L).takeIf { it > 0L }
-        if (BuildConfig.PRIVATE_UPDATES_ONLY) {
-            val pairing = pairingStore.read() ?: throw IOException("Private update requires pairing")
-            val relay = validatedUrl(pairing.relayUrl)
-            if (!privateUpdateUrlAllowed(resolvedApkUrl, relay, pairing.pairId) || !resolvedApkUrl.path.endsWith("/apk/$sha256"))
-                throw IOException("Private APK URL is outside the paired update channel")
-            if (expiresAt == null || expiresAt <= System.currentTimeMillis()) throw IOException("Private update has expired")
-        }
-        return AppRelease(versionCode, versionName, resolvedApkUrl.toString(), sha256, apkSize, expiresAt)
+        return AppRelease(versionCode, versionName, resolvedApkUrl.toString(), sha256, apkSize, expiresAt,
+            source.origin, source.url.toString()).also(::validateRelease)
     }
 
-    private fun openConnection(initialUrl: URL, accept: String, rangeOffset: Long = 0, network: Network? = null): HttpURLConnection {
-        return openConnectionOrNull(initialUrl, accept, missingManifestIsNoUpdate = false, rangeOffset = rangeOffset, network = network)
+    fun isReleaseEligible(release: AppRelease): Boolean = release.versionCode > BuildConfig.VERSION_CODE &&
+        runCatching { validateRelease(release) }.isSuccess
+
+    private fun validateRelease(release: AppRelease) {
+        validateSourceUrl(validatedUrl(release.apkUrl), release.origin)
+        if (release.origin == UpdateOrigin.PRIVATE) {
+            if (!privateUpdateReleaseAllowed(URL(release.apkUrl), release.sha256, release.expiresAt, System.currentTimeMillis()))
+                throw IOException("Private update has expired or has an invalid checksum route")
+        }
+    }
+
+    private fun validateSourceUrl(url: URL, origin: UpdateOrigin) {
+        validatedUrl(url.toString())
+        if (origin == UpdateOrigin.PRIVATE) {
+            val pairing = pairingStore.read() ?: throw IOException("Private update requires pairing")
+            if (!privateTestsEnabled || !privateUpdateUrlAllowed(url, validatedUrl(pairing.relayUrl), pairing.pairId))
+                throw IOException("Private update left the enabled paired channel")
+        } else if (!publicUpdateUrlAllowed(url)) throw IOException("Public update entered a private route")
+    }
+
+    private fun openConnection(initialUrl: URL, accept: String, origin: UpdateOrigin, rangeOffset: Long = 0, network: Network? = null): HttpURLConnection {
+        return openConnectionOrNull(initialUrl, accept, missingManifestIsNoUpdate = false, origin = origin, rangeOffset = rangeOffset, network = network)
             ?: error("Only update manifests may be absent")
     }
 
-    private fun openManifestConnection(initialUrl: URL, check: ManifestCheckRun): HttpURLConnection? =
+    private fun openManifestConnection(source: UpdateSource, check: ManifestCheckRun): HttpURLConnection? =
         openConnectionOrNull(
-            initialUrl,
+            source.url,
             "application/vnd.github.raw+json, application/json",
             missingManifestIsNoUpdate = true,
+            origin = source.origin,
             manifestCheck = check,
         )
 
@@ -242,6 +294,7 @@ class AppUpdateManager(private val context: Context) {
         initialUrl: URL,
         accept: String,
         missingManifestIsNoUpdate: Boolean,
+        origin: UpdateOrigin,
         manifestCheck: ManifestCheckRun? = null,
         rangeOffset: Long = 0,
         network: Network? = null,
@@ -249,9 +302,8 @@ class AppUpdateManager(private val context: Context) {
         var current = initialUrl
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             validatedUrl(current.toString())
-            val pairing = if (BuildConfig.PRIVATE_UPDATES_ONLY) pairingStore.read() ?: throw IOException("Private update requires pairing") else null
-            if (pairing != null && !privateUpdateUrlAllowed(current, validatedUrl(pairing.relayUrl), pairing.pairId))
-                throw IOException("Private update redirect left the paired channel")
+            validateSourceUrl(current, origin)
+            val pairing = if (origin == UpdateOrigin.PRIVATE) pairingStore.read() ?: throw IOException("Private update requires pairing") else null
             val connection = ((network?.openConnection(current) ?: current.openConnection()) as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = CONNECT_TIMEOUT_MS

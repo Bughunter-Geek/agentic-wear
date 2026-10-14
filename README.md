@@ -6,10 +6,10 @@ Speak to Codex, follow a session, and receive completion or permission alerts fr
 
 Two packages, two versions:
 
-- **Watch 0.6.38 — build 120:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.38-alpha).
+- **Watch 0.6.39 — build 121:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.39-alpha).
 - **Receiver / Mac companion 0.3.17:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.38-alpha/agentic-wear-mac-0.3.17.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
 
-Use both matching packages. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.38-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.38-alpha); an unpinned default-branch checkout may predate this implementation.
+Watch 0.6.39 is an updater-only bootstrap and keeps the 0.6.38 voice behavior. The Mac package is unchanged. On a paired Watch, **Settings → Private test updates** includes only its authenticated pair feed; this defaults off. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.39-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.39-alpha); an unpinned default-branch checkout may predate this implementation.
 
 The current source and receiver have explicit per-browser Dot selection and no maintainer Dot default. A packaging guard checks the committed source and staged receiver. Older source tags, downloads and caches are unchanged and may retain the former default; use this release rather than rebuilding an old receiver. Historical tags are not rewritten.
 
