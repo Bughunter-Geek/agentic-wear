@@ -66,6 +66,14 @@ it('a duplicate Dot cannot replace a tab with an active Watch voice lease',async
   {id:'ext',frameId:0,url:dot,tab:{id:3}});
  assert.equal(w.posted.length,count);w.close('first');await settle();
 });
+it('duplicate-tab ownership cannot change while a Watch start is awaiting readiness',async()=>{
+ const w=voiceFixture();let ready;
+ w.chrome.tabs.sendMessage=async(id,command)=>command.kind==='native-voice-check'?new Promise(resolve=>ready=resolve):true;
+ w.start('first');const count=w.posted.length;
+ w.hooks.message[0]({version:1,kind:'observation',url:dot,documentId:'other',identity:'lumen',visibility:'visible',nativeVoice:true,turns:[]},
+  {id:'ext',frameId:0,url:dot,tab:{id:3}});
+ assert.equal(w.posted.length,count);ready({ready:false});await settle();
+});
 it('a previous-call mute restoration cannot unmute a newly starting Watch call',async()=>{
  const w=voiceFixture();w.start('first');await settle();assert.equal(w.muted(),true);
  const get=w.chrome.tabs.get;let release, reads=0;

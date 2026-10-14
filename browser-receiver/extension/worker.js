@@ -4,6 +4,7 @@ const isTarget=url=>typeof url==='string'&&(url===DOT_URL||LOCAL_URL.test(url));
 let native;
 const owners=new Map(),protectedTabs=new Set();
 const voiceMutes=new Map(),voiceMuteQueues=new Map();
+const pendingVoiceStarts=new Set();
 // Serialize mute changes per tab: an old asynchronous restore must finish
 // before a new lease captures and applies its browser-audio mute state.
 function withVoiceTab(tabId,operation){
@@ -37,6 +38,8 @@ async function voiceCommand(message,port){
  const owner=owners.get(message.url),fail={version:1,kind:'native-voice-event',url:message.url,documentId:message.documentId,
   identity:owner?.identity,event:{callId:message.callId,threadId:message.threadId,state:'failed'}};
  if(!owner||owner.documentId!==message.documentId||!isTarget(message.url)||Date.now()>=message.expiresAt){if(message.action==='start')console.warn('Agentic Wear voice startup refused: routing-mismatch');port.postMessage(fail);return;}
+ const pending=message.action==='start'?{tabId:owner.tabId}:null;
+ if(pending)pendingVoiceStarts.add(pending);
  try{
   if(message.action==='start'){
    const check=await chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-check'},{frameId:0});
@@ -47,6 +50,7 @@ async function voiceCommand(message,port){
   if(accepted!==true&&message.action==='start'){console.warn('Agentic Wear voice startup refused: page-declined');port.postMessage(fail);await restoreVoiceMute(message.callId);}
   if(message.action==='stop')await restoreVoiceMute(message.callId);
  }catch{if(message.action==='start')console.warn('Agentic Wear voice startup refused: content-message-failed');port.postMessage(fail);await restoreVoiceMute(message.callId);}
+ finally{if(pending)pendingVoiceStarts.delete(pending);}
 }
 function voiceLost(){
  for(const owner of owners.values())chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-lost'},{frameId:0}).catch(()=>{});
@@ -105,7 +109,7 @@ chrome.runtime.onMessage.addListener((message,sender)=>{
   // Duplicate Dot tabs used to pin routing to whichever observation arrived
   // first, even when that stale tab could not start voice. Follow the visible,
   // ready tab for the SAME selected Dot, only while no Watch lease owns it.
-  const leased=[...voiceMutes.values()].some(lease=>lease.tabId===owner.tabId);
+  const leased=[...voiceMutes.values(),...pendingVoiceStarts].some(lease=>lease.tabId===owner.tabId);
   if(sender.url!==DOT_URL||!message.identity||message.identity!==owner.identity||
     message.visibility!=='visible'||message.nativeVoice!==true||owner.nativeVoice===true||leased)return;
  }
