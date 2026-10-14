@@ -6,26 +6,26 @@ Speak to Codex, follow a session, and receive completion or permission alerts fr
 
 Two packages, two versions:
 
-- **Watch 0.6.39 — build 121:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.39-alpha).
+- **Watch 0.6.38 — build 120:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.38-alpha).
 - **Receiver / Mac companion 0.3.17:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.38-alpha/agentic-wear-mac-0.3.17.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
 
-Watch 0.6.39 is an updater-only bootstrap; the Mac package and 0.6.38 voice behavior are unchanged. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.39-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.39-alpha); an unpinned default-branch checkout may predate this implementation.
+Use both matching packages. The temporary Watch 0.6.39 updater-only bootstrap download has been withdrawn; public OTA points to Watch 0.6.38/build 120. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The current public release source is pinned at [v0.6.38-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.38-alpha); an unpinned default-branch checkout may predate this implementation.
 
 The current source and receiver have explicit per-browser Dot selection and no maintainer Dot default. A packaging guard checks the committed source and staged receiver. Older source tags, downloads and caches are unchanged and may retain the former default; use this release rather than rebuilding an old receiver. Historical tags are not rewritten.
 
 ## Private test updates
 
-After installing Watch 0.6.39/build 121 through the existing public updater, a
-paired Watch can enable **Settings → Private test updates**. The switch defaults
+Existing testers who already installed Watch 0.6.39/build 121 can enable **Settings → Private test updates**. The switch defaults
 off and includes only that authenticated pairing's private feed; it cannot
 access another user's feed. Public updates remain available. The newest
 eligible build wins, and a private build already installed is not reinstalled
 when its identical APK is later promoted publicly.
 
-The call-fix candidate is held for private testing. The temporary bootstrap
-prerelease may be withdrawn only after verified physical installation and
-separate explicit approval; public OTA pointers must remain valid. Removal is
-not an access-control mechanism and cannot revoke downloaded copies.
+The call-fix candidate is distributed through the authenticated private test feed;
+public promotion awaits physical acceptance. The temporary bootstrap prerelease
+was removed after the tester confirmed installation and approved removal. Its
+Git tag and source history remain available. Removal cannot revoke downloaded
+copies and does not grant access to another pairing's private feed.
 
 ## Installation instructions
 
