@@ -124,5 +124,4 @@ permission or rendered pixels; verify the test text on the physical Watch.
 No physical Watch latency is established by unit tests or a local Unix socket
 benchmark. The desktop must be running, signed in and awake, and the Watch
 must have network access. FCM delivery and a sleeping desktop remain external
-limits. This receiver does not yet connect Dots; those conversations require
-their own verified identity and event mapping.
+limits. Dot history/text/voice require the receiver's explicit Connect this Dot selection and a matching private companion target. Ordinary cloud voice uses the scoped Mac companion, not a native browser cloud-call control. See cloud-native-voice.md and the receiver setup instructions.

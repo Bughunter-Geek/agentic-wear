@@ -1,5 +1,6 @@
 (() => {
-  const DOT='https://chatgpt.com/dots/home', NAMESPACE='fa24ed5a57dc8199b97f68f7d0098d11';
+  const DOT='https://chatgpt.com/dots/home';
+  let dotSelection=null;
   const LOCAL=/^https:\/\/chatgpt\.com\/local\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const TARGET=location.href;
   if(TARGET!==DOT&&!LOCAL.test(TARGET))return;
@@ -11,7 +12,7 @@
   if(previous&&previous.stop)previous.stop();
   const isDot=TARGET===DOT, documentId=crypto.randomUUID();
   let scheduled=false,last='',lastSent=0,sending=false,retired=false;
-  const nativeVoice=window.AgenticWearVoiceController?.create({documentId,url:TARGET,identity:()=>location.href===TARGET?(isDot?(dotIdentity()?NAMESPACE:null):TARGET):null,changed:()=>schedule()});
+  const nativeVoice=window.AgenticWearVoiceController?.create({documentId,url:TARGET,identity:()=>location.href===TARGET?(isDot?(dotIdentity()?dotSelection.namespace:null):TARGET):null,profileLabel:()=>dotSelection?.profileLabel,changed:()=>schedule()});
   const chatTitle=()=>{
     const text=(document.title||'').replace(/\s*[|\u2013\u2014-]\s*ChatGPT\s*$/i,'').trim().slice(0,200);
     return text&&!/^ChatGPT$/i.test(text)?text:'Codex cloud chat';
@@ -38,8 +39,12 @@
   };
   function dotIdentity(){
     const rows=[...document.querySelectorAll('main article.message-row[data-message-id]')];
-    return rows.length>0 && rows.every(e=>e.dataset.messageId.startsWith(`${NAMESPACE}~${NAMESPACE}~CalpicoMessage~`)) &&
-      !!document.querySelector('[data-orbit-profile-trigger=true][aria-label="Open Lumen’s profile"], [data-orbit-profile-trigger=true][aria-label="Close Lumen’s profile"]');
+    if(!dotSelection)return false;
+    const namespace=dotSelection.namespace;
+    return rows.length>0 && rows.every(e=>e.dataset.messageId.startsWith(`${namespace}~${namespace}~CalpicoMessage~`)) &&
+      [...document.querySelectorAll('[data-orbit-profile-trigger=true]')].some(e=>
+        ['Open '+dotSelection.profileLabel,'Close '+dotSelection.profileLabel].includes(e.getAttribute('aria-label')));
+
   }
   function readTurns(){
     if(isDot){
@@ -354,7 +359,7 @@
     if(canLearn())learn();
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
-      ...(isDot?{identity:NAMESPACE,nativeVoice:Boolean(nativeVoice?.available())}:{identity:TARGET,title:chatTitle(),nativeVoice:Boolean(nativeVoice?.available())}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
+      ...(isDot?{...(dotSelection?{identity:dotSelection.namespace}:{}),nativeVoice:Boolean(nativeVoice?.available())}:{identity:TARGET,title:chatTitle(),nativeVoice:Boolean(nativeVoice?.available())}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
     if(!isDot)model.generationActive=stopped();
     const encoded=JSON.stringify(model),now=Date.now();
     if(encoded===last&&now-lastSent<3000)return;
@@ -437,6 +442,22 @@
   };
   chrome.runtime.onMessage?.addListener(onCommand);
   function schedule(){if(!retired&&!scheduled){scheduled=true;queueMicrotask(inspect);}}
+  // A Dot is enabled only after this browser's user explicitly selects it.
+  // Selection stays in extension-local storage, never in the shipped files.
+  function selected(value){
+    const next=value && /^[a-f0-9]{32}$/.test(value.namespace||'') &&
+      typeof value.profileLabel==='string' && value.profileLabel.length<=200 && /.+[’']s profile$/.test(value.profileLabel)
+      ? {namespace:value.namespace,profileLabel:value.profileLabel}:null;
+    if(JSON.stringify(next)!==JSON.stringify(dotSelection))nativeVoice?.cancel();
+    dotSelection=next;last='';schedule();
+  }
+  const selectionChanged=(changes,area)=>{
+    if(isDot&&area==='local'&&Object.hasOwn(changes,'dotSelection'))selected(changes.dotSelection.newValue);
+  };
+  if(isDot){
+    try{Promise.resolve(chrome.storage?.local?.get('dotSelection')).then(value=>selected(value?.dotSelection)).catch(()=>selected(null));}catch{selected(null);}
+    chrome.storage?.onChanged?.addListener(selectionChanged);
+  }
   const pageObserver=new MutationObserver(schedule);
   pageObserver.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
   document.addEventListener('visibilitychange',schedule);const tick=setInterval(inspect,1000);
@@ -445,7 +466,7 @@
     retired=true;handle.alive=false;
     nativeVoice?.stop();
     clearInterval(tick);pageObserver.disconnect();document.removeEventListener('visibilitychange',schedule);
-    try{chrome.runtime.onMessage?.removeListener(onCommand);}catch{}
+    try{chrome.runtime.onMessage?.removeListener(onCommand);chrome.storage?.onChanged?.removeListener(selectionChanged);}catch{}
   }};
   window.__agenticWearCloudReceiver=handle;
   schedule();

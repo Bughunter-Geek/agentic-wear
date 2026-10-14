@@ -4,8 +4,8 @@ import {JSDOM} from 'jsdom';
 import {describe,it} from 'node:test';
 import assert from 'node:assert/strict';
 const script=readFileSync(new URL('../../browser-receiver/extension/content.js',import.meta.url),'utf8');
-const url='https://chatgpt.com/local/01a1188b-a850-755b-91ec-717f6182900a';
-const dotUrl='https://chatgpt.com/dots/home',ns='fa24ed5a57dc8199b97f68f7d0098d11';
+const url='https://chatgpt.com/local/00000000-0000-4000-8000-000000000001';
+const dotUrl='https://chatgpt.com/dots/home',ns='11111111111111111111111111111111';
 const MODELS=['GPT-6.1 Sol','GPT-6 Astra','GPT-6 Sol','Daybreak Blue'],LABELS=['Minimal','Low','Medium','High','Max'];
 const tick=ms=>new Promise(r=>setTimeout(r,ms));
 // A fake Radix-like model menu built from the structure observed on the real page.
@@ -23,7 +23,7 @@ function harness({labels=LABELS,timersStalled=false,expireOnFirstStep=false,post
  if(hidden)Object.defineProperty(d,'visibilityState',{get:()=>'hidden'});
  d.hasFocus=()=>focused;
  let skew=0;const realNow=w.Date.now.bind(w.Date);w.Date.now=()=>realNow()+skew;
- w.chrome={runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();},onMessage:{addListener:x=>{listener=x;},removeListener(){}}}};
+ w.chrome={storage:{local:{get:async()=>({dotSelection:{namespace:'1'.repeat(32),profileLabel:'Lumen’s profile'}})}},runtime:{id:'ext',sendMessage:x=>{seen.push(JSON.parse(JSON.stringify(x)));return Promise.resolve();},onMessage:{addListener:x=>{listener=x;},removeListener(){}}}};
  d.execCommand=(_n,_u,t)=>{d.querySelector('.ProseMirror').textContent=t;return true;};
  const button=d.getElementById('mb');
  if(noPopupAttribute)button.removeAttribute('aria-haspopup');

@@ -1,18 +1,21 @@
-Agentic Cloud Receiver 0.3.5
+Agentic Wear Cloud Receiver 0.3.5.3 — review candidate
 
-Chrome receiver for Agentic Wear cloud chats and configured native Dot calls.
-Use it alongside the compatible Agentic Wear bridge and paired Watch. Chrome
-must remain signed in, with the configured ChatGPT chat/Dot page available,
-and the computer must stay awake and online. Pairing and target configuration
-remain local; credentials and personal configuration are not included here.
+Also called Relay. Older public packages display Agentic Cloud Receiver.
+This candidate is not a published receiver ZIP. Use only a matching reviewed
+source/bridge handoff; the Watch APK alone does not install the Mac companion.
 
-The receiver observes supported pages, forwards replies, and handles explicit
-Watch sends and calls. Native call readiness includes host acceptance. Browser
-mute ownership and profile readiness fixes are retained. Ended native calls
-have a 20-second Watch cooldown. Watch build 106 includes media calling audio
-that stops on acceptance, cancel or failure.
+Enable the receiver in your signed-in Chrome browser. Open your own Dot page,
+end any active call, open the popup and choose Connect this Dot. No Dot is
+selected by default. The selection stays in extension-local storage; missing,
+malformed or mismatched selection blocks Dot history, sending and voice.
+The companion's private target must match that selection. Keep private targets,
+pairing and credentials outside source/downloads. Cloud chat voice uses the
+scoped Mac voice companion; it does not save the full voice transcript.
 
-Install the extension through Chrome's Load unpacked workflow using extension/.
-Native messaging requires the companion bridge host; the extension alone is
-not a standalone bridge installer. Existing paired installations keep their
-identity, signing and local configuration.
+Update an existing installation in place, preserving its public key/ID, native
+host/helper, browser storage and pairing. Never downgrade an existing
+0.3.14-series receiver to this public-series version. Back up files privately;
+reload or restart only after calls end and activation is approved.
+
+Run bridge/scripts/check-receiver-package.mjs before packaging. Include LICENSE
+and THIRD-PARTY-NOTICES.txt. Platform and avatar rights remain separate questions.

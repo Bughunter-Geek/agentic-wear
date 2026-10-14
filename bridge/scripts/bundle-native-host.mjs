@@ -5,6 +5,9 @@
 // must have run first: `npx tsc -p .` (emits into bridge/dist), then
 // `npm run bundle:native-host`.
 import { build } from "esbuild";
+import { checkReceiverPackage } from "./check-receiver-package.mjs";
+
+checkReceiverPackage();
 import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

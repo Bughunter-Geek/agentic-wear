@@ -5,6 +5,9 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/.." && pwd)
 cd "$repo_root"
 
+# Fail before signing/building if receiver source or staged files carry a Dot default.
+node bridge/scripts/check-receiver-package.mjs
+
 signing_file="${AGENTIC_WEAR_SIGNING_KEYSTORE:-$HOME/Library/Application Support/Agentic Wear/release.jks}"
 keychain_service="io.github.sirbughunter.agenticwear.release-signing"
 keychain_account="release-key"

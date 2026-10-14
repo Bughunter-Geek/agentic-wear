@@ -516,7 +516,7 @@ export class AppServerClient {
   async createCloudCompanion(cwd: string, context: string): Promise<string> {
     const history=z.object({messages:z.array(z.object({role:z.enum(["user","assistant"]),text:z.string().max(1200)})).max(8)}).passthrough().parse(JSON.parse(context));
     const raw = await this.request("config/read", { includeLayers: false });
-    const existing = z.object({config:z.object({mcp_servers:z.record(z.string(),z.unknown()).optional(),model_provider:z.string().optional()}).passthrough()}).passthrough().parse(raw);
+    const existing = z.object({config:z.object({mcp_servers:z.record(z.string(),z.unknown()).optional(),model_provider:z.string().nullable().optional()}).passthrough()}).passthrough().parse(raw);
     if((existing.config.model_provider??"openai")!=="openai")throw new Error("The native companion requires the host's OpenAI provider. No cloud context was sent.");
     const config:Record<string,unknown>={"features.shell_tool":false,"features.apps":false,"features.view_image":false,
       "features.image_generation":false,"features.multi_agent":false,"features.skill_search":false,"web_search":"disabled","project_doc_max_bytes":0};

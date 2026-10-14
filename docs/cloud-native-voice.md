@@ -1,9 +1,9 @@
-# Full-duplex voice for browser cloud chats
+# Current live voice routes
 
-Talk opens the same live-call activity for local, Dot and ordinary cloud chats. Ordinary cloud voice no longer implicitly starts the transcription/read-aloud loop. Dictation remains an explicit separate action.
+Local tasks use native Codex App Server WebRTC voice. Dot calls use the selected/configured Dot's native Chrome call with Watch-owned microphone/speaker media. Ordinary cloud chats use the [scoped ephemeral Mac companion](cloud-voice-companion.md); they do not depend on a native Start voice chat button and do not implicitly start transcription/read-aloud. Dictation remains separate.
 
-The paired browser receiver advertises native voice only when the current cloud document has its usable native Start voice chat control. Call control and authentication stay with that browser client. Its WebRTC offer and answer belong to the Watch microphone/speaker endpoint. Cloud RPC calls wait for Watch media, its event channel and the native input-release signal; they do not wait for Dot HTTP allocation/attach.
+Enable Agentic Wear Cloud Receiver (Relay) in Chrome. For Dot, open your own Dot, end any current call and choose Connect this Dot; the companion's private target must match. Receiver absence, disabled state or unavailable selection is a setup failure, not evidence that a local Codex host lacks voice support. The watch shows route-specific guidance without guessing the exact setup cause.
 
-Commands and events are scoped to the observed URL, document, thread and call. Existing personal browser calls prevent takeover. Startup cancellation uses the owned cloud Cancel voice chat control; navigation cannot cancel another chat's call. Bluetooth uses the verified delegated-browser capability. No audio, SDP, captions or credentials are added to diagnostic logs.
+Ordinary cloud voice forwards substantive requests/results to the selected chat; full spoken transcripts are not automatically saved. Selected-chat model/settings/tools are retained. The companion cannot execute inherited local tools. Existing personal calls are never taken over. Ending voice leaves already submitted cloud work running, and uncertain submissions are not automatically repeated.
 
-The Watch update and receiver/bridge update must be used together. Focused synthetic peer, browser-controller, mute-lease and paired-socket tests cover signaling boundaries. Physical audio and connectivity acceptance remain with the user.
+Current user acceptance covers voice on the maintainer's setup. Other devices, interruption/handover/reconnect and network conditions remain limited-tester acceptance items. See PRIVACY.md for media and external processing.

@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  window.AgenticWearVoiceController = { create({ documentId, url, identity, changed }) {
+  window.AgenticWearVoiceController = { create({ documentId, url, identity, profileLabel, changed }) {
     const isDot = url === 'https://chatgpt.com/dots/home';
     let supported = false, owner = null, accepted = null, stopped = false, generation = 0;
     const disabled = new Map();
@@ -16,8 +16,13 @@
       return candidates.find(button => !button.closest('[role="dialog"]')) || candidates[0];
     }
     const hangup = () => buttons().find(button => (isDot ? label(button) === 'Hang up' : /^(End voice chat|Stop voice chat|End Voice|Ending voice chat|Cancel voice chat)$/.test(label(button))) && usable(button));
-    const profileControl = () => buttons().some(button => label(button) === 'Start call') ? null : [...document.querySelectorAll('[data-orbit-profile-trigger="true"]')]
-      .find(button => label(button) === 'Open Lumen’s profile' && usable(button));
+    const profileControl = () => {
+      if (!isDot || buttons().some(button => label(button) === 'Start call')) return null;
+      const expected = profileLabel?.();
+      const candidates = [...document.querySelectorAll('[data-orbit-profile-trigger="true"]')].filter(button =>
+        (expected ? label(button) === 'Open ' + expected : /^Open .+[’']s profile$/.test(label(button))) && usable(button));
+      return candidates.length === 1 ? candidates[0] : null;
+    };
     function revealStart(command) {
       if (startControl()) return Promise.resolve(true);
       const profile = profileControl();

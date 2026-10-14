@@ -28,3 +28,9 @@ it("refuses to pass cloud context to a different inherited model provider",async
  const f=fixture();f.request.mockImplementationOnce(async()=>({config:{model_provider:"other-provider"}} as never));
  await expect(f.client.createCloudCompanion("/tmp",JSON.stringify({messages:[]}))).rejects.toThrow("No cloud context was sent");expect(f.request).toHaveBeenCalledTimes(1);
 });
+
+it("accepts the native default OpenAI provider represented by null",async()=>{
+ const f=fixture();f.request.mockImplementationOnce(async()=>({config:{model_provider:null,mcp_servers:{}}} as never));
+ await expect(f.client.createCloudCompanion("/tmp",JSON.stringify({messages:[]}))).resolves.toBe("private-proxy");
+ expect(f.request).toHaveBeenCalledWith("thread/start",expect.objectContaining({ephemeral:true,sandbox:"read-only"}));
+});

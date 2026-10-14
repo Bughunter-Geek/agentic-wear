@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Agentic Cloud Receiver",
-  "version": "0.3.5.2",
-  "description": "Text, history and native Watch voice for Lumen using your signed-in browser.",
+  "name": "Agentic Wear Cloud Receiver",
+  "version": "0.3.5.3",
+  "description": "Cloud text and configured Dot voice using your own signed-in browser and local companion.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAltGroWHoTDC1poQMHvmxH5pjxU7pSP0QE8eYgYd4GouhzI4CTXEGCEiuG05I86GFD6PKRdKz2o1ZGmDLuX18dX8xGrWp3u/OAw1PDizh/Ttitu8sq2fO1xb30C9YgHluQsoOXxZb+W2T97MKwqxJX9MxItv6/+yYgxYZXhC1dFaoj6QJbq9+/cXArfdALJweWEgJB/Jplgsb6rRUzp+5awHShNU4OHedgPU42Y+LPONnTz6xtIW7eHQV5MmvFnpdoTeOEyUT0XZfK6ep/rFLQE8g2To1jSiqXNzg2Lepkie7Zkb9NbKXGqA/Xt/il+AuFe8sqDDOCbrnZ+917K92pQIDAQAB",
   "icons": {
     "16": "icons/icon-16.png",
@@ -14,13 +14,14 @@
   "permissions": [
     "nativeMessaging",
     "scripting",
-    "tabs"
+    "tabs",
+    "storage"
   ],
   "background": {
     "service_worker": "worker.js"
   },
   "action": {
-    "default_title": "Agentic Cloud Receiver",
+    "default_title": "Agentic Wear Cloud Receiver",
     "default_icon": {
       "16": "icons/icon-16.png",
       "24": "icons/icon-24.png",
@@ -29,7 +30,8 @@
       "64": "icons/icon-64.png",
       "96": "icons/icon-96.png",
       "128": "icons/icon-128.png"
-    }
+    },
+    "default_popup": "popup.html"
   },
   "content_scripts": [
     {

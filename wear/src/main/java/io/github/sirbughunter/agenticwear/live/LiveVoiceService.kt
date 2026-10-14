@@ -334,7 +334,13 @@ class LiveVoiceService : Service() {
                     VoiceTrace.event(VoiceTraceStage.CAPABILITY_POSTED)
                     val catalog = withTimeout(15_000) { capability.await() }
                     VoiceTrace.event(VoiceTraceStage.CAPABILITY_RECEIVED)
-                    check(catalog.optBoolean("realtimeApiAvailable")) { "This Codex host has no compatible live voice interface" }
+                    check(catalog.optBoolean("realtimeApiAvailable")) {
+                        when {
+                            catalog.optBoolean("nativeDot") -> "Dot voice unavailable. Enable Relay (Agentic Wear Cloud Receiver) in Chrome, open your Dot and choose Connect this Dot."
+                            catalog.optBoolean("nativeBrowserVoice") -> "Browser voice unavailable. Enable Relay (Agentic Wear Cloud Receiver) in Chrome and open this chat."
+                            else -> "This Codex host has no compatible live voice interface"
+                        }
+                    }
                     gate.configure(catalog.optBoolean("requiresHostReady"))
                     if (gate.requiresHostAcceptance) peer?.mute(true)
                     val defaultVoice = catalog.getJSONObject("voices").getString("defaultV1")
