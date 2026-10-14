@@ -15,6 +15,8 @@ The current source and receiver have explicit per-browser Dot selection and no m
 
 ## Installation instructions
 
+Need help getting started? Ask your Codex agent to walk you through these installation instructions.
+
 Start with **native live voice**. Phonon and Qwen are optional dictation tools; you do not need to install them to talk to your Dot.
 
 ### Before you start
