@@ -7,6 +7,9 @@
 import { build } from "esbuild";
 import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { checkReceiverPackage } from "./check-receiver-package.mjs";
+
+checkReceiverPackage();
 
 const entry = fileURLToPath(new URL("../../browser-receiver/native-host.mjs", import.meta.url));
 const outfile = fileURLToPath(new URL("../../browser-receiver/native-host.bundle.mjs", import.meta.url));

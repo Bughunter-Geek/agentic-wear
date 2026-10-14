@@ -553,7 +553,7 @@ test('other browser requests and mismatched offers retain their native behavior'
 
 const controllerSource = await readFile(new URL('../../browser-receiver/extension/voice-controller.js', import.meta.url), 'utf8');
 const contentSource = await readFile(new URL('../../browser-receiver/extension/content.js', import.meta.url), 'utf8');
-const dotNamespace = 'fa24ed5a57dc8199b97f68f7d0098d11';
+const dotNamespace = '11111111111111111111111111111111';
 function controllerPage() {
   const dom = new JSDOM(`<main><button data-orbit-profile-trigger="true" aria-label="Open Lumen’s profile"></button>
     <article class="message-row" data-message-id="${dotNamespace}~${dotNamespace}~CalpicoMessage~Sentinel_${'a'.repeat(32)}">
@@ -569,7 +569,7 @@ function controllerPage() {
   };
   const clear = w.clearInterval.bind(w);
   w.clearInterval = id => { clears++; clear(id); };
-  w.chrome = { runtime: { id: 'extension', sendMessage(value) { observations.push(value); return Promise.resolve(); },
+  w.chrome = { storage: { local: { get: async () => ({ dotSelection: { namespace: '1'.repeat(32), profileLabel: 'Lumen’s profile' } }) } }, runtime: { id: 'extension', sendMessage(value) { observations.push(value); return Promise.resolve(); },
     onMessage: { addListener(value) { listener = value; }, removeListener() { listener = null; } } } };
   w.postMessage = value => { commands.push(value.command); };
   const announce = available => w.dispatchEvent(new w.MessageEvent('message', { source: w, origin: w.location.origin,

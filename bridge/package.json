@@ -10,9 +10,10 @@
     "build": "rm -rf dist && tsc",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && oxlint --deny typescript/no-floating-promises src test",
     "dev": "tsx src/cli.ts",
-    "test": "vitest run && node --test test/browser-cloud-content.test.mjs test/native-dot-browser.test.mjs test/browser-worker.test.mjs",
+    "test": "vitest run && node --test test/browser-cloud-content.test.mjs test/native-dot-browser.test.mjs test/browser-worker.test.mjs test/browser-dot-selection.test.mjs test/receiver-package.test.mjs",
     "build:desktop-cloud": "node scripts/bundle-desktop-cloud.mjs",
-    "bundle:native-host": "node scripts/bundle-native-host.mjs"
+    "bundle:native-host": "node scripts/bundle-native-host.mjs",
+    "check:receiver-package": "node scripts/check-receiver-package.mjs"
   },
   "dependencies": {
     "openai": "7.8.0",

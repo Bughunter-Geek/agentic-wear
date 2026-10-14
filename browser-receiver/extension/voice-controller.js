@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  window.AgenticWearVoiceController = { create({ documentId, url, identity, changed }) {
+  window.AgenticWearVoiceController = { create({ documentId, url, identity, profileLabel, changed }) {
     let supported = false, owner = null, accepted = null, stopped = false, generation = 0;
     const disabled = new Map();
     const label = element => element.getAttribute('aria-label') || (element.innerText || element.textContent || '').trim();
@@ -15,8 +15,13 @@
       return candidates.find(button => !button.closest('[role="dialog"]')) || candidates[0];
     }
     const hangup = () => buttons().find(button => label(button) === 'Hang up' && usable(button));
-    const profileControl = () => buttons().some(button => label(button) === 'Start call') ? null : [...document.querySelectorAll('[data-orbit-profile-trigger="true"]')]
-      .find(button => label(button) === 'Open Lumen’s profile' && usable(button));
+    const profileControl = () => {
+      if (buttons().some(button => label(button) === 'Start call')) return null;
+      const expected = profileLabel?.();
+      const candidates = [...document.querySelectorAll('[data-orbit-profile-trigger="true"]')].filter(button =>
+        (expected ? label(button) === 'Open ' + expected : /^Open .+[’']s profile$/.test(label(button))) && usable(button));
+      return candidates.length === 1 ? candidates[0] : null;
+    };
     function revealStart(command) {
       if (startControl()) return Promise.resolve(true);
       const profile = profileControl();

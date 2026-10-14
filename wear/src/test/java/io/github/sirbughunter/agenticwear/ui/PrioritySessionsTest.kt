@@ -82,8 +82,8 @@ class PrioritySessionsTest {
     fun `decodes attention and source and ignores unknown values`() {
         fun snapshot(vararg s: JSONObject) = JSONObject().put("version", 1).put("kind", "sessions.snapshot").put("sessions", JSONArray(s.toList()))
         val decoded = PayloadCodec.decodeSessions(snapshot(
-            JSONObject().put("id", "dot:fa24ed5a57dc8199b97f68f7d0098d11").put("title", "Dot").put("status", "active").put("source", "dot").put("attention", "question"),
-            JSONObject().put("id", "01a1188b-a850-755b-91ec-717f6182900a").put("title", "Cloud").put("status", "idle").put("source", "cloud").put("attention", "approval"),
+            JSONObject().put("id", "dot:11111111111111111111111111111111").put("title", "Dot").put("status", "active").put("source", "dot").put("attention", "question"),
+            JSONObject().put("id", "00000000-0000-4000-8000-000000000001").put("title", "Cloud").put("status", "idle").put("source", "cloud").put("attention", "approval"),
             JSONObject().put("id", "mac").put("title", "Mac").put("source", "weird").put("attention", "bogus"),
         ))
         assertEquals(3, decoded.size)
