@@ -58,6 +58,7 @@ import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.SwipeToDismissBox
 import androidx.wear.compose.material3.Text
 import io.github.sirbughunter.agenticwear.data.AppPreferences
+import io.github.sirbughunter.agenticwear.model.AgentSession
 import io.github.sirbughunter.agenticwear.live.LiveVoiceActivity
 import io.github.sirbughunter.agenticwear.live.LiveVoiceColour
 import io.github.sirbughunter.agenticwear.live.LiveVoiceService
@@ -445,10 +446,17 @@ private fun BoxScope.LiveCallPill(live: LiveVoiceState, onClick: () -> Unit) {
 
 internal fun SessionStatus.kind(): StatusKind = when (this) {
     SessionStatus.ACTIVE -> StatusKind.Working
-    SessionStatus.IDLE -> StatusKind.Ready
-    SessionStatus.NOT_LOADED -> StatusKind.Idle
+    SessionStatus.IDLE, SessionStatus.NOT_LOADED -> StatusKind.Ready
     SessionStatus.ERROR -> StatusKind.Error
 }
+
+/** A Dot is green unless its bridge reports the voice channel as not ready; other chats follow their status. */
+private fun AgentSession.dotVoiceOffline(): Boolean =
+    source == "dot" && status != SessionStatus.ACTIVE && status != SessionStatus.ERROR && voiceReady == false
+
+internal fun AgentSession.indicatorKind(): StatusKind = if (dotVoiceOffline()) StatusKind.Idle else status.kind()
+
+internal fun AgentSession.statusLabel(): String = if (dotVoiceOffline()) "Voice offline" else status.label
 
 internal val SessionStatus.label: String
     get() = when (this) {
@@ -507,7 +515,7 @@ private fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (session != null) StatusIndicator(session.status.kind())
+            if (session != null) StatusIndicator(session.indicatorKind())
             Text(
                 session?.title ?: "Choose a chat",
                 style = AwType.Label.copy(color = Aw.Text),

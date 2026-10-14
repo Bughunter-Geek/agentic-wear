@@ -45,6 +45,8 @@ export type SessionView = {
   ownedByWear: boolean;
   canAcceptDirectInput: boolean;
   watchReady: boolean;
+  /** Dot chats only: true while the browser reports a ready native voice channel. */
+  voiceReady?: boolean;
   model?: string | null;
   modelProvider?: string;
 };

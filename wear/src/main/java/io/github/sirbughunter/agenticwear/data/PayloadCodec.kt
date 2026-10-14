@@ -213,6 +213,7 @@ object PayloadCodec {
                         ownedByWear = value.optBoolean("ownedByWear", false),
                         canAcceptDirectInput = value.optBoolean("canAcceptDirectInput", false),
                         watchReady = value.optBoolean("watchReady", false),
+                        voiceReady = if (value.has("voiceReady")) value.optBoolean("voiceReady") else null,
                         pinned = value.optBoolean("pinned", false),
                         source = value.optString("source").takeIf { it in KNOWN_SESSION_SOURCES },
                         attention = value.optString("attention").takeIf { it == "question" || it == "approval" },
@@ -549,6 +550,7 @@ object PayloadCodec {
                     .put("ownedByWear", session.ownedByWear)
                     .put("canAcceptDirectInput", session.canAcceptDirectInput)
                     .put("watchReady", session.watchReady)
+                    .apply { session.voiceReady?.let { put("voiceReady", it) } }
                     .put("pinned", session.pinned)
                     .put("source", session.source)
                     .put("attention", session.attention)
@@ -615,6 +617,7 @@ object PayloadCodec {
                         ownedByWear = item.optBoolean("ownedByWear"),
                         canAcceptDirectInput = item.optBoolean("canAcceptDirectInput"),
                         watchReady = item.optBoolean("watchReady"),
+                        voiceReady = if (item.has("voiceReady")) item.optBoolean("voiceReady") else null,
                         pinned = item.optBoolean("pinned"),
                         source = item.optString("source").takeIf { !item.isNull("source") && it in KNOWN_SESSION_SOURCES },
                         attention = item.optString("attention").takeIf { !item.isNull("attention") && (it == "question" || it == "approval") },

@@ -17,6 +17,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
@@ -38,9 +40,10 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /** The felt dot figures; the user picks the one that matches their Dot in Settings. */
-internal enum class DotAvatar(val label: String, @param:DrawableRes val res: Int, val glow: Color) {
+/** [sleepRes] is the same figure with closed eyes, where one exists. */
+internal enum class DotAvatar(val label: String, @param:DrawableRes val res: Int, val glow: Color, @param:DrawableRes val sleepRes: Int? = null) {
     EMBER("Ember", R.drawable.dot_ember, Color(0xFFE8643C)),
-    FELIPE("Felipe", R.drawable.dot_felipe, Color(0xFF3BA0E8)),
+    FELIPE("Felipe", R.drawable.dot_felipe, Color(0xFF3BA0E8), R.drawable.dot_felipe_sleep),
     ALFRED("Alfred", R.drawable.dot_alfred, Color(0xFFF2C94C)),
     IGGY("Iggy", R.drawable.dot_iggy, Color(0xFFC94BD8)),
     TODD("Todd", R.drawable.dot_todd, Color(0xFFC6E85A)),
@@ -147,8 +150,12 @@ internal fun DotFigure(
     expression: String? = null,
     /** Reports the expression currently shown (or null), so callers can caption it. */
     onExpression: (String?) -> Unit = {},
+    eyesClosed: Boolean = mood == DotMood.SLEEPING,
 ) {
     val reducedMotion = !ValueAnimator.areAnimatorsEnabled()
+    // Eyes close slowly and open a little quicker, like waking up.
+    val closed by animateFloatAsState(if (eyesClosed) 1f else 0f,
+        tween(if (reducedMotion) 0 else if (eyesClosed) 600 else 320, easing = FastOutSlowInEasing), label = "eyes")
     val clock = remember { mutableFloatStateOf(0f) }
     // Every mood weight eases slowly in and out; the loops below are sums of weighted components.
     val soft = tween<Float>(800, easing = FastOutSlowInEasing)
@@ -214,10 +221,8 @@ internal fun DotFigure(
                 )
             }
         }
-        Image(
-            painterResource(avatar.res), contentDescription = null,
-            colorFilter = if (desat > .01f) ColorFilter.colorMatrix(saturation) else null,
-            modifier = Modifier.fillMaxSize().graphicsLayer {
+        Box(
+            Modifier.fillMaxSize().graphicsLayer {
                 val t = clock.floatValue
                 val respond = speakWeight * (.35f + .65f * speakLevel)
                 val listen = listenWeight * listenLevel
@@ -233,7 +238,13 @@ internal fun DotFigure(
                 translationY = (-lift(t, think, respond, needs, celebrate, greet, sleep) + sleep * .03f) * size.height
                 alpha = 1f - .3f * frozen
             },
-        )
+        ) {
+            val filter = if (desat > .01f) ColorFilter.colorMatrix(saturation) else null
+            Image(painterResource(avatar.res), contentDescription = null, colorFilter = filter, modifier = Modifier.fillMaxSize())
+            val sleepRes = avatar.sleepRes
+            if (sleepRes != null && closed > .01f) Image(painterResource(sleepRes), contentDescription = null, colorFilter = filter,
+                alpha = closed, modifier = Modifier.fillMaxSize())
+        }
         Canvas(Modifier.fillMaxSize()) { if (burst.value < .999f) drawConfetti(burst.value, avatar.glow) }
         // Only recomposes when the chosen expression changes, not every frame.
         val autoExpression by remember(mood) { androidx.compose.runtime.derivedStateOf { defaultDotExpression(mood, clock.floatValue) } }
@@ -306,10 +317,8 @@ private fun DotExpression(emoji: String?, clock: androidx.compose.runtime.Mutabl
 }
 
 /**
- * The live-call Dot. It never changes size or turns into anything else: while [connecting] it
- * stays calm at full size with a slow glow pulse and a thin, slow ring just outside it, which fades
- * in and out. Reconnecting arrives as the FROZEN mood, so it also desaturates softly. Listening
- * grows with your voice, speaking bounces with Lumen's, working shows the lamp and friends.
+ * The live-call Dot. While the call rings it naps with closed eyes beside a little ringing phone;
+ * when the call connects the phone fades, it opens its eyes and gives a happy wiggle.
  */
 @Composable
 internal fun DotCallFigure(
@@ -321,41 +330,46 @@ internal fun DotCallFigure(
     modifier: Modifier = Modifier,
 ) {
     val reducedMotion = !ValueAnimator.areAnimatorsEnabled()
-    val ring by animateFloatAsState(if (connecting) 1f else 0f,
-        tween(if (reducedMotion) 0 else if (connecting) 400 else 500, easing = FastOutSlowInEasing), label = "dot ring")
-    val spin = remember { mutableFloatStateOf(0f) }
-    val spinning by remember { androidx.compose.runtime.derivedStateOf { ring > .001f } }
-    LaunchedEffect(spinning, connecting, reducedMotion) {
-        if (!(spinning || connecting) || reducedMotion) return@LaunchedEffect
-        var last = 0L
-        // Wraps at 360 s, a whole number of both the 1.8 s pulse and the 2.4 s ring turn, so it never jumps.
-        while (true) withFrameNanos { now -> if (last != 0L) spin.floatValue = (spin.floatValue + (now - last) / 1_000_000_000f) % 360f; last = now }
+    val ringing = connecting && mood != DotMood.FROZEN
+    val phone by animateFloatAsState(if (ringing) 1f else 0f,
+        tween(if (reducedMotion) 0 else if (ringing) 500 else 450, easing = FastOutSlowInEasing), label = "phone")
+    var waking by remember { mutableStateOf(false) }
+    val wasRinging = remember { booleanArrayOf(ringing) }
+    LaunchedEffect(ringing) {
+        if (wasRinging[0] && !ringing && !connecting) { waking = true; kotlinx.coroutines.delay(1600); waking = false }
+        wasRinging[0] = ringing
     }
-    // A connecting Dot stays calm; reconnecting keeps its FROZEN mood.
-    val shownMood = if (connecting && mood != DotMood.FROZEN) DotMood.IDLE else mood
+    val clock = remember { mutableFloatStateOf(0f) }
+    val visible by remember { androidx.compose.runtime.derivedStateOf { phone > .001f } }
+    LaunchedEffect(visible, reducedMotion) {
+        if (!visible || reducedMotion) return@LaunchedEffect
+        var last = 0L
+        while (true) withFrameNanos { now -> if (last != 0L) clock.floatValue = (clock.floatValue + (now - last) / 1_000_000_000f) % 1_000f; last = now }
+    }
+    val shownMood = when {
+        ringing -> DotMood.SLEEPING
+        waking -> DotMood.GREETING
+        else -> mood
+    }
     Box(modifier) {
-        Canvas(Modifier.fillMaxSize()) {
-            if (ring <= .001f) return@Canvas
-            val pulse = if (reducedMotion) .5f else .5f - .5f * kotlin.math.cos(TAU * spin.floatValue / 1.8f)
-            val radius = size.minDimension * .78f
-            drawCircle(
-                Brush.radialGradient(listOf(avatar.glow.copy(alpha = ring * (.1f + .14f * pulse)), Color.Transparent), center = center, radius = radius),
-                radius = radius, center = center,
-            )
-        }
-        DotFigure(avatar, shownMood, Modifier.fillMaxSize(), userLevel = userLevel, agentLevel = agentLevel)
-        Canvas(Modifier.fillMaxSize()) {
-            if (ring <= .001f) return@Canvas
-            val stroke = 1.5.dp.toPx()
-            val rr = size.minDimension / 2f + 7.dp.toPx()
-            val start = if (reducedMotion) -90f else spin.floatValue / 2.4f * 360f % 360f
-            val style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-            val topLeft = Offset(center.x - rr, center.y - rr)
-            val arc = Size(rr * 2, rr * 2)
-            drawCircle(Color.White.copy(alpha = ring * .08f), radius = rr, center = center, style = style)
-            drawArc(avatar.glow.copy(alpha = ring * .35f), start, 110f, false, topLeft, arc,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(stroke * 2.4f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
-            drawArc(Color.White.copy(alpha = ring * .9f), start, 110f, false, topLeft, arc, style = style)
+        DotFigure(avatar, shownMood, Modifier.fillMaxSize(), userLevel = userLevel, agentLevel = agentLevel,
+            expression = if (ringing) "💤" else null, eyesClosed = ringing)
+        if (phone > .001f) androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+            val side = maxWidth * .3f
+            Box(
+                Modifier.offset(x = maxWidth * .74f, y = maxWidth * .74f).size(side).graphicsLayer {
+                    // Rings in bursts: a quick rattle, then a pause, like a little desk phone.
+                    val t = clock.floatValue
+                    val inBurst = (t % 1.6f) < .7f
+                    rotationZ = if (inBurst && !reducedMotion) 13f * sin(TAU * t * 9f) else 0f
+                    translationY = if (inBurst && !reducedMotion) -size.height * .06f * abs(sin(TAU * t * 4.5f)) else 0f
+                    alpha = phone
+                    scaleX = .7f + .3f * phone; scaleY = .7f + .3f * phone
+                },
+                contentAlignment = androidx.compose.ui.Alignment.Center,
+            ) {
+                androidx.wear.compose.material3.Text("☎️", fontSize = with(androidx.compose.ui.platform.LocalDensity.current) { (side * .8f).toSp() })
+            }
         }
     }
 }
