@@ -25,6 +25,8 @@ const issueSummary=error=>(error?.issues??[]).slice(0,6).map(i=>`${(i.path??[]).
 const OPTIONAL_MODEL_FIELDS=['model','effort','models','efforts'];
 const stored=await readPrivateJson(receiptPath);
 const receipts=new Map(stored?.pairBinding===config.pairBinding?stored.entries:[]),waiting=new Map(),pages=new Map();
+const sessionStates=new Map();
+const sessionStatusCounts=()=>[...sessionStates.values()].reduce((out,state)=>{out[state]=(out[state]??0)+1;return out;},{});
 let persistChain=Promise.resolve();
 function persist(){const value={pairBinding:config.pairBinding,entries:[...receipts].slice(-1024)};persistChain=persistChain.then(()=>writePrivateJson(receiptPath,value));return persistChain;}
 // A delayed response still belongs to its persisted request after the timer
@@ -34,7 +36,7 @@ function settleReceipt(receipt,result){
  receipt.result={...result,...(result.verifiedSelection?{}:receipt.result.verifiedSelection?{verifiedSelection:receipt.result.verifiedSelection}:{})};
  receipt.resultAt=Date.now();return receipt.result;
 }
-function status(fields){const tmp=logPath+'.'+process.pid+'.tmp';writeFileSync(tmp,JSON.stringify({pid:process.pid,at:Date.now(),...fields}),{mode:0o600});renameSync(tmp,logPath);}
+function status(fields){const tmp=logPath+'.'+process.pid+'.tmp';writeFileSync(tmp,JSON.stringify({pid:process.pid,at:Date.now(),sessionStatusCounts:sessionStatusCounts(),...fields}),{mode:0o600});renameSync(tmp,logPath);}
 function reply(x){const b=Buffer.from(JSON.stringify(x)),h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));}
 async function send(command){
  const target=config.targets.find(t=>t.threadId===command.threadId),url=target?.url??`https://chatgpt.com/local/${command.threadId}`,page=pages.get(url);
@@ -78,7 +80,7 @@ const transport=new DesktopCloudTransport(config,desktopCloudSocketPath(desktopC
  reply({...command,url:target.url,documentId:page.documentId});
 },()=>reply({kind:'native-voice-lost'}));
 // Config targets plus, unless autoCloudChats is false, one observer per open chatgpt.com/local/<uuid> tab (max 8).
-const observers=new BrowserCloudObservers(config.targets,autoCloudChatsEnabled(config),(s,t)=>transport.snapshot(s,t),e=>transport.terminal(e),url=>pages.delete(url));
+const observers=new BrowserCloudObservers(config.targets,autoCloudChatsEnabled(config),(s,t)=>{sessionStates.set(s.threadId,s.status);if(sessionStates.size>32)sessionStates.delete(sessionStates.keys().next().value);transport.snapshot(s,t);},e=>transport.terminal(e),url=>pages.delete(url));
 transport.start();let input=Buffer.alloc(0);
 // Native-clock observations are not subject to hidden page timer throttling.
 const heartbeat=setInterval(()=>reply({kind:'observe'}),10000);heartbeat.unref();
