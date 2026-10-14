@@ -379,6 +379,7 @@ private fun CallInProgress(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(title, style = AwType.Title.copy(fontSize = 13.sp), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            CallDurationText(state)
             val label = state.activityLabel()
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
@@ -478,6 +479,7 @@ private fun CallIdle(
                 state.phase == "ending" -> "Ending call…"
                 else -> state.detail
             }
+            CallDurationText(state)
             Text(message, color = if (state.phase == "error" && cooldownSeconds == 0) Aw.ErrorText else Aw.TextSecondary, fontSize = 11.sp, lineHeight = 14.sp, textAlign = TextAlign.Center)
             Spacer(Modifier.height(6.dp))
             AwSectionLabel("Options")
@@ -522,5 +524,22 @@ private fun CallDotLayer(avatar: io.github.sirbughunter.agenticwear.ui.DotAvatar
             modifier = Modifier.offset(x = (maxWidth - figure) / 2, y = maxHeight * .425f - figure / 2).size(figure)
                 .semantics { contentDescription = state.activityLabel() },
         )
+    }
+}
+
+/** UI-only ticker: no service wakeup or network request is added. */
+@Composable
+private fun CallDurationText(state: LiveVoiceState) {
+    var now by remember(state.connectedAtElapsedMs) { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
+    LaunchedEffect(state.connectedAtElapsedMs, state.finishedDurationMs) {
+        if (state.connectedAtElapsedMs == null || state.finishedDurationMs != null) return@LaunchedEffect
+        while (true) {
+            now = android.os.SystemClock.elapsedRealtime()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    liveCallDurationMs(state.connectedAtElapsedMs, state.finishedDurationMs, now)?.let {
+        Text("${if (state.finishedDurationMs != null) "Last call · " else ""}${formatLiveCallDuration(it)}",
+            style = AwType.Caption, fontSize = 11.sp, maxLines = 1, textAlign = TextAlign.Center)
     }
 }

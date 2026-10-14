@@ -25,7 +25,8 @@ data class LiveVoiceState(val phase: String = "idle", val detail: String = "Choo
     val muted: Boolean = false, val caption: String = "", val taskId: String = "", val taskTitle: String = "", val taskContext: String = "",
     val taskPhase: String = "", val taskDetail: String = "", val mediaActivity: String = "ready",
     val inputLevel: Float = 0f, val outputLevel: Float = 0f, val approvalId: String? = null,
-    val approvalDetail: String = "", val canApprove: Boolean = false, val deciding: Boolean = false)
+    val approvalDetail: String = "", val canApprove: Boolean = false, val deciding: Boolean = false,
+    val connectedAtElapsedMs: Long? = null, val finishedDurationMs: Long? = null)
 
 /** Poll the relay inbox quickly while the SDP answer is pending, then at the steady in-call rate. */
 internal fun livePollIntervalMs(mediaConnected: Boolean): Long =
@@ -153,7 +154,7 @@ class LiveVoiceService : Service() {
             }
         } catch (error: Exception) { end(error.message ?: "Could not start live voice"); return }
         // Bound resources for both task initialization and conversational media.
-        scope.launch { delay(2L * 60L * 60L * 1000L); end("Two-hour safety limit reached. Reconnect to continue.") }
+        scope.launch { delay(2L * 60L * 60L * 1000L); end("Two-hour safety limit reached. Reconnect to continue.", "LIMIT") }
         if (createNew) {
             newTaskPending = true
             val expectedCall = callId
@@ -195,6 +196,10 @@ class LiveVoiceService : Service() {
         fun activateWhenReady() {
             if (gate.ready && !ending && callId == expectedCall) {
                 peer?.mute(gate.effectiveMute(state.value.muted))
+                if (!firstMediaConnection.isCompleted) {
+                    state.value = state.value.copy(connectedAtElapsedMs = SystemClock.elapsedRealtime())
+                    VoiceTrace.event(VoiceTraceStage.MEDIA_STARTED, atEpochMs = System.currentTimeMillis())
+                }
                 firstMediaConnection.complete(Unit)
                 disconnectJob?.cancel(); state.value = state.value.withConnection(true)
             }
@@ -221,7 +226,7 @@ class LiveVoiceService : Service() {
                         peer?.answer(event.getString("sdp"))
                         VoiceTrace.event(VoiceTraceStage.ANSWER_APPLIED)
                     } catch (error: LinkageError) { VoiceTrace.error(VoiceTraceStage.ANSWER_FAILED, error); end("Voice runtime could not initialize. Phonon dictation is still available.") } catch (error: Exception) { VoiceTrace.error(VoiceTraceStage.ANSWER_FAILED, error); end("Voice negotiation failed") }
-                    "live.closed" -> end(event.optString("reason", "Voice connection ended"))
+                    "live.closed" -> end(event.optString("reason", "Voice connection ended"), "REMOTE_CLOSED")
                     "live.error" -> end(event.optString("message", "Codex voice failed"))
                     "live.task" -> {
                         val approval = event.optString("approvalId").takeIf { it.isNotBlank() }
@@ -245,7 +250,7 @@ class LiveVoiceService : Service() {
                 catch (error: Exception) {
                     VoiceTrace.error(VoiceTraceStage.POLL_FAILED, error)
                     if (SystemClock.elapsedRealtime() - lastSuccess > 30_000) {
-                        withContext(Dispatchers.Main) { end("Bridge disconnected. Reconnect when it is available.") }; return@launch
+                        withContext(Dispatchers.Main) { end("Bridge disconnected. Reconnect when it is available.", "SIGNALING_LOST") }; return@launch
                     }
                 }
                 delay(livePollIntervalMs(firstMediaConnection.isCompleted))
@@ -271,12 +276,12 @@ class LiveVoiceService : Service() {
                             "connected" -> {
                                 gate.connected(true); activateWhenReady()
                             }
-                            "failed" -> end("Voice connection failed. Reconnect when ready.")
+                            "failed" -> end("Voice connection failed. Reconnect when ready.", "MEDIA_FAILED")
                             "disconnected" -> {
                                 gate.connected(false)
                                 state.value = state.value.withConnection(false)
                                 disconnectJob?.cancel()
-                                disconnectJob = scope.launch { delay(10_000); end("Voice disconnected. Reconnect when ready.") }
+                                disconnectJob = scope.launch { delay(10_000); end("Voice disconnected. Reconnect when ready.", "MEDIA_DISCONNECTED") }
                             }
                             "listening", "thinking", "speaking", "ready" -> {
                                 if (status == "speaking") speaking = true
@@ -377,7 +382,7 @@ class LiveVoiceService : Service() {
                         stillCurrent = { isActive && !ending && callId == id },
                         send = { signaling.send("live.heartbeat", id) },
                         lost = { withContext(Dispatchers.Main) {
-                            if (!ending && callId == id) end("Bridge connection lost. Reconnect when ready.")
+                            if (!ending && callId == id) end("Bridge connection lost. Reconnect when ready.", "HEARTBEAT_LOST")
                         } },
                     )
                 }
@@ -394,9 +399,11 @@ class LiveVoiceService : Service() {
             catch (error: Exception) { VoiceTrace.error(VoiceTraceStage.STARTUP_FAILED, error); end(error.message ?: "Could not connect Codex voice") }
         }
     }
-    private fun end(reason: String? = null) {
+    private fun end(reason: String? = null, traceCause: String = if (reason == null) "USER" else "OTHER") {
         if (ending) return
-        VoiceTrace.event(VoiceTraceStage.END)
+        val connectedAt = state.value.connectedAtElapsedMs
+        val duration = liveCallDurationMs(connectedAt, state.value.finishedDurationMs, SystemClock.elapsedRealtime())
+        VoiceTrace.event(VoiceTraceStage.END, traceCause, durationMs = duration, atEpochMs = System.currentTimeMillis())
         ending = true
         callingTone?.stop()
         val id = callId
@@ -408,7 +415,7 @@ class LiveVoiceService : Service() {
         releaseNetworkMonitor?.invoke(); releaseNetworkMonitor = null
         pollJob?.cancel(); eventsJob?.cancel(); heartbeatJob?.cancel(); disconnectJob?.cancel(); startupJob?.cancel(); levelsJob?.cancel()
         releaseAudio()
-        state.value = LiveVoiceState("ending", reason ?: "Ending call…")
+        state.value = LiveVoiceState("ending", reason ?: "Ending call…", connectedAtElapsedMs = connectedAt, finishedDurationMs = duration)
         scope.launch(Dispatchers.IO) {
             try { if (id != null) withTimeout(10_000) { signaling.send("live.stop", id) } }
             catch (cancelled: CancellationException) { throw cancelled }
@@ -420,7 +427,7 @@ class LiveVoiceService : Service() {
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { /* Diagnostics never block ending the call. */ }
             finally { withContext(Dispatchers.Main) {
-                state.value = LiveVoiceState(if (reason == null) "idle" else "error", reason ?: "Call ended · Connect to continue")
+                state.value = LiveVoiceState(if (reason == null) "idle" else "error", reason ?: "Call ended · Connect to continue", connectedAtElapsedMs = connectedAt, finishedDurationMs = duration)
                 ServiceCompat.stopForeground(this@LiveVoiceService, ServiceCompat.STOP_FOREGROUND_REMOVE); stopSelf()
             } }
         }
@@ -442,7 +449,9 @@ class LiveVoiceService : Service() {
     override fun onDestroy() {
         runCatching { peer?.close() }; peer = null; network?.release(); network = null
         releaseNetworkMonitor?.invoke(); releaseNetworkMonitor = null; releaseAudio(); scope.cancel()
-        if (!ending && callId != null) state.value = LiveVoiceState("error", "Voice service stopped. Reconnect when ready.")
+        if (!ending && callId != null) state.value = LiveVoiceState("error", "Voice service stopped. Reconnect when ready.",
+            connectedAtElapsedMs = state.value.connectedAtElapsedMs,
+            finishedDurationMs = liveCallDurationMs(state.value.connectedAtElapsedMs, state.value.finishedDurationMs, SystemClock.elapsedRealtime()))
         callId = null
         super.onDestroy()
     }

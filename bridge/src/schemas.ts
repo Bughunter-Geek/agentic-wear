@@ -45,9 +45,10 @@ export const watchPayloadSchema = z.discriminatedUnion("kind", [
     transport: voiceTransportSchema }).strict(),
   // Metadata-only call diagnostics from the Watch: stage names, timings, states and counts.
   z.object({ version: z.literal(1), kind: z.literal("live.trace"), requestId: safeId, callId: safeId,
-    events: z.array(z.object({ stage: z.string().regex(/^[A-Z_]{1,32}$/u), elapsedMs: z.number().int().min(0).max(90_000),
+    events: z.array(z.object({ stage: z.string().regex(/^[A-Z_]{1,32}$/u), elapsedMs: z.number().int().min(0).max(7_200_000),
       callHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(), threadHash: z.string().regex(/^[a-f0-9]{12}$/u).optional(),
-      state: z.string().regex(/^[A-Z_]{1,32}$/u).optional(), count: z.number().int().min(0).max(65_536).optional() }).strict()).max(80),
+      state: z.string().regex(/^[A-Z_]{1,32}$/u).optional(), count: z.number().int().min(0).max(65_536).optional(),
+      durationMs: z.number().int().min(0).max(7_200_000).optional(), atEpochMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional() }).strict()).max(80),
   }).strict(),
   // Value-free voice loop diagnostics from the Watch (Dot/cloud turn-based voice): phase and reason names only.
   z.object({ version: z.literal(1), kind: z.literal("voice.loop.trace"), requestId: safeId,

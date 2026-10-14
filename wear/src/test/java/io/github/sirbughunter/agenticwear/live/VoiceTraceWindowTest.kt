@@ -11,13 +11,22 @@ class VoiceTraceWindowTest {
         assertEquals(12, (event["callHash"] as String).length)
         assertFalse(event.toString().contains("private")); assertFalse(event.toString().contains("secret"))
     }
-    @Test fun finiteWindowAndRecordBudget() {
+    @Test fun retainsTenMinuteDisconnectAndEndAfterStartupBudget() {
         var now = 0L
         val window = VoiceTraceWindow({ now }, "call", "task")
-        repeat(80) { assertNotNull(window.event(VoiceTraceStage.ICE_STATE, "NEW")) }
-        assertNull(window.event(VoiceTraceStage.ICE_STATE))
-        val expired = VoiceTraceWindow({ now }, "call", "task"); now = 90_001
-        assertNull(expired.event(VoiceTraceStage.END))
+        repeat(100) { now += 1; window.event(VoiceTraceStage.ICE_STATE, "NEW") }
+        now = 600_000
+        window.event(VoiceTraceStage.PEER_STATE, "DISCONNECTED")
+        now = 610_000
+        window.event(VoiceTraceStage.END, "MEDIA_DISCONNECTED", durationMs = 600_000, atEpochMs = 1_792_000_000_000)
+        assertEquals(80, window.events().size)
+        assertEquals(listOf("PEER_STATE", "END"), window.events().takeLast(2).map { it["stage"] })
+        assertEquals(610_000L, window.events().last()["elapsedMs"])
+        assertEquals("MEDIA_DISCONNECTED", window.events().last()["state"])
+        assertEquals(600_000L, window.events().last()["durationMs"])
+        assertEquals(1_792_000_000_000L, window.events().last()["atEpochMs"])
+        now = 7_200_001
+        assertNull(window.event(VoiceTraceStage.END))
     }
     @Test fun preservesOrderTimingAndSafeCandidateCount() {
         var now = 100L

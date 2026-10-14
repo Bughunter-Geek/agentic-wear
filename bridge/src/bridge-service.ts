@@ -459,7 +459,7 @@ export class BridgeService {
         }
         case "live.trace":
           console.log(JSON.stringify({ level: "info", message: "live.voice.watchTrace", callId: payload.callId,
-            events: payload.events.map(({ stage, elapsedMs, state, count }) => ({ stage, elapsedMs, state, count })) }));
+            events: payload.events.map(({ stage, elapsedMs, state, count, durationMs, atEpochMs }) => ({ stage, elapsedMs, state, count, durationMs, atEpochMs })) }));
           return;
         case "notify.trace":
           // Watch-side push -> fetch -> notify timings (watch wall clock) and per-alert decisions.

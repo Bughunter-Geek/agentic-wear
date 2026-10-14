@@ -84,6 +84,9 @@ describe("Watch voice trace", () => {
       { stage: "NETWORK_READY", elapsedMs: 412, callHash: "0123456789ab", threadHash: "ba9876543210", state: "WIFI" },
       { stage: "OFFER_READY", elapsedMs: 900, count: 2 },
     ] }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, events: [{ stage: "END", elapsedMs: 610_000, state: "HEARTBEAT_LOST", durationMs: 600_000, atEpochMs: 1_792_000_000_000 }] }).success).toBe(true);
+    expect(watchPayloadSchema.safeParse({ ...base, events: [{ stage: "END", elapsedMs: 7_200_001 }] }).success).toBe(false);
+    expect(watchPayloadSchema.safeParse({ ...base, events: Array.from({ length: 81 }, () => ({ stage: "END", elapsedMs: 1 })) }).success).toBe(false);
     expect(watchPayloadSchema.safeParse({ ...base, events: [{ stage: "END", elapsedMs: 1, state: "No network: 192.168.0.2" }] }).success).toBe(false);
     expect(watchPayloadSchema.safeParse({ ...base, events: [{ stage: "END", elapsedMs: 1, sdp: "v=0" }] }).success).toBe(false);
   });
