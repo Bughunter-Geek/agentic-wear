@@ -82,6 +82,7 @@ export class BridgeService {
   private readonly cloudTextProof = new CloudTextProof();
   private readonly cloudTextSession = new CloudTextSession();
   private readonly desktopCloud: DesktopCloudReceiver;
+  private lastDotVoice = "";
   private readonly cloudHistorySignatures = new Map<string,string>();
   // High-priority (wake) history pushes are throttled per thread. See sendCloudHistory.
   private readonly cloudInlineLastAt = new Map<string,number>();
@@ -192,6 +193,9 @@ export class BridgeService {
         void this.cloudVoice.expire().catch(() => undefined);
         void this.liveVoice.expire()
           .then(() => this.appServer.releaseEndedRealtimeLeases()).catch(() => undefined);
+        // A Dot's voice channel coming or going refreshes the watch's list (its ready dot).
+        const dotVoice = this.desktopCloud.sessions().filter(s => s.source === "dot").map(s => `${s.id}:${s.voiceReady === true}`).join("|");
+        if (dotVoice !== this.lastDotVoice) { this.lastDotVoice = dotVoice; void this.sendSessions().catch(() => undefined); }
       }, 5_000);
       this.liveTimer.unref();
       await this.reportRealtimeVoiceCapability();

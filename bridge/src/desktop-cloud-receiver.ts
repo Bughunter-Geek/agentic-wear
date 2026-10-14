@@ -156,7 +156,7 @@ export class DesktopCloudReceiver {
       return { id: target.threadId, title: target.title, updatedAt: cached?.observedAt ?? 0,
         status: this.active && cached ? cached.snapshot.status : "notLoaded",
         source: target.dotNamespace ? "dot" as const : "cloud" as const,
-        ...(target.dotNamespace ? {} : cloudFields(cached?.snapshot)),
+        ...(target.dotNamespace ? { voiceReady: this.nativeVoiceAvailable(target.threadId) } : cloudFields(cached?.snapshot)),
         ownedByWear: false, canAcceptDirectInput: ready, watchReady: ready };
     });
     // A dynamic chat is listed only while its tab keeps reporting (fresh snapshot).

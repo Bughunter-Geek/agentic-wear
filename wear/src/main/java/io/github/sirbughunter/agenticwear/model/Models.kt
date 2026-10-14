@@ -19,6 +19,8 @@ data class AgentSession(
     val attention: String? = null,
     /** Browser-route cloud chats only: selectable models and reasoning levels reported by the bridge. */
     val cloud: CloudModelInfo? = null,
+    /** Dot chats only: whether the native voice channel is ready; null when the bridge doesn't say. */
+    val voiceReady: Boolean? = null,
 )
 
 data class CloudModelInfo(

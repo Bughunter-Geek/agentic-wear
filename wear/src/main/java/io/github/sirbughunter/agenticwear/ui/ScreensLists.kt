@@ -185,7 +185,7 @@ private fun androidx.compose.foundation.lazy.LazyItemScope.glideModifier(): Modi
 private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (String) -> Unit, reason: PriorityReason? = null, modifier: Modifier = Modifier) {
     val ago = shortAgo(session.updatedAtMillis)
     val meta = buildString {
-        append(reason?.label ?: session.status.label)
+        append(reason?.label ?: session.statusLabel())
         if (session.status != SessionStatus.ERROR && session.updatedAtMillis > 0) append(" · ").append(ago)
         if (session.ownedByWear) append(" · Watch")
     }
@@ -194,7 +194,7 @@ private fun SessionRow(session: AgentSession, selectedId: String?, onSelect: (St
         selected = session.id == selectedId,
         modifier = modifier.semantics(mergeDescendants = true) { contentDescription = "${session.title}, $meta${sourceLabel(session.source)?.let { ", $it chat" }.orEmpty()}" },
     ) {
-        StatusIndicator(session.status.kind())
+        StatusIndicator(session.indicatorKind())
         Column(Modifier.weight(1f)) {
             Text(session.title, style = AwType.Row, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(2.dp))
