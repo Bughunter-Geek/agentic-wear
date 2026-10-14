@@ -49,6 +49,11 @@
       }
     }
     function post(command) { window.postMessage({ type: 'aw.native.voice.command', command }, location.origin); }
+    let preparationPolicy = null;
+    function query(selected = Boolean(identity())) {
+      if (isDot) preparationPolicy = selected;
+      post({ action: 'query', ...(isDot ? { disableIdlePreparation: selected } : {}) });
+    }
     function release(call = owner) {
       if (owner !== call) return;
       accepted?.resolve(false);
@@ -82,17 +87,19 @@
     const controls = new MutationObserver(protectMicControls);
     controls.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-label'] });
     const timer = setInterval(() => {
-      post({ action: 'query' });
+      query();
       if (owner) {
         // The browser's placeholder mic is not the physical input. Keep its
         // control visibly disabled; Watch mute operates the real native track.
         protectMicControls();
       }
     }, 2000);
-    post({ action: 'query' });
+    query();
     let lastReadiness = null;
     function readiness() {
-      const reason = stopped ? 'controller-retired' : !supported ? 'hook-unavailable' : !identity() ? 'selection-mismatch'
+      const selected = Boolean(identity());
+      if (!stopped && isDot && preparationPolicy !== selected) query(selected);
+      const reason = stopped ? 'controller-retired' : !supported ? 'hook-unavailable' : !selected ? 'selection-mismatch'
         : owner ? 'ready' : hangup() ? 'previous-call-closing' : startControl() || profileControl() ? 'ready' : 'start-control-unavailable';
       // Log transitions only, using fixed codes. No Dot identity, account data,
       // private content or audio is included. General text readiness is separate.
@@ -149,6 +156,7 @@
       stop() {
         if (stopped) return;
         stopped = true; generation++;
+        if (isDot) query(false);
         if (owner) post({ action: 'stop', callId: owner.callId });
         release(); clearInterval(timer); controls.disconnect(); window.removeEventListener('message', receive);
       },

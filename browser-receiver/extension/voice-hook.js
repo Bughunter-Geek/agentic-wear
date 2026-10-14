@@ -7,9 +7,47 @@
   const gum = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
   const available = Boolean(Peer && Context && Worklet && gum && window.AgenticWearRemotePeer);
   const peers = new Set();
+  const preparationWaiters = new Set(), physicalInputs = new Set();
+  let disableIdlePreparation = false, physicalRequests = 0, personalStartUntil = 0;
   const trackOwners = new WeakMap(), graphOwners = new WeakMap();
   let owner = null;
   const emit = event => window.postMessage({ type: 'aw.native.voice.event', event }, location.origin);
+  window.addEventListener('click', event => {
+    if (!event.isTrusted || location.href !== 'https://chatgpt.com/dots/home') return;
+    const button = event.target?.closest?.('button');
+    const label = button && (button.getAttribute('aria-label') || (button.innerText || button.textContent || '').trim());
+    if (label === 'Start call' && !owner) personalStartUntil = Date.now() + 45000;
+    if (label === 'Hang up') personalStartUntil = 0;
+  }, true);
+  function idlePreparation(peer) {
+    try {
+      return !owner && location.href === 'https://chatgpt.com/dots/home' && Date.now() >= personalStartUntil && physicalRequests === 0 &&
+        ![...physicalInputs].some(stream => stream.getAudioTracks().some(track => track.readyState !== 'ended')) &&
+        peer.connectionState === 'new' && peer.iceConnectionState === 'new' && !peer.remoteDescription &&
+        ['stable', 'have-local-offer'].includes(peer.signalingState) && typeof peer.getSenders === 'function' &&
+        peer.getSenders().every(sender => sender.track == null) &&
+        ![...document.querySelectorAll('button')].some(button => button.isConnected &&
+          (button.getAttribute('aria-label') || (button.innerText || button.textContent || '').trim()) === 'Hang up' &&
+          (!button.getClientRects || button.getClientRects().length > 0));
+    } catch { return false; }
+  }
+  async function preparationPolicy(peer) {
+    if (!idlePreparation(peer)) return;
+    // Selection loads in the isolated world. Give its verified identity query
+    // one bounded chance to arrive before the native client allocates a cache.
+    if (!disableIdlePreparation) await new Promise(resolve => {
+      let timer;
+      const finish = () => { clearTimeout(timer); preparationWaiters.delete(finish); resolve(); };
+      preparationWaiters.add(finish); timer = setTimeout(finish, 1000);
+    });
+    if (disableIdlePreparation && idlePreparation(peer)) {
+      // The native preparation's offer rejection invokes its own stop(), marks
+      // that cache retired and makes Start call use a fresh native allocation.
+      // Never close an unrelated peer or send a private cancellation request.
+      console.info('Agentic Wear voice preparation: selected-dot-cache-deferred');
+      throw new DOMException('Idle voice preparation is deferred for the selected Watch Dot', 'AbortError');
+    }
+  }
   const elapsed = call => Math.max(0, Math.min(10_000_000, Date.now() - call.startedAt));
   function stamp(call, key) { if (owner === call && call.setupTiming[key] === undefined) call.setupTiming[key] = Math.min(120_000, elapsed(call)); }
   function event(call, state, extra = {}) {
@@ -98,7 +136,20 @@
     };
     navigator.mediaDevices.getUserMedia = async constraints => {
       const call = owner;
-      if (!call) return gum(constraints);
+      if (!call) {
+        physicalRequests++;
+        if (constraints?.audio) personalStartUntil = 0;
+        try {
+          const stream = await gum(constraints);
+          if (stream?.getAudioTracks?.().length) {
+            physicalInputs.add(stream);
+            for (const track of stream.getAudioTracks()) track.addEventListener?.('ended', () => {
+              if (stream.getAudioTracks().every(value => value.readyState === 'ended')) physicalInputs.delete(stream);
+            }, { once: true });
+          }
+          return stream;
+        } finally { physicalRequests--; }
+      }
       if (call.ended) throw new DOMException('The delegated input setup was cancelled', 'AbortError');
       if (!constraints?.audio || constraints.video) throw new DOMException('This call delegates audio only to the Watch', 'NotAllowedError');
       stamp(call, 'captureMs');
@@ -113,6 +164,10 @@
         const call = owner;
         if (call?.peer) { event(call, 'failed'); throw new DOMException('One native Dot call is supported', 'InvalidStateError'); }
         const peer = Reflect.construct(target, args); peers.add(peer);
+        if (!call && typeof peer.createOffer === 'function') {
+          const createOffer = peer.createOffer;
+          peer.createOffer = async function (...values) { await preparationPolicy(peer); return createOffer.apply(this, values); };
+        }
         const close = peer.close;
         peer.close = function (...values) { peers.delete(peer); return close.apply(this, values); };
         if (typeof peer.addTrack === 'function') {
@@ -188,7 +243,13 @@
   window.addEventListener('message', message => {
     if (message.source !== window || message.origin !== location.origin || message.data?.type !== 'aw.native.voice.command') return;
     const command = message.data.command;
-    if (command?.action === 'query') { emit({ state: 'available', available }); return; }
+    if (command?.action === 'query') {
+      if (typeof command.disableIdlePreparation === 'boolean') {
+        disableIdlePreparation = command.disableIdlePreparation;
+        if (disableIdlePreparation) for (const finish of [...preparationWaiters]) finish();
+      }
+      emit({ state: 'available', available }); return;
+    }
     if (!command || !/^[A-Za-z0-9_.:-]{1,128}$/.test(command.callId || '')) return;
     if (command.action === 'start') {
       const refused = !available ? 'runtime-unavailable'

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 
-async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgpt.com/dots/home' } = {}) {
+async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgpt.com/dots/home', physicalStream = false } = {}) {
   const handlers = new Map(), events = [], tracks = [], requests = [], responses = [], controls = [], timers = [];
   let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
   const observers = [];
@@ -13,7 +13,7 @@ async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgp
     observe(options) { assert.equal(JSON.stringify(options), '{"entryTypes":["resource"]}'); }
     disconnect() { this.closed = true; }
   }
-  const makeTrack = () => { const track = { kind: 'audio', stopped: false, stop() { this.stopped = true; } }; tracks.push(track); return track; };
+  const makeTrack = () => { const track = { kind: 'audio', stopped: false, get readyState() { return this.stopped ? 'ended' : 'live'; }, stop() { this.stopped = true; } }; tracks.push(track); return track; };
   const stream = () => { const track = makeTrack(); return { getTracks: () => [track], getAudioTracks: () => [track], clone: stream }; };
   class Context {
     createMediaStreamDestination() { return { stream: stream() }; }
@@ -32,7 +32,10 @@ async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgp
   }
   class Peer extends EventTarget {
     state = 'new';
+    iceConnectionState = 'new'; signalingState = 'stable'; remoteDescription = null; senders = []; offers = 0;
     get connectionState() { return this.state; }
+    getSenders() { return this.senders; }
+    async createOffer() { this.offers++; return { type: 'offer', sdp: offer }; }
     close() { this.state = 'closed'; }
   }
   const response = { ok: true, status: 200, privateBody: 'PRIVATE_RESPONSE' };
@@ -45,7 +48,7 @@ async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgp
       return typeof next === 'function' ? next(...args) : next || response; } };
   const location = { href: targetUrl, origin: 'https://chatgpt.com' };
   const sandbox = { window, location, Event, EventTarget, DOMException, URL, TextDecoder, navigator: { mediaDevices: {
-    getUserMedia() { microphoneRequests++; return Promise.resolve('physical'); } } },
+    getUserMedia() { microphoneRequests++; return Promise.resolve(physicalStream ? stream() : 'physical'); } } },
     document: { body: null, querySelectorAll: () => controls }, Date,
     setInterval: () => 1, clearInterval() {}, setTimeout: window.setTimeout, clearTimeout: window.clearTimeout };
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/remote-peer.js', import.meta.url), 'utf8'), sandbox);
@@ -54,7 +57,9 @@ async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgp
   vm.runInNewContext(await readFile(new URL('../../browser-receiver/extension/voice-hook.js', import.meta.url), 'utf8'), sandbox);
   const command = value => handlers.get('message')({ source: window, origin: location.origin,
     data: { type: 'aw.native.voice.command', command: value } });
-  return { window, sandbox, command, events, tracks, response, requests, responses, controls, microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
+  return { window, sandbox, command, events, tracks, response, requests, responses, controls,
+    click: (label, isTrusted = true) => handlers.get('click')({ isTrusted, target: { closest: () => ({ getAttribute: () => label }) } }),
+    microphoneRequests: () => microphoneRequests, localResumes: () => localResumes,
     fetches: () => fetches, advance: ms => { now += ms; }, observers, timers,
     tick(ms) { now += ms; for (const timer of timers.filter(t => !t.cleared && t.due <= now).sort((a, b) => a.due - b.due)) {
       timer.cleared = true; timer.callback(...timer.args);
@@ -122,6 +127,64 @@ test('an existing unrelated browser peer prevents reserving a Watch call', async
   f.command({ action: 'start', callId: 'watch', sdp: offer, expiresAt: Date.now() + 45000 });
   assert.equal(f.events.at(-1).state, 'failed');
   assert.equal(personal.connectionState, 'new');
+});
+
+test('a selected Dot defers silent native prewarming through the native offer cancellation path', async () => {
+  const f = await fixture(); f.command({ action: 'query', disableIdlePreparation: true });
+  const cached = new f.window.RTCPeerConnection();
+  // Native preparation retires its transport when offer creation rejects.
+  const preparation = cached.createOffer().catch(error => { cached.close(); throw error; });
+  await assert.rejects(preparation, { name: 'AbortError' });
+  assert.equal(cached.offers, 0); assert.equal(cached.connectionState, 'closed');
+  f.command({ action: 'start', callId: 'watch', sdp: offer, expiresAt: Date.now() + 45000 });
+  assert.equal(f.events.at(-1).state, 'accepted'); assert.equal(f.microphoneRequests(), 0);
+});
+test('verified selection can arrive after a native idle offer begins', async () => {
+  const f = await fixture(); const cached = new f.window.RTCPeerConnection();
+  const preparation = cached.createOffer().catch(error => { cached.close(); throw error; });
+  f.command({ action: 'query', disableIdlePreparation: true });
+  await assert.rejects(preparation, { name: 'AbortError' }); assert.equal(cached.offers, 0);
+});
+test('unselected Dot preparation resumes at its bounded deadline', async () => {
+  const f = await fixture(); const cached = new f.window.RTCPeerConnection();
+  const preparation = cached.createOffer(); f.tick(1000);
+  assert.equal((await preparation).sdp, offer); assert.equal(cached.offers, 1);
+});
+test('a personal call beginning during selection discovery keeps its native offer', async () => {
+  const f = await fixture(); const personal = new f.window.RTCPeerConnection(); const pending = personal.createOffer();
+  f.controls.push({ isConnected: true, getAttribute: () => 'Hang up', getClientRects: () => [{}] });
+  f.command({ action: 'query', disableIdlePreparation: true });
+  assert.equal((await pending).sdp, offer); assert.equal(personal.offers, 1);
+});
+test('a trusted personal Start call is preserved even before its Hang up control renders', async () => {
+  const f = await fixture(); f.command({ action: 'query', disableIdlePreparation: true }); f.click('Start call');
+  const personal = new f.window.RTCPeerConnection(); assert.equal((await personal.createOffer()).sdp, offer);
+  f.click('Hang up'); personal.close(); const cached = new f.window.RTCPeerConnection();
+  await assert.rejects(cached.createOffer(), { name: 'AbortError' }); cached.close();
+});
+test('synthetic Start call clicks do not masquerade as a personal call', async () => {
+  const f = await fixture(); f.command({ action: 'query', disableIdlePreparation: true }); f.click('Start call', false);
+  const cached = new f.window.RTCPeerConnection(); await assert.rejects(cached.createOffer(), { name: 'AbortError' }); cached.close();
+});
+test('personal microphone input, a remote answer and an active transport cannot be deferred', async () => {
+  for (const state of ['microphone', 'answer', 'connected', 'sender']) {
+    const f = await fixture({ physicalStream: state === 'microphone' });
+    f.command({ action: 'query', disableIdlePreparation: true });
+    if (state === 'microphone') await f.sandbox.navigator.mediaDevices.getUserMedia({ audio: true });
+    const personal = new f.window.RTCPeerConnection();
+    if (state === 'answer') personal.remoteDescription = { type: 'answer', sdp: offer };
+    if (state === 'connected') personal.state = 'connected';
+    if (state === 'sender') personal.senders = [{ track: { kind: 'audio', readyState: 'live' } }];
+    assert.equal((await personal.createOffer()).sdp, offer, state);
+    assert.equal(personal.offers, 1, state); assert.notEqual(personal.connectionState, 'closed', state);
+    f.command({ action: 'start', callId: 'watch', sdp: offer, expiresAt: Date.now() + 45000 });
+    assert.equal(f.events.at(-1).state, 'failed', state);
+  }
+});
+test('the Dot preparation policy never affects native cloud chat offers', async () => {
+  const f = await fixture({ targetUrl: 'https://chatgpt.com/local/11111111-1111-4111-8111-111111111111' });
+  f.command({ action: 'query', disableIdlePreparation: true }); const peer = new f.window.RTCPeerConnection();
+  assert.equal((await peer.createOffer()).sdp, offer); assert.equal(peer.offers, 1);
 });
 
 const createUrl = 'https://chatgpt.com/backend-api/tbo/PRIVATE_OWNER/voice/calls';
