@@ -6,10 +6,10 @@ Speak to Codex, follow a session, and receive completion or permission alerts fr
 
 Two packages, two versions:
 
-- **Watch 0.6.36 — build 118:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.36-alpha).
-- **Receiver / Mac companion 0.3.15:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.36-alpha/agentic-wear-mac-0.3.15.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
+- **Watch 0.6.38 — build 120:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.38-alpha).
+- **Receiver / Mac companion 0.3.17:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.38-alpha/agentic-wear-mac-0.3.17.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
 
-Use both matching packages. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.36-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.36-alpha); an unpinned default-branch checkout may predate this implementation.
+Use both matching packages. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.38-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.38-alpha); an unpinned default-branch checkout may predate this implementation.
 
 The current source and receiver have explicit per-browser Dot selection and no maintainer Dot default. A packaging guard checks the committed source and staged receiver. Older source tags, downloads and caches are unchanged and may retain the former default; use this release rather than rebuilding an old receiver. Historical tags are not rewritten.
 
@@ -25,8 +25,8 @@ You need a compatible Mac with Node.js 22+, Codex/native voice access, your own 
 
 ### Install and connect
 
-1. **Mac:** download the matching [Mac 0.3.15 ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.36-alpha/agentic-wear-mac-0.3.15.zip), extract it to a permanent folder, and follow [Mac package setup](docs/mac-package-setup.md). Configure the bridge, its default transcription dependency and native helper there. New installations need authenticated pairing; existing installations keep their private configuration, pairing and extension identity.
-2. **Watch:** install [Watch 0.6.36/build118](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.36-alpha) and enter the pairing code/relay URL supplied by your own bridge. If already paired, update through **Settings → App updates** and confirm the system installer.
+1. **Mac:** download the matching [Mac 0.3.17 ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.38-alpha/agentic-wear-mac-0.3.17.zip), extract it to a permanent folder, and follow [Mac package setup](docs/mac-package-setup.md). Configure the bridge, its default transcription dependency and native helper there. New installations need authenticated pairing; existing installations keep their private configuration, pairing and extension identity.
+2. **Watch:** install [Watch 0.6.38/build120](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.38-alpha) and enter the pairing code/relay URL supplied by your own bridge. If already paired, update through **Settings → App updates** and confirm the system installer.
 3. **Chrome:** enable **Agentic Wear Cloud Receiver**, also called **Relay**. Open your own Dot at `https://chatgpt.com/dots/home`. With no call active, open the Receiver popup and choose **Connect this Dot**. Opening the popup alone does not select it. Older packages may call this extension **Agentic Cloud Receiver**; it is separate from the relay server.
 4. **Match the Dot:** the Mac's private target configuration must match the selected Dot. The popup stores selection locally in Chrome; it does not rewrite the Mac configuration. Missing or mismatched selection blocks Dot access. A new tester must finish both sides with their deployment owner.
 5. **Verify the connection:** from the matching Mac package/source root, run `node bridge/dist/cli.js doctor` and `node bridge/dist/cli.js service status`. Confirm the established bridge is running, then open the Watch and confirm its chat list refreshes. Open your Dot in Chrome and try **Talk** on the Watch. For an ordinary cloud chat, keep its supported `chatgpt.com/local/...` page open with Relay enabled. Local Codex tasks use their native route.
@@ -44,11 +44,13 @@ Keep credentials and private Dot targets outside source/downloads. See [update i
 
 Phonon inference is local/offline **after** downloading its runtime and model. This does not make the full app offline: recorded Watch audio still travels through the paired encrypted relay to the Mac, and sending a prompt/live voice needs the corresponding online services. Qwen is a separate optional text-cleanup model; it does not recognize speech. Advanced model setup belongs in [Phonon instructions](docs/phonon-setup.md), not the native-voice installation path.
 
+Opening the selected Dot on the Watch home or chat screen prepares one connection for up to 45seconds. Microphone recording and speaker playback stay inactive until Call. Preparation cancels when leaving the Dot or on expiry. Physical preparation and startup-speed acceptance of build 120 remain pending.
+
 ## In-place updates
 
 Preserve the extension public key/ID, Chrome storage selection, native-host registration, helper bundle, watch pairing, signing identity and private configuration. Back up existing files privately. End calls before any approved extension reload or bridge restart. Never remove a working installation to apply a patch or load a lower-numbered receiver over it.
 
-Receiver/Mac companion **0.3.15** is newer than both formerly documented receiver series. Keep one matching release version for the bridge, helper and extension; do not mix older components. This update does not replace the deployed relay service. The [provenance checkpoint](docs/receiver-provenance.md) records the previous mismatch without prescribing another version series.
+Receiver/Mac companion **0.3.17** is newer than both formerly documented receiver series. Keep one matching release version for the bridge, helper and extension; do not mix older components. This update does not replace the deployed relay service. The [provenance checkpoint](docs/receiver-provenance.md) records the previous mismatch without prescribing another version series.
 
 Watch updates use **Settings → App updates**, verify checksum/package/version/signing identity, and require the owner's system-installer confirmation. Existing tester private updates do not publish a public Alpha or grant broad launch authority.
 
