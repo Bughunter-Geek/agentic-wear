@@ -122,3 +122,18 @@ describe("private receive-only cloud boundary", () => {
     await expect(stat(desktopCloudSocketPath(h.path))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
+
+it("routes observed cloud native voice through the paired socket without exposing unobserved targets",async()=>{
+ const h=await setup(),id="00000000-0000-4000-8000-000000000001",commands=vi.fn(),events=vi.fn(async()=>{});
+ h.receiver.setVoiceHandlers(events,async()=>{});
+ const transport=new DesktopCloudTransport(h.config,desktopCloudSocketPath(h.path),vi.fn(),undefined,commands);
+ cleanup.push(async()=>{transport.close();});transport.start();
+ expect(h.receiver.nativeVoiceTarget(id)).toBeNull();
+ transport.snapshot({threadId:id,title:"Cloud voice",status:"idle",nativeVoice:true,messages:[]},Date.now());
+ await vi.waitFor(()=>expect(h.receiver.nativeVoiceAvailable(id)).toBe(true));
+ h.receiver.voiceCommand({version:1,kind:"native-voice",action:"start",callId:"cloud",threadId:id,sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111",expiresAt:Date.now()+45000});
+ await vi.waitFor(()=>expect(commands).toHaveBeenCalledWith(expect.objectContaining({threadId:id,action:"start"})));
+ transport.voiceEvent({callId:"cloud",threadId:id,state:"accepted"});await vi.waitFor(()=>expect(events).toHaveBeenCalledOnce());
+ expect(h.receiver.nativeVoiceAvailable("unobserved")).toBe(false);
+ transport.close();await vi.waitFor(()=>expect(h.receiver.nativeVoiceAvailable(id)).toBe(false));
+});

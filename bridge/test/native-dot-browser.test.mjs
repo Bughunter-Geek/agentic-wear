@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 
-async function fixture({ workletPostFailure = false } = {}) {
+async function fixture({ workletPostFailure = false, targetUrl = 'https://chatgpt.com/dots/home' } = {}) {
   const handlers = new Map(), events = [], tracks = [], requests = [], responses = [], controls = [], timers = [];
   let microphoneRequests = 0, localResumes = 0, fetches = 0, now = 100;
   const observers = [];
@@ -43,7 +43,7 @@ async function fixture({ workletPostFailure = false } = {}) {
     async fetch(...args) { fetches++; requests.push(args); const next = responses.shift();
       if (next instanceof Error) throw next;
       return typeof next === 'function' ? next(...args) : next || response; } };
-  const location = { href: 'https://chatgpt.com/dots/home', origin: 'https://chatgpt.com' };
+  const location = { href: targetUrl, origin: 'https://chatgpt.com' };
   const sandbox = { window, location, Event, EventTarget, DOMException, URL, TextDecoder, navigator: { mediaDevices: {
     getUserMedia() { microphoneRequests++; return Promise.resolve('physical'); } } },
     document: { body: null, querySelectorAll: () => controls }, Date,
@@ -554,12 +554,12 @@ test('other browser requests and mismatched offers retain their native behavior'
 const controllerSource = await readFile(new URL('../../browser-receiver/extension/voice-controller.js', import.meta.url), 'utf8');
 const contentSource = await readFile(new URL('../../browser-receiver/extension/content.js', import.meta.url), 'utf8');
 const dotNamespace = 'fa24ed5a57dc8199b97f68f7d0098d11';
-function controllerPage() {
+function controllerPage(targetUrl = 'https://chatgpt.com/dots/home') {
   const dom = new JSDOM(`<main><button data-orbit-profile-trigger="true" aria-label="Open Lumen’s profile"></button>
     <article class="message-row" data-message-id="${dotNamespace}~${dotNamespace}~CalpicoMessage~Sentinel_${'a'.repeat(32)}">
       <div class="message-body">Previous reply<button data-action="reply">Reply</button></div></article>
     <div class="ProseMirror" contenteditable="true" aria-label="Message"></div><button aria-label="Start call"></button></main>`,
-  { url: 'https://chatgpt.com/dots/home', runScripts: 'outside-only' });
+  { url: targetUrl, runScripts: 'outside-only' });
   const observations = [], commands = []; let listener, clears = 0;
   const w = dom.window;
   Object.defineProperty(w.HTMLElement.prototype, 'innerText', { get() { return this.textContent; } });
@@ -779,4 +779,66 @@ test('a cancelled startup cannot release the next Watch call when its promise se
       action: 'stop', callId: 'old', expiresAt: Date.now() + 1000 }), false);
     controller.stop(); assert.equal(f.commands.at(-1).callId, 'next');
   } finally { f.dom.window.close(); }
+});
+const cloudUrl = 'https://chatgpt.com/local/00000000-0000-4000-8000-000000000001';
+test('cloud RPC answer delegates Watch media and waits for real input release without a Dot HTTP attach', async () => {
+  const f = await fixture({ targetUrl: cloudUrl });
+  f.command({ action: 'start', callId: 'cloud', sdp: offer, expiresAt: Date.now() + 45000 });
+  const input = await nativeInput(f), peer = new f.window.RTCPeerConnection();
+  peer.createDataChannel('oai-events'); await peer.setLocalDescription(await peer.createOffer());
+  const applied = peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.command({ action: 'transport', callId: 'cloud', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  await applied;
+  assert.equal(f.events.some(e => e.state === 'active'), false);
+  input.port.postMessage({ type: 'release' });
+  assert.equal(f.events.filter(e => e.state === 'active').length, 1);
+  assert.equal(f.microphoneRequests(), 0); assert.equal(f.fetches(), 0);
+  const end = { isConnected: true, disabled: false, getAttribute: () => 'End voice chat', click() { end.clicked = true; } };
+  f.controls.push(end); f.command({ action: 'stop', callId: 'cloud' });
+  assert.equal(end.clicked, true); assert.equal(peer.connectionState, 'closed');
+});
+test('a cloud call cancelled during SDP negotiation never becomes ready or opens the desktop microphone', async () => {
+  const f = await fixture({ targetUrl: cloudUrl });
+  f.command({ action: 'start', callId: 'cloud', sdp: offer, expiresAt: Date.now() + 45000 });
+  const peer = new f.window.RTCPeerConnection(); peer.createDataChannel('oai-events');
+  await peer.setLocalDescription(await peer.createOffer());
+  const pending = peer.setRemoteDescription({ type: 'answer', sdp: offer });
+  f.command({ action: 'stop', callId: 'cloud' });
+  await assert.rejects(pending, { name: 'AbortError' });
+  f.command({ action: 'transport', callId: 'cloud', transport: { seq: 1, peerState: 'connected', iceState: 'connected', channelState: 'open' } });
+  assert.equal(f.events.some(e => e.state === 'active'), false); assert.equal(f.microphoneRequests(), 0);
+});
+
+test('a cloud Talk command clicks only its native voice control and refuses an existing personal call', async () => {
+ const f=controllerPage(cloudUrl);let clicks=0;
+ try{
+  const button=f.w.document.querySelector('[aria-label="Start call"]');button.setAttribute('aria-label','Start voice chat');button.onclick=()=>clicks++;
+  const controller=f.w.AgenticWearVoiceController.create({documentId:'document',url:cloudUrl,identity:()=>f.w.location.href===cloudUrl?cloudUrl:null,changed(){}});
+  f.announce(true);assert.equal(controller.available(),true);acknowledgeStarts(f);
+  assert.equal(await controller.command({action:'start',documentId:'document',url:cloudUrl,callId:'cloud',threadId:'selected',sdp:offer,expiresAt:Date.now()+45000}),true);
+  assert.equal(clicks,1);controller.cancel();
+  const end=f.w.document.createElement('button');end.setAttribute('aria-label','End voice chat');f.w.document.body.append(end);
+  assert.equal(controller.available(),false);assert.equal(await controller.command({action:'start',documentId:'document',url:cloudUrl,callId:'other',expiresAt:Date.now()+45000}),false);
+  assert.equal(clicks,1);controller.stop();
+ }finally{f.dom.window.close();}
+});
+
+test('cancelling a cloud startup clicks its native Cancel control and never a call on a different chat',async()=>{
+ for(const navigate of [false,true]){
+  const f=await fixture({targetUrl:cloudUrl});
+  f.command({action:'start',callId:'cloud',url:cloudUrl,sdp:offer,expiresAt:Date.now()+45000});
+  f.command({action:'control',callId:'cloud'});
+  const cancel={isConnected:true,disabled:false,getAttribute:()=> 'Cancel voice chat',click(){cancel.clicked=true;}};f.controls.push(cancel);
+  if(navigate)f.sandbox.location.href=cloudUrl.replace(/1$/,'2');
+  f.command({action:'stop',callId:'cloud'});assert.equal(cancel.clicked===true,!navigate);
+ }
+});
+test('the installed hook supports a later cloud navigation while refusing an offer for a different URL',async()=>{
+ const f=await fixture();f.sandbox.location.href=cloudUrl;
+ f.command({action:'start',callId:'wrong',url:cloudUrl.replace(/1$/,'2'),sdp:offer,expiresAt:Date.now()+45000});assert.equal(f.events.at(-1).state,'failed');
+ f.command({action:'start',callId:'cloud',url:cloudUrl,sdp:offer,expiresAt:Date.now()+45000});assert.equal(f.events.at(-1).state,'accepted');
+ const input=await nativeInput(f),peer=new f.window.RTCPeerConnection();peer.createDataChannel('oai-events');await peer.setLocalDescription(await peer.createOffer());
+ const applied=peer.setRemoteDescription({type:'answer',sdp:offer});
+ f.command({action:'transport',callId:'cloud',transport:{seq:1,peerState:'connected',iceState:'connected',channelState:'open'}});await applied;input.port.postMessage({type:'release'});
+ assert.equal(f.events.filter(e=>e.state==='active').length,1);f.command({action:'stop',callId:'cloud'});
 });

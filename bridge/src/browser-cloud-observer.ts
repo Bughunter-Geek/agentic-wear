@@ -57,7 +57,7 @@ export class BrowserCloudObserver {
     // document always baselines history and never replays old completion alerts.
     if(!value.turns.length){
       if(!this.target.dotNamespace && value.generationActive!==undefined)
-        this.snapshot({threadId:this.target.threadId,title:this.target.title,status:value.generationActive?"active":"idle",inputReady:Boolean(this.target.sendEnabled&&value.inputReady),...cloudModelFields(value),messages:[]},value.observedAt);
+        this.snapshot({threadId:this.target.threadId,title:this.target.title,status:value.generationActive?"active":"idle",inputReady:Boolean(this.target.sendEnabled&&value.inputReady),nativeVoice:value.nativeVoice===true,...cloudModelFields(value),messages:[]},value.observedAt);
       this.documentId="";return {baseline:true,turns:0,completed:0,pending:0};}
     let completed=0;
     const parents=new Map<string,string>();
@@ -90,7 +90,7 @@ export class BrowserCloudObserver {
       value.generationActive ?? (value.inputReady===true ? false : this.pending.size>0);
     this.snapshot({threadId:this.target.threadId,title:this.target.title,status:working?"active":"idle",
       inputReady:Boolean(this.target.sendEnabled && value.inputReady),
-      ...(this.target.dotNamespace && value.nativeVoice !== undefined ? { nativeVoice: value.nativeVoice === true } : {}),
+      ...(value.nativeVoice !== undefined ? { nativeVoice: value.nativeVoice === true } : {}),
       ...(this.target.dotNamespace?{}:cloudModelFields(value)),
       messages:value.turns.flatMap(t=>[
         ...(t.prompts??[]).map(p=>({id:`user:${p.id}`,turnId:t.id,...(this.requests.has(p.id)?{watchRequestId:this.requests.get(p.id)!}:{}),role:"user" as const,kind:"message" as const,text:p.text,

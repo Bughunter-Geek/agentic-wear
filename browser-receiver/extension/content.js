@@ -7,11 +7,11 @@
   // or an in-page navigation to another chat). Same URL: keep the running instance.
   // Different URL: retire the old instance so only one answers commands.
   const previous=window.__agenticWearCloudReceiver;
-  if(previous&&previous.version==='0.3.11'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
+  if(previous&&previous.version==='0.3.5.2'&&previous.url===TARGET&&previous.alive&&chrome.runtime?.id)return;
   if(previous&&previous.stop)previous.stop();
   const isDot=TARGET===DOT, documentId=crypto.randomUUID();
   let scheduled=false,last='',lastSent=0,sending=false,retired=false;
-  const nativeVoice=isDot?window.AgenticWearVoiceController?.create({documentId,url:TARGET,identity:()=>dotIdentity()?NAMESPACE:null,changed:()=>schedule()}):null;
+  const nativeVoice=window.AgenticWearVoiceController?.create({documentId,url:TARGET,identity:()=>location.href===TARGET?(isDot?(dotIdentity()?NAMESPACE:null):TARGET):null,changed:()=>schedule()});
   const chatTitle=()=>{
     const text=(document.title||'').replace(/\s*[|\u2013\u2014-]\s*ChatGPT\s*$/i,'').trim().slice(0,200);
     return text&&!/^ChatGPT$/i.test(text)?text:'Codex cloud chat';
@@ -354,7 +354,7 @@
     if(canLearn())learn();
     const started=performance.now(), unavailable=blocked(), composer=editor();
     const model={version:1,kind:'observation',url:TARGET,documentId,visibility:document.visibilityState,blocked:unavailable,
-      ...(isDot?{identity:NAMESPACE,nativeVoice:Boolean(nativeVoice?.available())}:{title:chatTitle()}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
+      ...(isDot?{identity:NAMESPACE,nativeVoice:Boolean(nativeVoice?.available())}:{identity:TARGET,title:chatTitle(),nativeVoice:Boolean(nativeVoice?.available())}),inputReady:!unavailable&&!sending&&!learning&&!stopped()&&!!composer&&!clean(composer),...(unavailable?{}:modelFields()),turns:unavailable?[]:readTurns()};
     if(!isDot)model.generationActive=stopped();
     const encoded=JSON.stringify(model),now=Date.now();
     if(encoded===last&&now-lastSent<3000)return;
@@ -440,7 +440,7 @@
   const pageObserver=new MutationObserver(schedule);
   pageObserver.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-turn-key','aria-busy','data-message-id','disabled']});
   document.addEventListener('visibilitychange',schedule);const tick=setInterval(inspect,1000);
-  const handle={url:TARGET,version:'0.3.11',alive:true,stop(){
+  const handle={url:TARGET,version:'0.3.5.2',alive:true,stop(){
     if(retired)return;
     retired=true;handle.alive=false;
     nativeVoice?.stop();

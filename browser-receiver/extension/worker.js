@@ -34,9 +34,9 @@ async function restoreVoiceMute(callId){
  });}catch{}
 }
 async function voiceCommand(message,port){
- const owner=owners.get(DOT_URL),fail={version:1,kind:'native-voice-event',url:DOT_URL,documentId:message.documentId,
+ const owner=owners.get(message.url),fail={version:1,kind:'native-voice-event',url:message.url,documentId:message.documentId,
   identity:owner?.identity,event:{callId:message.callId,threadId:message.threadId,state:'failed'}};
- if(!owner||owner.documentId!==message.documentId||message.url!==DOT_URL||Date.now()>=message.expiresAt){port.postMessage(fail);return;}
+ if(!owner||owner.documentId!==message.documentId||!isTarget(message.url)||Date.now()>=message.expiresAt){port.postMessage(fail);return;}
  try{
   if(message.action==='start'){
    const check=await chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-check'},{frameId:0});
@@ -49,8 +49,7 @@ async function voiceCommand(message,port){
  }catch{port.postMessage(fail);await restoreVoiceMute(message.callId);}
 }
 function voiceLost(){
- const owner=owners.get(DOT_URL);
- if(owner)chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-lost'},{frameId:0}).catch(()=>{});
+ for(const owner of owners.values())chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-lost'},{frameId:0}).catch(()=>{});
  for(const callId of voiceMutes.keys())void restoreVoiceMute(callId);
 }
 function release(id){for(const [url,owner] of owners)if(owner.tabId===id)owners.delete(url);}
@@ -60,7 +59,7 @@ chrome.tabs.onUpdated.addListener((id,change)=>{if(change.url){release(id);if(is
 // navigated in-page to another chat. content.js guards against double injection itself.
 function inject(tabId){
  try{chrome.tabs.get(tabId).then(tab=>{
-  const prepare=tab.url===DOT_URL?chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:'MAIN',files:['remote-peer.js','voice-timing.js','native-allocation.js','voice-hook.js']}):Promise.resolve();
+  const prepare=isTarget(tab.url)?chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:'MAIN',files:['remote-peer.js','voice-timing.js','native-allocation.js','voice-hook.js']}):Promise.resolve();
   return prepare.then(()=>chrome.scripting.executeScript({target:{tabId,frameIds:[0]},files:['voice-controller.js','content.js']}));
  }).catch(()=>{});}catch{}
 }
@@ -93,8 +92,8 @@ function connect(){
 }
 chrome.runtime.onMessage.addListener((message,sender)=>{
  if(sender.id!==chrome.runtime.id||sender.frameId!==0||!isTarget(sender.url)||!sender.tab||message?.url!==sender.url)return;
- if(message.version===1&&message.kind==='native-voice-event'&&sender.url===DOT_URL){
-  const owner=owners.get(DOT_URL);
+ if(message.version===1&&message.kind==='native-voice-event'){
+  const owner=owners.get(sender.url);
   if(!owner||owner.tabId!==sender.tab.id||owner.documentId!==message.documentId||owner.identity!==message.identity||JSON.stringify(message).length>80000)return;
   connect().postMessage(message);
   if(['failed','closed'].includes(message.event?.state))void restoreVoiceMute(message.event.callId);

@@ -11,6 +11,12 @@ const extensionId=[...createHash('sha256').update(Buffer.from(manifest.key,'base
 if(process.argv[2]!==`chrome-extension://${extensionId}/`)process.exit(2);
 const config=await readDesktopCloudConfig(desktopCloudConfigPath());if(!config?.enabled)process.exit(2);
 const logPath=join(homedir(),'.agentic-wear','browser-receiver-status.json'),receiptPath=join(homedir(),'.agentic-wear','browser-send-receipts.json');
+function voiceTarget(threadId,url){
+ const fixed=config.targets.find(t=>t.threadId===threadId&&(!url||(t.url??`https://chatgpt.com/local/${threadId}`)===url));
+ if(fixed)return {...fixed,url:fixed.url??`https://chatgpt.com/local/${threadId}`};
+ const localUrl=`https://chatgpt.com/local/${threadId}`;
+ return observers.isDynamicThread(threadId)&&(!url||url===localUrl)?{threadId,url:localUrl}:null;
+}
 const hostLogPath=join(homedir(),'.agentic-wear','desktop-cloud-host.log'),loggedFailures=new Set();
 // One line per distinct failure; codes and schema paths only, never field values or message text.
 function hostLog(kind,detail){
@@ -73,7 +79,7 @@ async function send(command){
 const transport=new DesktopCloudTransport(config,desktopCloudSocketPath(desktopCloudConfigPath()),(event,fields)=>{
  process.stderr.write(JSON.stringify({event,at:Date.now(),...fields})+'\n');
 },send,command=>{
- const target=config.targets.find(t=>t.threadId===command.threadId&&t.dotNamespace),page=target&&pages.get(target.url);
+ const target=voiceTarget(command.threadId),page=target&&pages.get(target.url);
  if(!target||!page||page.blocked||Date.now()-page.observedAt>60000||Date.now()>=command.expiresAt){
   transport.voiceEvent({callId:command.callId,threadId:command.threadId,state:'failed'});return;
  }
@@ -92,8 +98,8 @@ process.stdin.on('data',b=>{
   input=input.subarray(4+n);
   try{
    if(raw?.kind==='native-voice-event'){
-    const target=config.targets.find(t=>t.dotNamespace&&t.url===raw.url),page=pages.get(raw.url);
-    if(!target||!page||raw.documentId!==page.documentId||raw.identity!==target.dotNamespace)continue;
+    const target=voiceTarget(raw.event?.threadId,raw.url),page=pages.get(raw.url);
+    if(!target||!page||raw.documentId!==page.documentId||raw.identity!==(target.dotNamespace??target.url))continue;
     const parsed=nativeVoiceEventSchema.safeParse({...raw.event,threadId:target.threadId});
     if(parsed.success)transport.voiceEvent(parsed.data);
     else hostLog('native-voice',issueSummary(parsed.error));

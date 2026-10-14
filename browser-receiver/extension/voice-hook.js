@@ -1,6 +1,7 @@
 (() => {
   'use strict';
-  if (window.__agenticWearNativeVoiceInstalled || location.href !== 'https://chatgpt.com/dots/home') return;
+  const supportedUrl = url => url === 'https://chatgpt.com/dots/home' || /^https:\/\/chatgpt\.com\/local\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(url);
+  if (window.__agenticWearNativeVoiceInstalled || !supportedUrl(location.href)) return;
   window.__agenticWearNativeVoiceInstalled = true;
   const Peer = window.RTCPeerConnection, Context = window.AudioContext, Worklet = window.AudioWorkletNode;
   const gum = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
@@ -25,9 +26,9 @@
     try {
       // Media may not exist yet. Cancel the native startup while its matching
       // main-world ownership token is still held; never schedule a later click.
-      if (call.nativeStarted) {
+      if (call.nativeStarted && location.href === call.url) {
         const hangup = [...document.querySelectorAll('button')].find(button => button.isConnected && !button.disabled &&
-          (button.getAttribute('aria-label') || (button.innerText || button.textContent || '').trim()) === 'Hang up');
+          (call.isDot ? (button.getAttribute('aria-label') || (button.innerText || button.textContent || '').trim()) === 'Hang up' : /^(End voice chat|Stop voice chat|End Voice|Cancel voice chat)$/.test(button.getAttribute('aria-label') || (button.innerText || button.textContent || '').trim())));
         hangup?.click();
       }
     } finally {
@@ -127,7 +128,7 @@
           call.peer = peer;
           call.remote = window.AgenticWearRemotePeer.attach(peer, call.sdp, {
             current: () => owner === call,
-            answer: sdp => event(call, 'answer', { sdp }),
+            answer: sdp => { if (!call.isDot) call.attachStarted = true; event(call, 'answer', { sdp }); },
             closed: () => stop(call),
           });
           peer.addEventListener('connectionstatechange', () => {
@@ -190,11 +191,11 @@
     if (command?.action === 'query') { emit({ state: 'available', available }); return; }
     if (!command || !/^[A-Za-z0-9_.:-]{1,128}$/.test(command.callId || '')) return;
     if (command.action === 'start') {
-      if (!available || owner || [...peers].some(peer => peer.connectionState !== 'closed') ||
+      if (!available || !supportedUrl(location.href) || (command.url !== undefined && command.url !== location.href) || owner || [...peers].some(peer => peer.connectionState !== 'closed') ||
           typeof command.sdp !== 'string' || !command.sdp.startsWith('v=0') || !command.sdp.includes('m=audio') || command.sdp.length > 65536 ||
           Date.now() >= command.expiresAt || command.expiresAt > Date.now() + 60000) { emit({ callId: command.callId, state: 'failed' }); return; }
       const context = new Context({ sampleRate: 48000 });
-      const call = { id: command.callId, sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
+      const call = { id: command.callId, url: location.href, isDot: location.href === 'https://chatgpt.com/dots/home', sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
         clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, attachStarted: false,
         nativeReleased: false, active: false, ended: false, nativeStarted: false };
       owner = call;
@@ -206,7 +207,7 @@
         Object.assign(banner.style, { position: 'fixed', bottom: '8px', left: '8px', zIndex: '2147483647', background: '#234537', color: '#fff', padding: '8px 12px', borderRadius: '10px', font: '13px system-ui', pointerEvents: 'none' });
         document.body.append(banner); call.banner = banner;
       }
-      call.timer = setInterval(() => { if (location.href !== 'https://chatgpt.com/dots/home' || Date.now() - call.lastPing > 45000) stop(call); }, 1000);
+      call.timer = setInterval(() => { if (location.href !== call.url || Date.now() - call.lastPing > 45000) stop(call); }, 1000);
       call.startup = setTimeout(() => { if (owner === call && (!call.active || !call.attached)) { event(call, 'failed'); stop(call); } }, 30000);
       event(call, 'accepted');
     } else if (owner?.id === command.callId) {

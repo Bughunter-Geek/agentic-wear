@@ -1,6 +1,7 @@
 (() => {
   'use strict';
   window.AgenticWearVoiceController = { create({ documentId, url, identity, changed }) {
+    const isDot = url === 'https://chatgpt.com/dots/home';
     let supported = false, owner = null, accepted = null, stopped = false, generation = 0;
     const disabled = new Map();
     const label = element => element.getAttribute('aria-label') || (element.innerText || element.textContent || '').trim();
@@ -9,12 +10,12 @@
       !button.closest('[hidden],[inert],[aria-hidden="true"]') && button.getClientRects().length > 0 &&
       getComputedStyle(button).display !== 'none' && getComputedStyle(button).visibility === 'visible';
     function startControl() {
-      const candidates = buttons().filter(button => label(button) === 'Start call' && usable(button));
+      const candidates = buttons().filter(button => (isDot ? label(button) === 'Start call' : /^(Start voice chat|Start Voice)$/.test(label(button))) && usable(button));
       // The profile panel can disappear while the main-world reservation is
       // acknowledged. Prefer the persistent toolbar, and resolve it at click time.
       return candidates.find(button => !button.closest('[role="dialog"]')) || candidates[0];
     }
-    const hangup = () => buttons().find(button => label(button) === 'Hang up' && usable(button));
+    const hangup = () => buttons().find(button => (isDot ? label(button) === 'Hang up' : /^(End voice chat|Stop voice chat|End Voice|Ending voice chat|Cancel voice chat)$/.test(label(button))) && usable(button));
     const profileControl = () => buttons().some(button => label(button) === 'Start call') ? null : [...document.querySelectorAll('[data-orbit-profile-trigger="true"]')]
       .find(button => label(button) === 'Open Lumen’s profile' && usable(button));
     function revealStart(command) {

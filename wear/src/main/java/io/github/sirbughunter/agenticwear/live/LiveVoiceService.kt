@@ -255,12 +255,12 @@ class LiveVoiceService : Service() {
             try {
                 // Give WebRTC's network monitor a head start; the first peer is created within ~0.1 s.
                 if (releaseNetworkMonitor == null) releaseNetworkMonitor = runCatching { NativeLivePeer.warmUpNetworkMonitor(this@LiveVoiceService) }.getOrNull()
-                // Wake a direct radio while checking the catalog. Only a Bluetooth
-                // Dot needs that reply to permit the default-route transport.
+                // Wake a direct radio while checking the catalog. A Bluetooth
+                // browser-owned call needs that reply to permit the default-route transport.
                 val initialTransport = (network ?: VoiceNetwork(this@LiveVoiceService).also { network = it }).currentTransport()
                 VoiceTrace.event(VoiceTraceStage.NETWORK_REQUEST, initialTransport)
                 val networkReady = async {
-                    val bluetoothPermission = if (initialTransport == "BLUETOOTH" && thread.startsWith("dot:")) nativeDotCatalog else null
+                    val bluetoothPermission = if (initialTransport == "BLUETOOTH") nativeDotCatalog else null
                     network!!.acquire(bluetoothDefaultRoute = bluetoothPermission)
                 }
                 var defaultNetworkRoute = false
@@ -344,7 +344,7 @@ class LiveVoiceService : Service() {
                             taskContext = listOf(text("cwd"), listOf(text("model"), text("effort")).filter { it.isNotBlank() }.joinToString(" · "))
                                 .filter { it.isNotBlank() }.joinToString("\n"))
                     }
-                    nativeDotCall = catalog.optBoolean("nativeDot") && gate.requiresHostAcceptance
+                    nativeDotCall = (catalog.optBoolean("nativeDot") || catalog.optBoolean("nativeBrowserVoice")) && gate.requiresHostAcceptance
                     if (!nativeDotCall) callingTone?.stop()
                     nativeDotCatalog.complete(nativeDotCall)
                     defaultVoice

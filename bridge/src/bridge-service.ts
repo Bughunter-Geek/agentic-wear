@@ -360,11 +360,11 @@ export class BridgeService {
   private async handleWatchPayload(payload: WatchPayload): Promise<void> {
     let resolvedSubmit: Extract<WatchPayload, { kind: "turn.submit" }> | null = payload.kind === "turn.submit" ? payload : null;
     try {
-      if (payload.kind === "live.capability" && payload.threadId && this.desktopCloud.configuredDot(payload.threadId)) {
+      if (payload.kind === "live.capability" && payload.threadId && (this.desktopCloud.configuredDot(payload.threadId) || this.desktopCloud.nativeVoiceTarget?.(payload.threadId))) {
         await this.send({ version: 1, kind: "live.capability", requestId: payload.requestId, ...this.nativeDotVoice.capability(payload.threadId) });
         return;
       }
-      if (payload.kind === "live.start" && this.desktopCloud.configuredDot(payload.threadId)) {
+      if (payload.kind === "live.start" && (this.desktopCloud.configuredDot(payload.threadId) || this.desktopCloud.nativeVoiceTarget?.(payload.threadId))) {
         if (this.liveVoice.active) throw new Error("Another live voice call is active. End it before reconnecting.");
         this.nativeDotVoice.start(payload.callId, payload.threadId, payload.sdp);
         this.rememberLiveCall(payload.callId, payload.threadId);

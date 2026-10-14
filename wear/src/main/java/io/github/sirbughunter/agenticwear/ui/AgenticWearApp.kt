@@ -114,15 +114,9 @@ fun AgenticWearApp(
     val live by LiveVoiceService.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context) }
-    // Dot uses native Watch media through the browser-owned authenticated call.
-    // Other cloud chats retain the existing turn-based conversation entry.
-    val startVoice: () -> Unit = {
-        val src = state.selectedSession?.source
-        if (src == "cloud") {
-            if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED) viewModel.startVoiceLoop() else onPushToTalk()
-        } else context.openLiveCall(autoConnect = !live.callActive())
-    }
+    // Every Talk action uses full-duplex voice. Cloud calls delegate Watch media
+    // to their own browser client; dictation remains a separate explicit action.
+    val startVoice: () -> Unit = { context.openLiveCall(autoConnect = !live.callActive()) }
     // A selected Dot tints every orb in its own colour.
     val selectedIsDot = state.selectedSession?.source == "dot" || state.selectedThreadId?.startsWith("dot:") == true
     val orbPalette = remember(state.screen, selectedIsDot) {

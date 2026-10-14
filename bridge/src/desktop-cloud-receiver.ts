@@ -61,13 +61,23 @@ export class DesktopCloudReceiver {
     const target = this.config?.targets.find(target => target.threadId === threadId && target.dotNamespace);
     return target ? { title: target.title } : null;
   }
+  nativeVoiceTarget(threadId: string): { title: string } | null {
+    const dot = this.configuredDot(threadId);
+    if (dot) return dot;
+    // Only configured or freshly observed cloud chats on this paired receiver.
+    const cached = this.snapshots.get(threadId);
+    const allowed = this.config?.targets.some(target => target.threadId === threadId) ||
+      autoCloudChatsEnabled(this.config) && isCloudChatUuid(threadId);
+    return allowed && cached && Date.now() - cached.observedAt < CLOUD_MAX_AGE_MS
+      ? { title: cached.snapshot.title } : null;
+  }
   nativeVoiceAvailable(threadId: string): boolean {
     const cached = this.snapshots.get(threadId);
-    return Boolean(this.configuredDot(threadId) && this.active && cached?.snapshot.nativeVoice && Date.now() - cached.observedAt < CLOUD_MAX_AGE_MS);
+    return Boolean(this.nativeVoiceTarget(threadId) && this.active && cached?.snapshot.nativeVoice && Date.now() - cached.observedAt < CLOUD_MAX_AGE_MS);
   }
   voiceCommand(value: NativeVoiceCommand): void {
     const command = nativeVoiceCommandSchema.parse(value);
-    if (!this.active || !this.configuredDot(command.threadId)) throw new Error("The native Dot browser is unavailable");
+    if (!this.active || !this.nativeVoiceTarget(command.threadId)) throw new Error("The native Dot browser is unavailable");
     this.active.write(`${JSON.stringify(command)}\n`);
   }
   /** Options a browser cloud chat reports right now (empty for Dot or before the first snapshot). */
@@ -232,7 +242,7 @@ export class DesktopCloudReceiver {
   }
   private async receive(frame: CloudFrame): Promise<void> {
     if (frame.kind === "native-voice-event") {
-      if (!this.configuredDot(frame.event.threadId)) throw new Error("Native voice target is not configured");
+      if (!this.nativeVoiceTarget(frame.event.threadId)) throw new Error("Native voice target is not configured");
       await this.onVoice(frame.event); return;
     }
     if (frame.kind === "reset") { this.snapshots.clear(); return; }
