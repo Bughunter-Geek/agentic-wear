@@ -231,13 +231,12 @@ internal fun CloudOrb(
                 }
             }
             if (ringVisible > 0.01f) {
-                // Searching: an arc that grows, shrinks and races round; on connect it closes into the rim.
+                // Searching: a fixed arc spinning at a steady speed; on connect it closes into the rim.
                 val topLeft = Offset(c.x - ringRadius, c.y - ringRadius)
                 val arcSize = Size(ringRadius * 2, ringRadius * 2)
                 drawCircle(light.copy(alpha = ringVisible * .1f), radius = ringRadius, center = c, style = Stroke(stroke))
-                val spin = if (reducedMotion) 90f else 28f + 220f * (.5f - .5f * cos(2f * PI.toFloat() * t / 1.4f))
-                val sweep = mix(spin, 360f, close)
-                val start = if (reducedMotion) -90f else (t * 300f) % 360f
+                val sweep = mix(100f, 360f, close)
+                val start = if (reducedMotion) -90f else (t * 330f) % 360f
                 drawArc(base.copy(alpha = ringVisible * .35f), start, sweep, false, topLeft, arcSize, style = Stroke(stroke * 2.6f, cap = StrokeCap.Round))
                 drawArc(light.copy(alpha = ringVisible), start, sweep, false, topLeft, arcSize, style = Stroke(stroke, cap = StrokeCap.Round))
             }
