@@ -91,9 +91,10 @@ class LiveVoiceService : Service() {
         nativeDotCall = false
         callingTone = CallingTone(
             startPlayback = {
+                // Media volume lets call feedback work with the Watch ringer silenced.
                 // Optional local feedback: unavailable audio must not fail the voice call.
                 try {
-                    toneGenerator = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 35)
+                    toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
                     if (toneGenerator?.startTone(ToneGenerator.TONE_SUP_RINGTONE) != true) stopCallingTonePlayback()
                 } catch (_: RuntimeException) { stopCallingTonePlayback() }
             },

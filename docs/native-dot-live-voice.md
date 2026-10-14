@@ -525,3 +525,7 @@ that the backend has a fixed 20-second cooldown. Physical acceptance is pending.
 ### Private Watch build 103: calling tone
 
 The Watch plays a quiet local ringback tone after a catalog-verified native Dot call is ready to send `live.start`. The foreground voice service owns playback, so screen-off does not stop it. The matching `live.ready` acceptance event stops playback before activating voice. Cancellation, startup failure, audio-focus loss, end and service destruction stop and release it as well. A terminated tone cannot restart from late startup work. Cooldown stays silent. Playback availability never gates connection. Receiver 0.3.14 is unchanged; physical sound/routing acceptance belongs to the user.
+
+### Private Watch build 104: silent-mode calling audio
+
+Calling audio uses `STREAM_MUSIC` at 50% relative gain instead of the voice-call stream. It follows the user's media volume, allowing playback while the Watch ringer is silent without changing any system volume or silent-mode setting. A zero media volume remains silent. Acceptance/cancel/failure cleanup is unchanged. User reported no audible tone on build 103 with Watch silent mode enabled; physical acceptance of media playback is pending user testing.
