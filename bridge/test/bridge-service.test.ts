@@ -15,7 +15,7 @@ describe("BridgeService App Server transport", () => {
       const sendChatSnapshot = vi.fn().mockResolvedValue(undefined);
       Object.assign(service, {
         appServer: { realtimeVoiceCapability: vi.fn().mockResolvedValue({ realtimeApiAvailable: true, voices: { v1: ["marin"] } }) },
-        desktopCloud: { configuredDot: () => null, owns: () => false }, nativeDotVoice: { active: false, owns: () => false },
+        desktopCloud: { configuredDot: () => null, owns: () => false }, nativeDotVoice: { active: false, owns: () => false }, cloudVoice: {active:false, owns:()=>false},
         liveVoice: { start: vi.fn().mockResolvedValue(undefined), heartbeat: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) },
         sendChatSnapshot,
         watchedThreadId: null, watchAcceptedAt: 0, watchExpiresAt: 0,
@@ -54,7 +54,7 @@ describe("BridgeService App Server transport", () => {
       const send = vi.fn().mockResolvedValue(undefined);
       Object.assign(service, {
         appServer: { realtimeVoiceCapability },
-        desktopCloud: { configuredDot: () => null, owns: () => false }, nativeDotVoice: { active: false, owns: () => false },
+        desktopCloud: { configuredDot: () => null, owns: () => false }, nativeDotVoice: { active: false, owns: () => false }, cloudVoice: {active:false, owns:()=>false},
         liveVoice: { start, heartbeat: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) },
         send,
         watchedThreadId: null, watchAcceptedAt: 0, watchExpiresAt: 0,
@@ -218,7 +218,7 @@ describe("BridgeService App Server transport", () => {
       appServer: { connect, close: vi.fn() },
       desktopCloud: { close: vi.fn().mockResolvedValue(undefined) }, cloudInlineTimers: new Map(),
       liveVoice: { close: vi.fn().mockResolvedValue(undefined) },
-      nativeDotVoice: { close: vi.fn().mockResolvedValue(undefined) },
+      nativeDotVoice: { close: vi.fn().mockResolvedValue(undefined) }, cloudVoice: {close:vi.fn().mockResolvedValue(undefined)},
       controller: new AbortController(),
       transcriber: {},
       assertWatchPublicKey: vi.fn(),
@@ -912,4 +912,14 @@ describe("cloud history push throttling", () => {
     await vi.advanceTimersByTimeAsync(4_000);
     expect(wakes()).toHaveLength(1);
   }));
+});
+it("routes a cloud call to the companion without requiring a browser native voice control",async()=>{
+ const service=Object.create(BridgeService.prototype) as Record<string,unknown>,send=vi.fn(async()=>{}),start=vi.fn(async()=>{}),nativeStart=vi.fn();
+ Object.assign(service,{desktopCloud:{configuredDot:()=>null,owns:(id:string)=>id==="cloud",nativeVoiceAvailable:()=>false},
+  cloudVoice:{active:false,capability:vi.fn(async()=>({realtimeApiAvailable:true,cloudCompanion:true,task:{id:"cloud"}})),start},
+  liveVoice:{active:false,start:nativeStart},nativeDotVoice:{active:false,start:nativeStart},send});
+ const handle=(payload:unknown)=>(service.handleWatchPayload as (p:unknown)=>Promise<void>).call(service,payload);
+ await handle({version:1,kind:"live.capability",requestId:"cap",threadId:"cloud"});expect(send).toHaveBeenCalledWith(expect.objectContaining({cloudCompanion:true,task:{id:"cloud"}}));
+ await handle({version:1,kind:"live.start",requestId:"start",callId:"call",threadId:"cloud",sdp:"v=0 m=audio",voice:"sol"});
+ expect(start).toHaveBeenCalledWith("call","cloud","v=0 m=audio","sol");expect(nativeStart).not.toHaveBeenCalled();expect(service.watchedThreadId).toBe("cloud");
 });

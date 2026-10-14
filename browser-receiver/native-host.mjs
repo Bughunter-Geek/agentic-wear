@@ -128,7 +128,7 @@ process.stdin.on('data',b=>{
    }
    const d=parsed.data,observer=observers.resolve(d);
    if(!observer){status({status:'ignored_observation'});reply({status:'ignored'});continue;}
-   for(const [requestId,receipt] of receipts){if(receipt.result.outcome==='accepted'&&receipt.result.messageId)observer.linkRequest(receipt.result.messageId,requestId);}
+   for(const [requestId,receipt] of receipts){if(receipt.result.outcome==='accepted'&&receipt.result.messageId){observer.linkRequest(receipt.result.messageId,requestId);if(receipt.result.nativeTurnId)observer.linkRequest(receipt.result.nativeTurnId,requestId);}}
    let result;
    try{result=observer.accept(d);}
    catch(error){hostLog('accept',String(error?.message??'error').slice(0,80));status({status:'ignored_observation'});reply({status:'ignored'});continue;}

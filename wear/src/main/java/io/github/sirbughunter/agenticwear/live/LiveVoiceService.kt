@@ -346,7 +346,7 @@ class LiveVoiceService : Service() {
                     }
                     nativeDotCall = (catalog.optBoolean("nativeDot") || catalog.optBoolean("nativeBrowserVoice")) && gate.requiresHostAcceptance
                     if (!nativeDotCall) callingTone?.stop()
-                    nativeDotCatalog.complete(nativeDotCall)
+                    nativeDotCatalog.complete(nativeDotCall || catalog.optBoolean("cloudCompanion"))
                     defaultVoice
                 } catch (error: Throwable) { offerJob.cancel(); throw error }
                 val offer = offerJob.await().getOrThrow()

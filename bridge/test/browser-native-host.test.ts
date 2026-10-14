@@ -51,6 +51,9 @@ it('native host persists send identity, checks uncertainty without resending, an
  });
  await expect(receiver.submitText(threadId,'late-result','Hello late',true)).resolves.toMatchObject({outcome:'accepted',messageId:'late-message'});
  expect(commands).toHaveLength(2);
+ write({...page,observedAt:Date.now(),turns:[...page.turns,{id:'late-turn',prompts:[{id:'late-message',text:'Hello late'}],reply:'MATCHED_CLOUD_REPLY',completed:true,evidence:'response-actions-without-stop'}]});
+ await vi.waitFor(()=>expect(receiver.snapshot(threadId).messages.find(m=>m.role==='assistant'&&m.turnId==='late-turn')).toMatchObject({watchRequestId:'late-result',text:'MATCHED_CLOUD_REPLY'}));
+ expect(receiver.snapshot(threadId).messages.filter(m=>m.turnId!== 'late-turn').some(m=>m.watchRequestId==='late-result')).toBe(false);
 
 });
 

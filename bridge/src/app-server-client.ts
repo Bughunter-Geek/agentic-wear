@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { CLOUD_VOICE_BACKEND, CLOUD_VOICE_FRONTEND, cloudVoiceTool } from "./cloud-voice-companion.js";
 import { voiceChatToolsConfig, voiceChatToolInstructions } from "./voice-chat-tools-config.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -506,6 +507,39 @@ export class AppServerClient {
       }
     }
     return response.data.filter(isTopLevelUserThread).map((thread) => this.sessionView(thread));
+  }
+
+  private cloudCompanionTools: ((params: unknown) => Promise<unknown>) | null = null;
+  private readonly cloudCompanionThreads = new Set<string>();
+  private readonly cloudCompanionContext = new Map<string,{role:"user"|"assistant";text:string}[]>();
+  setCloudCompanionTools(handler: (params: unknown) => Promise<unknown>): void { this.cloudCompanionTools = handler; }
+  async createCloudCompanion(cwd: string, context: string): Promise<string> {
+    const history=z.object({messages:z.array(z.object({role:z.enum(["user","assistant"]),text:z.string().max(1200)})).max(8)}).passthrough().parse(JSON.parse(context));
+    const raw = await this.request("config/read", { includeLayers: false });
+    const existing = z.object({config:z.object({mcp_servers:z.record(z.string(),z.unknown()).optional(),model_provider:z.string().optional()}).passthrough()}).passthrough().parse(raw);
+    if((existing.config.model_provider??"openai")!=="openai")throw new Error("The native companion requires the host's OpenAI provider. No cloud context was sent.");
+    const config:Record<string,unknown>={"features.shell_tool":false,"features.apps":false,"features.view_image":false,
+      "features.image_generation":false,"features.multi_agent":false,"features.skill_search":false,"web_search":"disabled","project_doc_max_bytes":0};
+    for(const name of Object.keys(existing.config.mcp_servers??{}))config[`mcp_servers.${name}.enabled`]=false;
+    const thread=responseWithThreadSchema.parse(await this.request("thread/start", {
+      cwd, ephemeral:true, serviceName:"Agentic Wear cloud voice companion", sandbox:"read-only", approvalPolicy:"never",
+      config, dynamicTools:[cloudVoiceTool], developerInstructions:CLOUD_VOICE_BACKEND,
+    })).thread;
+    if(thread.ephemeral!==true){await this.request("thread/unsubscribe",{threadId:thread.id});throw new Error("The host did not create an ephemeral voice companion.");}
+    this.cloudCompanionContext.set(thread.id,history.messages);
+    this.cloudCompanionThreads.add(thread.id);this.threadCache.set(thread.id,thread);return thread.id;
+  }
+  async startCloudCompanion(threadId:string,sdp:string,voice:string):Promise<void>{
+    if(!this.cloudCompanionThreads.has(threadId))throw new Error("Voice companion ownership is required.");
+    await this.request("thread/realtime/start",{threadId,transport:{type:"webrtc",sdp},outputModality:"audio",voice,
+      version:"v3",includeStartupContext:true,initialItems:this.cloudCompanionContext.get(threadId)??[],prompt:CLOUD_VOICE_FRONTEND,realtimeStartInstructions:CLOUD_VOICE_BACKEND});
+  }
+  async stopCloudCompanion(threadId:string):Promise<void>{
+    if(this.cloudCompanionThreads.has(threadId))await this.request("thread/realtime/stop",{threadId});
+  }
+  async releaseCloudCompanion(threadId:string):Promise<void>{
+    if(!this.cloudCompanionThreads.has(threadId))return;
+    await this.request("thread/unsubscribe",{threadId});this.cloudCompanionThreads.delete(threadId);this.cloudCompanionContext.delete(threadId);this.threadCache.delete(threadId);
   }
 
   async createVoiceTask(cwd: string): Promise<SessionView> {
@@ -1806,6 +1840,14 @@ export class AppServerClient {
   }
 
   private async handleServerRequest(id: string | number, method: string, params: unknown): Promise<void> {
+    if(method==="item/tool/call"){
+      const parsed=z.object({threadId:z.string()}).passthrough().safeParse(params);
+      const result=parsed.success&&this.cloudCompanionThreads.has(parsed.data.threadId)&&this.cloudCompanionTools
+        ? await this.cloudCompanionTools(params)
+        : {success:false,contentItems:[{type:"inputText",text:"This connection has no matching cloud voice companion tool."}]};
+      this.write({id,result});return;
+    }
+
     const permissionRequest = method === "item/permissions/requestApproval";
     const supported = permissionRequest ||
       method === "item/commandExecution/requestApproval" ||
