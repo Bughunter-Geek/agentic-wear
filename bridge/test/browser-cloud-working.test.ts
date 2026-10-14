@@ -11,7 +11,7 @@ describe("cloud working status follows current browser generation",()=>{
   o.accept({...frame([done,pending]),generationActive:true});
   o.accept({...frame([done,pending]),generationActive:false});
   expect(snapshot.mock.calls.at(-1)?.[0].status).toBe("idle");expect(terminal).not.toHaveBeenCalled();
-  expect(snapshot.mock.calls.at(-1)?.[0].messages.at(-1).phase).not.toBe("final_answer");
+  expect(snapshot.mock.calls.at(-1)?.[0].messages.some((m:{id:string})=>m.id==="browser:next")).toBe(false);
   o.accept({...frame([done,{...done,id:"next"}]),generationActive:false});expect(terminal).toHaveBeenCalledOnce();
  });
  it("clears stale work for legacy observations with a ready composer",()=>{
