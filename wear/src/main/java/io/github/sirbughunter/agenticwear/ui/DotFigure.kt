@@ -2,7 +2,9 @@ package io.github.sirbughunter.agenticwear.ui
 
 import android.animation.ValueAnimator
 import androidx.annotation.DrawableRes
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -148,22 +150,28 @@ internal fun DotFigure(
 ) {
     val reducedMotion = !ValueAnimator.areAnimatorsEnabled()
     val clock = remember { mutableFloatStateOf(0f) }
-    val think by animateFloatAsState(if (mood == DotMood.THINKING) 1f else 0f, tween(420), label = "think")
-    val speakTarget = when (mood) {
-        DotMood.RESPONDING -> 1f
-        DotMood.SPEAKING -> .35f + .65f * kotlin.math.sqrt(agentLevel.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f)
-        else -> 0f
-    }
-    val respond by animateFloatAsState(speakTarget, androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 260f), label = "respond")
-    val listen by animateFloatAsState(
+    // Every mood weight eases slowly in and out; the loops below are sums of weighted components.
+    val soft = tween<Float>(800, easing = FastOutSlowInEasing)
+    val think by animateFloatAsState(if (mood == DotMood.THINKING) 1f else 0f, soft, label = "think")
+    val speakingMood = mood == DotMood.RESPONDING || mood == DotMood.SPEAKING
+    val speakWeight by animateFloatAsState(if (speakingMood) 1f else 0f, soft, label = "speak weight")
+    val speakLevel by animateFloatAsState(
+        when (mood) {
+            DotMood.RESPONDING -> 1f
+            DotMood.SPEAKING -> kotlin.math.sqrt(agentLevel.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f)
+            else -> 0f
+        },
+        spring(dampingRatio = .9f, stiffness = 140f), label = "speak level")
+    val listenWeight by animateFloatAsState(if (mood == DotMood.LISTENING) 1f else 0f, soft, label = "listen weight")
+    val listenLevel by animateFloatAsState(
         if (mood == DotMood.LISTENING) kotlin.math.sqrt(userLevel.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f) else 0f,
-        androidx.compose.animation.core.spring(dampingRatio = .45f, stiffness = 420f), label = "listen")
-    val needs by animateFloatAsState(if (mood == DotMood.NEEDS) 1f else 0f, tween(260), label = "needs")
-    val frozen by animateFloatAsState(if (mood == DotMood.FROZEN) 1f else 0f, tween(400), label = "frozen")
-    val sleep by animateFloatAsState(if (mood == DotMood.SLEEPING) 1f else 0f, tween(700), label = "sleep")
-    val celebrate by animateFloatAsState(if (mood == DotMood.CELEBRATING) 1f else 0f, tween(240), label = "celebrate")
-    val greet by animateFloatAsState(if (mood == DotMood.GREETING) 1f else 0f, tween(240), label = "greet")
-    val calm by animateFloatAsState(if (mood == DotMood.IDLE || mood == DotMood.LISTENING) 1f else 0f, tween(300), label = "calm")
+        spring(dampingRatio = .9f, stiffness = 140f), label = "listen level")
+    val needs by animateFloatAsState(if (mood == DotMood.NEEDS) 1f else 0f, soft, label = "needs")
+    val frozen by animateFloatAsState(if (mood == DotMood.FROZEN) 1f else 0f, soft, label = "frozen")
+    val sleep by animateFloatAsState(if (mood == DotMood.SLEEPING) 1f else 0f, soft, label = "sleep")
+    val celebrate by animateFloatAsState(if (mood == DotMood.CELEBRATING) 1f else 0f, soft, label = "celebrate")
+    val greet by animateFloatAsState(if (mood == DotMood.GREETING) 1f else 0f, soft, label = "greet")
+    val calm by animateFloatAsState(if (mood == DotMood.IDLE || mood == DotMood.LISTENING) 1f else 0f, soft, label = "calm")
     // One-shot confetti, replayed each time the mood becomes CELEBRATING.
     val burst = remember { androidx.compose.animation.core.Animatable(1f) }
     LaunchedEffect(mood, reducedMotion) {
@@ -172,7 +180,7 @@ internal fun DotFigure(
         burst.animateTo(1f, tween(1100, easing = androidx.compose.animation.core.LinearEasing))
     }
     LaunchedEffect(reducedMotion, mood) {
-        if (reducedMotion || mood == DotMood.FROZEN) return@LaunchedEffect
+        if (reducedMotion) return@LaunchedEffect
         var last = 0L
         fun advance(now: Long) {
             if (last != 0L) clock.floatValue = (clock.floatValue + ((now - last) / 1_000_000_000f).coerceAtMost(.08f)) % 1_000f
@@ -180,7 +188,7 @@ internal fun DotFigure(
         }
         while (true) {
             // Idle breathing is slow; ~25 fps looks the same and saves battery.
-            if (mood == DotMood.IDLE || mood == DotMood.SLEEPING) { delay(40); advance(System.nanoTime()) } else withFrameNanos(::advance)
+            if (mood == DotMood.IDLE || mood == DotMood.SLEEPING || mood == DotMood.FROZEN) { delay(40); advance(System.nanoTime()) } else withFrameNanos(::advance)
         }
     }
     val desat = maxOf(.8f * frozen, .4f * sleep)
@@ -191,7 +199,8 @@ internal fun DotFigure(
         Canvas(Modifier.fillMaxSize()) {
             val t = clock.floatValue
             val w = size.minDimension
-            val glow = (1f - frozen) * (.16f - .08f * sleep + think * (.14f + .1f * sin(TAU * t / 1.6f)) + respond * .3f + needs * .22f + celebrate * .26f)
+            val respond = speakWeight * (.35f + .65f * speakLevel)
+            val glow = (1f - frozen) * (.16f - .08f * sleep + think * (.14f + .1f * sin(TAU * t / 2.6f)) + respond * .3f + needs * .22f + celebrate * .26f)
             if (glow > .01f) drawCircle(
                 Brush.radialGradient(listOf(avatar.glow.copy(alpha = glow), Color.Transparent), center = center, radius = w * .78f),
                 radius = w * .78f, center = center,
@@ -210,16 +219,17 @@ internal fun DotFigure(
             colorFilter = if (desat > .01f) ColorFilter.colorMatrix(saturation) else null,
             modifier = Modifier.fillMaxSize().graphicsLayer {
                 val t = clock.floatValue
+                val respond = speakWeight * (.35f + .65f * speakLevel)
+                val listen = listenWeight * listenLevel
                 transformOrigin = TransformOrigin(.5f, .9f)
-                val breathe = (1f - sleep) * .022f * sin(TAU * t / 4.2f) + think * .018f * sin(TAU * t / 2.2f) +
+                val breathe = (1f - sleep) * (1f - .6f * frozen) * .022f * sin(TAU * t / 5.5f) + think * .018f * sin(TAU * t / 3.4f) +
                     sleep * .034f * sin(TAU * t / 6f)
-                val bounce = (t / .82f) % 1f
-                val squash = respond * .06f * kotlin.math.cos(TAU * bounce)
-                // A quick blink-like squish every 4-6 s while calm.
+                val squash = respond * .03f * kotlin.math.cos(TAU * t / 1.3f)
+                // A soft blink-like squish every 5-8 s while calm.
                 val sq = calm * squish(t)
-                scaleX = 1f + breathe + squash + .12f * listen + .04f * sq
-                scaleY = 1f + breathe - squash + .12f * listen - .1f * sq
-                rotationZ = think * 7f * sin(TAU * t / 2.6f) + sleep * 4f + greet * greetWave(t)
+                scaleX = 1f + breathe + squash + .12f * listen + .02f * sq
+                scaleY = 1f + breathe - squash + .12f * listen - .05f * sq
+                rotationZ = think * 4f * sin(TAU * t / 4f) + sleep * 4f + greet * greetWave(t)
                 translationY = (-lift(t, think, respond, needs, celebrate, greet, sleep) + sleep * .03f) * size.height
                 alpha = 1f - .3f * frozen
             },
@@ -230,14 +240,14 @@ internal fun DotFigure(
         val shown = if (mood == DotMood.FROZEN) null else expression ?: autoExpression
         LaunchedEffect(shown) { onExpression(shown) }
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
-            if (shown != null && maxWidth >= 36.dp) DotExpression(shown, clock, maxWidth)
-            else if (think > .01f && maxWidth >= 20.dp) Canvas(Modifier.fillMaxSize()) {
+            if (maxWidth >= 36.dp) DotExpression(shown, clock, maxWidth)
+            if (shown == null && think > .01f && maxWidth >= 20.dp) Canvas(Modifier.fillMaxSize()) {
                 // Small figures: a thought bubble of three dots that bounce in turn.
                 val t = clock.floatValue
                 val w = size.minDimension
                 val r = (w * .055f).coerceAtLeast(1.6f)
                 for (i in 0..2) {
-                    val hop = abs(sin(TAU * (t / 1.3f) / 2f - i * .45f))
+                    val hop = abs(sin(TAU * (t / 1.8f) / 2f - i * .45f))
                     drawCircle(
                         Color.White.copy(alpha = think * (.45f + .55f * hop)),
                         radius = r,
@@ -254,20 +264,21 @@ internal fun DotFigure(
  * Only shown on figures big enough to read it (≥ 36 dp).
  */
 @Composable
-private fun DotExpression(emoji: String, clock: androidx.compose.runtime.MutableFloatState, width: androidx.compose.ui.unit.Dp) {
+private fun DotExpression(emoji: String?, clock: androidx.compose.runtime.MutableFloatState, width: androidx.compose.ui.unit.Dp) {
     run {
         val maxWidth = width
         val side = maxWidth * .34f
         androidx.compose.animation.AnimatedContent(
             targetState = emoji,
             transitionSpec = {
-                (androidx.compose.animation.scaleIn(androidx.compose.animation.core.spring(dampingRatio = .5f, stiffness = 380f), initialScale = .3f) +
-                    androidx.compose.animation.fadeIn(tween(160))) togetherWith
-                    (androidx.compose.animation.scaleOut(tween(160), targetScale = .6f) + androidx.compose.animation.fadeOut(tween(160)))
+                (androidx.compose.animation.scaleIn(tween(500, easing = FastOutSlowInEasing), initialScale = .6f) +
+                    androidx.compose.animation.fadeIn(tween(500))) togetherWith
+                    (androidx.compose.animation.scaleOut(tween(400), targetScale = .8f) + androidx.compose.animation.fadeOut(tween(400)))
             },
             label = "dot expression",
             modifier = Modifier.offset(x = maxWidth * .78f, y = -maxWidth * .02f).size(side),
         ) { shown ->
+            if (shown == null) return@AnimatedContent
             val glow = expressionGlow(shown)
             Box(Modifier.fillMaxSize().graphicsLayer {
                 val t = clock.floatValue
@@ -277,12 +288,12 @@ private fun DotExpression(emoji: String, clock: androidx.compose.runtime.Mutable
                     translationY = -size.height * .25f * u
                     alpha = minOf(1f, u * 5f) * (1f - u)
                 } else {
-                    translationY = -size.height * (.1f + .1f * sin(TAU * t / 1.8f))
+                    translationY = -size.height * (.1f + .07f * sin(TAU * t / 2.6f))
                     rotationZ = 6f * sin(TAU * t / 3.4f)
                 }
             }, contentAlignment = androidx.compose.ui.Alignment.Center) {
                 Canvas(Modifier.fillMaxSize()) {
-                    val pulse = .5f + .5f * sin(TAU * clock.floatValue / 1.8f)
+                    val pulse = .5f + .5f * sin(TAU * clock.floatValue / 2.6f)
                     drawCircle(
                         Brush.radialGradient(listOf(glow.copy(alpha = .35f + .25f * pulse), Color.Transparent), center = center, radius = size.minDimension * .9f),
                         radius = size.minDimension * .9f, center = center,
@@ -295,15 +306,14 @@ private fun DotExpression(emoji: String, clock: androidx.compose.runtime.Mutable
 }
 
 /**
- * The live-call Dot: a steady spinner circles a small cloud orb while connecting; on connect the
- * arc closes, the orb swells and fades, and the Dot grows out of its centre with a burst of
- * sparkles. Reconnecting reverses it. Listening grows with your voice, speaking bounces with
- * Lumen's, working shows the lamp and friends.
+ * The live-call Dot. It never changes size or turns into anything else: while [connecting] it
+ * stays calm at full size with a slow glow pulse and a thin, slow ring just outside it, which fades
+ * in and out. Reconnecting arrives as the FROZEN mood, so it also desaturates softly. Listening
+ * grows with your voice, speaking bounces with Lumen's, working shows the lamp and friends.
  */
 @Composable
 internal fun DotCallFigure(
     avatar: DotAvatar,
-    palette: OrbPalette,
     mood: DotMood,
     connecting: Boolean,
     userLevel: Float,
@@ -311,98 +321,72 @@ internal fun DotCallFigure(
     modifier: Modifier = Modifier,
 ) {
     val reducedMotion = !ValueAnimator.areAnimatorsEnabled()
-    val reveal by animateFloatAsState(if (connecting) 0f else 1f,
-        tween(if (reducedMotion) 0 else if (connecting) 450 else 900, easing = androidx.compose.animation.core.LinearEasing), label = "dot reveal")
+    val ring by animateFloatAsState(if (connecting) 1f else 0f,
+        tween(if (reducedMotion) 0 else if (connecting) 400 else 500, easing = FastOutSlowInEasing), label = "dot ring")
     val spin = remember { mutableFloatStateOf(0f) }
-    val spinning = connecting || reveal < .999f
-    LaunchedEffect(spinning, reducedMotion) {
-        if (!spinning || reducedMotion) return@LaunchedEffect
+    val spinning by remember { androidx.compose.runtime.derivedStateOf { ring > .001f } }
+    LaunchedEffect(spinning, connecting, reducedMotion) {
+        if (!(spinning || connecting) || reducedMotion) return@LaunchedEffect
         var last = 0L
-        while (true) withFrameNanos { now -> if (last != 0L) spin.floatValue = (spin.floatValue + (now - last) / 1_000_000_000f) % 1_000f; last = now }
+        // Wraps at 360 s, a whole number of both the 1.8 s pulse and the 2.4 s ring turn, so it never jumps.
+        while (true) withFrameNanos { now -> if (last != 0L) spin.floatValue = (spin.floatValue + (now - last) / 1_000_000_000f) % 360f; last = now }
     }
-    // Composition only changes when a layer appears or disappears; per-frame values stay in layers.
-    val orbVisible by remember { androidx.compose.runtime.derivedStateOf { reveal < .98f } }
-    val dotVisible by remember { androidx.compose.runtime.derivedStateOf { reveal > .01f } }
-    Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
-        if (orbVisible) CloudOrb(
-            palette = palette, mode = OrbMode.Thinking, userLevel = 0f, agentLevel = 0f,
-            modifier = Modifier.fillMaxSize(.62f).graphicsLayer {
-                val k = smoothStep(reveal / .6f)
-                val sc = 1f + .25f * k
-                scaleX = sc; scaleY = sc
-                alpha = 1f - smoothStep((reveal - .08f) / .5f)
-            },
-        )
-        if (dotVisible) DotFigure(avatar, if (connecting) DotMood.IDLE else mood,
-            Modifier.fillMaxSize(.78f).graphicsLayer {
-                val x = ((reveal - .2f) / .8f).coerceIn(0f, 1f)
-                val sc = .3f + .7f * backOut(x)
-                scaleX = sc; scaleY = sc
-                alpha = smoothStep((reveal - .15f) / .45f)
-            },
-            userLevel = userLevel, agentLevel = agentLevel)
-        // Sparkles: eight dots fly outward from the centre as the Dot emerges, then fade.
-        if (!reducedMotion) Canvas(Modifier.fillMaxSize()) {
-            val s = ((reveal - .25f) / .65f)
-            if (s <= 0f || s >= 1f) return@Canvas
-            val out = 1f - (1f - s) * (1f - s)
-            val r = size.minDimension / 2f
-            for (i in 0 until 8) {
-                val a = TAU * i / 8f + .3f
-                val dist = r * (.3f + .62f * out)
-                val color = if (i % 2 == 0) Color.White else avatar.glow
-                drawCircle(
-                    color.copy(alpha = (1f - s) * .9f),
-                    radius = (r * .045f).coerceAtLeast(1.5f) * (1f - .5f * s),
-                    center = Offset(center.x + kotlin.math.cos(a) * dist, center.y + sin(a) * dist),
-                )
-            }
+    // A connecting Dot stays calm; reconnecting keeps its FROZEN mood.
+    val shownMood = if (connecting && mood != DotMood.FROZEN) DotMood.IDLE else mood
+    Box(modifier) {
+        Canvas(Modifier.fillMaxSize()) {
+            if (ring <= .001f) return@Canvas
+            val pulse = if (reducedMotion) .5f else .5f - .5f * kotlin.math.cos(TAU * spin.floatValue / 1.8f)
+            val radius = size.minDimension * .78f
+            drawCircle(
+                Brush.radialGradient(listOf(avatar.glow.copy(alpha = ring * (.1f + .14f * pulse)), Color.Transparent), center = center, radius = radius),
+                radius = radius, center = center,
+            )
         }
-        val ring = 1f - ((reveal - .5f) / .5f).coerceIn(0f, 1f)
-        if (ring > .01f) Canvas(Modifier.fillMaxSize()) {
-            val stroke = 2.5.dp.toPx()
-            val rr = size.minDimension / 2f - stroke
+        DotFigure(avatar, shownMood, Modifier.fillMaxSize(), userLevel = userLevel, agentLevel = agentLevel)
+        Canvas(Modifier.fillMaxSize()) {
+            if (ring <= .001f) return@Canvas
+            val stroke = 1.5.dp.toPx()
+            val rr = size.minDimension / 2f + 7.dp.toPx()
+            val start = if (reducedMotion) -90f else spin.floatValue / 2.4f * 360f % 360f
+            val style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
             val topLeft = Offset(center.x - rr, center.y - rr)
             val arc = Size(rr * 2, rr * 2)
-            val close = (reveal / .4f).coerceIn(0f, 1f)
-            drawCircle(Color.White.copy(alpha = ring * .1f), radius = rr, center = center, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
-            val sweep = 100f + 260f * close
-            val start = if (reducedMotion) -90f else (spin.floatValue * 330f) % 360f
-            drawArc(avatar.glow.copy(alpha = ring * .4f), start, sweep, false, topLeft, arc,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(stroke * 2.6f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
-            drawArc(Color.White.copy(alpha = ring), start, sweep, false, topLeft, arc,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+            drawCircle(Color.White.copy(alpha = ring * .08f), radius = rr, center = center, style = style)
+            drawArc(avatar.glow.copy(alpha = ring * .35f), start, 110f, false, topLeft, arc,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(stroke * 2.4f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+            drawArc(Color.White.copy(alpha = ring * .9f), start, 110f, false, topLeft, arc, style = style)
         }
     }
 }
 
-/** Upward offset as a fraction of the figure's height. */
+/** Upward offset as a fraction of the figure's height; every component is a smooth sine, so nothing is abrupt. */
 private fun lift(t: Float, think: Float, respond: Float, needs: Float, celebrate: Float = 0f, greet: Float = 0f, sleep: Float = 0f): Float {
-    val float = .012f * (.5f + .5f * sin(TAU * t / 4.2f)) * (1f - sleep)
-    val bob = respond * .07f * abs(sin(PI.toFloat() * ((t / .82f) % 1f)))
-    val hopPhase = (t / 1.7f) % 1f
-    val hop = needs * if (hopPhase < .36f) .1f * sin(PI.toFloat() * hopPhase / .36f) else 0f
-    // Celebrating: two quick hops in the first half of every 1.6 s, then rest.
-    val cp = (t / 1.6f) % 1f
-    val party = celebrate * if (cp < .5f) .13f * abs(sin(PI.toFloat() * cp / .25f)) else 0f
+    val float = .012f * (.5f + .5f * sin(TAU * t / 6f)) * (1f - sleep)
+    val bob = respond * .045f * (.5f - .5f * kotlin.math.cos(TAU * t / 1.3f))
+    val hopPhase = (t / 2.2f) % 1f
+    val hop = needs * if (hopPhase < .36f) .06f * sin(PI.toFloat() * hopPhase / .36f).let { it * it } else 0f
+    // Celebrating: two gentle hops in the first half of every 2 s, then rest.
+    val cp = (t / 2f) % 1f
+    val party = celebrate * if (cp < .5f) .06f * sin(PI.toFloat() * cp / .25f).let { it * it } else 0f
     // Greeting: two small hops while the wave plays, then a pause.
-    val gp = (t / 2f) % 1f
-    val wave = greet * if (gp < .7f) .05f * abs(sin(PI.toFloat() * gp / .35f)) else 0f
+    val gp = (t / 2.4f) % 1f
+    val wave = greet * if (gp < .7f) .03f * sin(PI.toFloat() * gp / .35f).let { it * it } else 0f
     return float + think * .015f + bob + hop + party + wave
 }
 
-/** Degrees of tilt for a wave: two left-right swings of ±10° per 2 s, then rest. */
+/** Degrees of tilt for a wave: two soft left-right swings of ±6° per 2.4 s, then rest. */
 private fun greetWave(t: Float): Float {
-    val gp = (t / 2f) % 1f
-    return if (gp < .7f) 10f * sin(TAU * 2f * gp / .7f) else 0f
+    val gp = (t / 2.4f) % 1f
+    return if (gp < .7f) 6f * sin(TAU * 2f * gp / .7f) * sin(PI.toFloat() * gp / .7f) else 0f
 }
 
-/** 0..1 bump for a 120 ms squish, at a jittered moment every 4-6 s (5 s cycles, start in 1-2 s). */
+/** 0..1 bump for a 220 ms ease-in-out squish, at a jittered moment every 5-8 s (6.5 s cycles). */
 private fun squish(t: Float): Float {
-    val cycle = (t / 5f).toInt()
-    val jitter = (sin(cycle * 12.9898f) * 43758.547f).let { it - kotlin.math.floor(it) }
-    val u = ((t % 5f) - (1f + jitter)) / .12f
-    return if (u in 0f..1f) sin(PI.toFloat() * u) else 0f
+    fun jitter(c: Int) = (sin(c * 12.9898f) * 43758.547f).let { it - kotlin.math.floor(it) }
+    val cycle = (t / 6.5f).toInt()
+    val u = ((t % 6.5f) - (2f + jitter(cycle) * 1.5f)) / .22f
+    return if (u in 0f..1f) .5f - .5f * kotlin.math.cos(TAU * u) else 0f
 }
 
 private val CONFETTI_COLORS = listOf(Color.White, Color(0xFFFFC85A), Color(0xFFFF6F8E), Color(0xFF5AC8FA))

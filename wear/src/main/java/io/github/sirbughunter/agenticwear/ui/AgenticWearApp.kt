@@ -85,6 +85,9 @@ private fun WearScreen.depth(): Int = when (this) {
 /** Opens the live call screen; [autoConnect] starts the call immediately. */
 internal fun Context.openLiveCall(autoConnect: Boolean) {
     startActivity(Intent(this, LiveVoiceActivity::class.java).putExtra(LiveVoiceActivity.EXTRA_AUTO_CONNECT, autoConnect))
+    // Cross-fade instead of sliding, so a selected Dot appears to stay in place. API 34+ sets this in the activity itself.
+    @Suppress("DEPRECATION")
+    if (android.os.Build.VERSION.SDK_INT < 34) (this as? android.app.Activity)?.overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
 }
 
 internal fun LiveVoiceState.callActive(): Boolean = phase in setOf("creating", "connecting", "live", "reconnecting")
@@ -265,7 +268,7 @@ fun AgenticWearApp(
                         (fadeIn(enterSpec) +
                             scaleIn(enterSpec, initialScale = if (forward) .92f else 1.06f, transformOrigin = TransformOrigin.Center) +
                             slideInHorizontally(tween(Aw.MotionDuration, easing = AwEase)) { it / 12 * distance }) togetherWith
-                            (fadeOut(tween(160)) +
+                            (fadeOut(tween(220, easing = AwEase)) +
                                 scaleOut(tween(Aw.MotionDuration, easing = AwEase), targetScale = if (forward) 1.06f else .92f, transformOrigin = TransformOrigin.Center))
                     }
                 },

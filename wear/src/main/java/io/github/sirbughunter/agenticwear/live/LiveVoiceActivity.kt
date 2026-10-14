@@ -1,6 +1,8 @@
 package io.github.sirbughunter.agenticwear.live
 
 import android.Manifest
+import android.app.Activity
+import android.os.Build
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -8,6 +10,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -68,6 +75,7 @@ import io.github.sirbughunter.agenticwear.ui.StatusKind
 import io.github.sirbughunter.agenticwear.ui.callActive
 import io.github.sirbughunter.agenticwear.ui.orbMode
 import io.github.sirbughunter.agenticwear.ui.orbPalette
+import io.github.sirbughunter.agenticwear.ui.toDotMood
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -84,6 +92,11 @@ class LiveVoiceActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Cross-fade with the home screen rather than sliding, so a selected Dot appears to stay in place.
+        if (Build.VERSION.SDK_INT >= 34) {
+            overrideActivityTransition(Activity.OVERRIDE_TRANSITION_OPEN, android.R.anim.fade_in, android.R.anim.fade_out)
+            overrideActivityTransition(Activity.OVERRIDE_TRANSITION_CLOSE, android.R.anim.fade_in, android.R.anim.fade_out)
+        }
         startNewAfterPermission = savedInstanceState?.getBoolean("start-new-after-permission") ?: false
         permissionPending = savedInstanceState?.getBoolean("permission-pending") ?: false
         val autoConnect = intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false)
@@ -165,10 +178,24 @@ class LiveVoiceActivity : ComponentActivity() {
                     if (preview == null) requestConnection(startNew = true)
                 }
 
+                val hasDot = callDot != null
+                // The surrounding UI rises in on first composition; the Dot is visible from the first frame.
+                val entered = remember { MutableTransitionState(!hasDot).apply { targetState = true } }
                 Box(Modifier.fillMaxSize().background(Aw.Bg)) {
+                    if (callDot != null) CallDotLayer(callDot, state)
+                    AnimatedVisibility(
+                        visibleState = entered,
+                        enter = if (hasDot) fadeIn(tween(420, easing = FastOutSlowInEasing)) +
+                            slideInVertically(tween(420, easing = FastOutSlowInEasing)) { it / 10 } else EnterTransition.None,
+                        exit = androidx.compose.animation.ExitTransition.None,
+                    ) {
                     AnimatedContent(
                         targetState = state.callActive(),
-                        transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(200)) },
+                        transitionSpec = {
+                            if (hasDot) (fadeIn(tween(420, easing = FastOutSlowInEasing)) +
+                                slideInVertically(tween(420, easing = FastOutSlowInEasing)) { it / 10 }) togetherWith fadeOut(tween(260))
+                            else fadeIn(tween(300)) togetherWith fadeOut(tween(200))
+                        },
                         label = "call layout",
                     ) { active ->
                         if (active) {
@@ -176,7 +203,7 @@ class LiveVoiceActivity : ComponentActivity() {
                                 state = state,
                                 title = title,
                                 palette = callPalette,
-                                dotAvatar = callDot,
+                                hasDot = hasDot,
                                 controlsEnabled = true,
                                 canOpenTask = taskToOpen != null,
                                 onOpenTask = ::openTask,
@@ -194,6 +221,7 @@ class LiveVoiceActivity : ComponentActivity() {
                                 state = state,
                                 title = title,
                                 palette = callPalette,
+                                hasDot = hasDot,
                                 canConnect = canConnect,
                                 cooldownSeconds = cooldownSeconds,
                                 creating = creating,
@@ -209,6 +237,7 @@ class LiveVoiceActivity : ComponentActivity() {
                                 },
                             )
                         }
+                    }
                     }
                     AwDialog(visible = state.approvalId != null, onDismiss = { finish() }) {
                         val controls = state.hasCurrentApproval() && (preview != null || preferences.approvalMode == ApprovalMode.ALLOW_CONTROLS)
@@ -254,6 +283,12 @@ class LiveVoiceActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun finish() {
+        super.finish()
+        if (Build.VERSION.SDK_INT < 34) overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -325,7 +360,7 @@ private fun CallInProgress(
     state: LiveVoiceState,
     title: String,
     palette: io.github.sirbughunter.agenticwear.ui.OrbPalette,
-    dotAvatar: io.github.sirbughunter.agenticwear.ui.DotAvatar?,
+    hasDot: Boolean,
     controlsEnabled: Boolean,
     canOpenTask: Boolean,
     onOpenTask: () -> Unit,
@@ -336,8 +371,9 @@ private fun CallInProgress(
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val w = maxWidth
         val h = maxHeight
-        val orb = w * 0.28f
-        val orbCenterY = h * 0.415f
+        // A Dot call keeps the figure exactly where the home screen draws it (see CallDotLayer).
+        val orb = if (hasDot) w * .4f * .86f else w * 0.28f
+        val orbCenterY = if (hasDot) h * .425f else h * 0.415f
         Column(
             Modifier.align(Alignment.TopCenter).padding(top = h * 0.105f).padding(horizontal = w * 0.17f),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -355,27 +391,7 @@ private fun CallInProgress(
                 }
             }
         }
-        if (dotAvatar != null) {
-            val figure = orb * 1.45f
-            val mode = state.orbMode()
-            io.github.sirbughunter.agenticwear.ui.DotCallFigure(
-                avatar = dotAvatar,
-                palette = palette,
-                mood = when (mode) {
-                    OrbMode.Listening -> io.github.sirbughunter.agenticwear.ui.DotMood.LISTENING
-                    OrbMode.Speaking -> io.github.sirbughunter.agenticwear.ui.DotMood.SPEAKING
-                    OrbMode.Thinking -> io.github.sirbughunter.agenticwear.ui.DotMood.THINKING
-                    OrbMode.Approval -> io.github.sirbughunter.agenticwear.ui.DotMood.NEEDS
-                    OrbMode.Muted, OrbMode.Reconnecting, OrbMode.Disabled -> io.github.sirbughunter.agenticwear.ui.DotMood.FROZEN
-                    else -> io.github.sirbughunter.agenticwear.ui.DotMood.IDLE
-                },
-                connecting = mode == OrbMode.Connecting || mode == OrbMode.Reconnecting,
-                userLevel = if (state.muted) 0f else state.inputLevel,
-                agentLevel = state.outputLevel,
-                modifier = Modifier.offset(x = (w - figure) / 2, y = orbCenterY - figure / 2).size(figure)
-                    .semantics { contentDescription = state.activityLabel() },
-            )
-        } else CloudOrb(
+        if (!hasDot) CloudOrb(
             palette = palette,
             mode = state.orbMode(),
             userLevel = if (state.muted) 0f else state.inputLevel,
@@ -431,6 +447,7 @@ private fun CallIdle(
     state: LiveVoiceState,
     title: String,
     palette: io.github.sirbughunter.agenticwear.ui.OrbPalette,
+    hasDot: Boolean,
     canConnect: Boolean,
     cooldownSeconds: Int,
     creating: Boolean,
@@ -441,12 +458,19 @@ private fun CallIdle(
     onOpenTask: () -> Unit,
     onUsePhonon: () -> Unit,
 ) {
-    Box(Modifier.fillMaxSize()) {
-        AwScrollColumn(topPadding = 30.dp, bottomPadding = 76.dp) {
-            Text("Live voice", style = AwType.Title)
-            Text(title, style = AwType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-            // Before a call a Dot appears as its orb, in its own colour; the call turns it into the Dot.
-            CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // A Dot is drawn by CallDotLayer at the home screen's position; leave room for it here.
+        val dotBottom = maxHeight * .425f + maxWidth * .4f * .86f / 2 + 14.dp
+        val headerTop = maxHeight * .105f
+        AwScrollColumn(topPadding = if (hasDot) headerTop else 30.dp, bottomPadding = 76.dp) {
+            if (hasDot) {
+                Text(title, style = AwType.Title.copy(fontSize = 13.sp), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                Spacer(Modifier.height((dotBottom - headerTop - 24.dp).coerceAtLeast(0.dp)))
+            } else {
+                Text("Live voice", style = AwType.Title)
+                Text(title, style = AwType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
+            }
             val message = when {
                 cooldownSeconds > 0 -> "Lumen is finishing its previous call. Ready in ${cooldownSeconds}s."
                 !BuildConfig.LIVE_VOICE_RUNTIME -> "This build doesn’t include the live voice runtime."
@@ -476,6 +500,27 @@ private fun CallIdle(
             label = if (cooldownSeconds > 0) "Ready in ${cooldownSeconds}s" else if (state.phase == "error") "Try again" else "Start call",
             enabled = canConnect,
             onClick = onStart,
+        )
+    }
+}
+
+/**
+ * The call's Dot, drawn once above the cross-fading idle/in-progress layouts so it never fades or
+ * resizes. It sits exactly where the home screen draws it: 0.4 × 0.86 of the width, centred at 42.5% height.
+ */
+@Composable
+private fun CallDotLayer(avatar: io.github.sirbughunter.agenticwear.ui.DotAvatar, state: LiveVoiceState) {
+    val mode = state.orbMode()
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val figure = maxWidth * .4f * .86f
+        io.github.sirbughunter.agenticwear.ui.DotCallFigure(
+            avatar = avatar,
+            mood = mode.toDotMood(),
+            connecting = mode == OrbMode.Connecting || mode == OrbMode.Reconnecting,
+            userLevel = if (state.muted) 0f else state.inputLevel,
+            agentLevel = state.outputLevel,
+            modifier = Modifier.offset(x = (maxWidth - figure) / 2, y = maxHeight * .425f - figure / 2).size(figure)
+                .semantics { contentDescription = state.activityLabel() },
         )
     }
 }
