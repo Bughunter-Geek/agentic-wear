@@ -35,3 +35,9 @@ Existing desktop/iPhone-controlled sessions are alert-only. The watch can approv
 - Review relay logs before enabling production sampling; application logs must never include decrypted payloads.
 - Run the repository’s checks plus a secret scanner before every public push.
 - Treat protocol-v1 pairing records as retired; upgrading requires an explicit fresh pairing with protocol v2.
+
+## Alpha 1 approval containment and deferred availability issues
+
+The matching Mac companion 0.3.15 keeps all currently rendered approval requests alert-only, including watch-created threads. Registration and response gates reject Watch grants until complete concrete authority can be displayed. Existing ownership/authentication checks remain. Review and decide in Codex.
+
+The single-pass source audit also found bounded-scope availability risks from a malicious configured relay flooding the local queue and from large Unicode histories exceeding the native byte cap. Those are recorded for Alpha1.1, not represented as fixed here. No arbitrary execution/plaintext disclosure was demonstrated; audit coverage is partial.
