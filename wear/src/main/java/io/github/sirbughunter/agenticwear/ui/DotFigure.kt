@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import io.github.sirbughunter.agenticwear.R
@@ -50,7 +51,7 @@ internal enum class DotAvatar(val label: String, @param:DrawableRes val res: Int
     }
 }
 
-internal enum class DotMood { IDLE, THINKING, RESPONDING, NEEDS, FROZEN, LISTENING, SPEAKING }
+internal enum class DotMood { IDLE, THINKING, RESPONDING, NEEDS, FROZEN, LISTENING, SPEAKING, SLEEPING, CELEBRATING, GREETING }
 
 /**
  * The emoji a Dot can react with (ChatGPT's react_to_user_message set). The figure floats one
@@ -65,7 +66,38 @@ internal fun defaultDotExpression(mood: DotMood, seconds: Float): String? = when
     DotMood.THINKING -> THINKING_EXPRESSIONS[((seconds / 3.6f).toInt()).mod(THINKING_EXPRESSIONS.size)]
     DotMood.RESPONDING -> "✨"
     DotMood.NEEDS -> "👀"
+    DotMood.SLEEPING -> "💤"
+    DotMood.CELEBRATING -> "🎉"
+    DotMood.GREETING -> "🙌"
     else -> null
+}
+
+/** A short human label for a reaction emoji, shown under the Dot while it reacts. */
+internal fun dotReactionLabel(emoji: String): String = when (emoji) {
+    "💡" -> "Got an idea"
+    "🔍" -> "Looking into it"
+    "🎉" -> "Celebrating"
+    "👀" -> "Watching closely"
+    "🫡" -> "On it"
+    "🧹" -> "Cleaning up"
+    "🐛" -> "Bug hunting"
+    "🧪" -> "Testing"
+    "🍳" -> "Cooking something up"
+    "🫠" -> "Oof"
+    "🪄" -> "Making magic"
+    "✨" -> "Polishing"
+    "🔥" -> "On fire"
+    "🙏" -> "Thanks"
+    "😂" -> "Ha!"
+    "🤔" -> "Thinking"
+    "❤️" -> "Love it"
+    "🙌" -> "Yay"
+    "🤝" -> "Deal"
+    "🚀" -> "Shipping"
+    "✅" -> "Done"
+    "👍" -> "Sounds good"
+    "💤" -> "Napping"
+    else -> ""
 }
 
 private fun expressionGlow(emoji: String): Color = when (emoji) {
@@ -90,6 +122,8 @@ internal fun DotFigure(
     userLevel: Float = 0f,
     agentLevel: Float = 0f,
     expression: String? = null,
+    /** Reports the expression currently shown (or null), so callers can caption it. */
+    onExpression: (String?) -> Unit = {},
 ) {
     val reducedMotion = !ValueAnimator.areAnimatorsEnabled()
     val clock = remember { mutableFloatStateOf(0f) }
@@ -105,6 +139,17 @@ internal fun DotFigure(
         androidx.compose.animation.core.spring(dampingRatio = .45f, stiffness = 420f), label = "listen")
     val needs by animateFloatAsState(if (mood == DotMood.NEEDS) 1f else 0f, tween(260), label = "needs")
     val frozen by animateFloatAsState(if (mood == DotMood.FROZEN) 1f else 0f, tween(400), label = "frozen")
+    val sleep by animateFloatAsState(if (mood == DotMood.SLEEPING) 1f else 0f, tween(700), label = "sleep")
+    val celebrate by animateFloatAsState(if (mood == DotMood.CELEBRATING) 1f else 0f, tween(240), label = "celebrate")
+    val greet by animateFloatAsState(if (mood == DotMood.GREETING) 1f else 0f, tween(240), label = "greet")
+    val calm by animateFloatAsState(if (mood == DotMood.IDLE || mood == DotMood.LISTENING) 1f else 0f, tween(300), label = "calm")
+    // One-shot confetti, replayed each time the mood becomes CELEBRATING.
+    val burst = remember { androidx.compose.animation.core.Animatable(1f) }
+    LaunchedEffect(mood, reducedMotion) {
+        if (mood != DotMood.CELEBRATING || reducedMotion) return@LaunchedEffect
+        burst.snapTo(0f)
+        burst.animateTo(1f, tween(1100, easing = androidx.compose.animation.core.LinearEasing))
+    }
     LaunchedEffect(reducedMotion, mood) {
         if (reducedMotion || mood == DotMood.FROZEN) return@LaunchedEffect
         var last = 0L
@@ -114,23 +159,24 @@ internal fun DotFigure(
         }
         while (true) {
             // Idle breathing is slow; ~25 fps looks the same and saves battery.
-            if (mood == DotMood.IDLE) { delay(40); advance(System.nanoTime()) } else withFrameNanos(::advance)
+            if (mood == DotMood.IDLE || mood == DotMood.SLEEPING) { delay(40); advance(System.nanoTime()) } else withFrameNanos(::advance)
         }
     }
-    val saturation = remember(frozen) { ColorMatrix().apply { setToSaturation(1f - .8f * frozen) } }
+    val desat = maxOf(.8f * frozen, .4f * sleep)
+    val saturation = remember(desat) { ColorMatrix().apply { setToSaturation(1f - desat) } }
 
     Box(modifier) {
         // Glow and ground shadow.
         Canvas(Modifier.fillMaxSize()) {
             val t = clock.floatValue
             val w = size.minDimension
-            val glow = (1f - frozen) * (.16f + think * (.14f + .1f * sin(TAU * t / 1.6f)) + respond * .3f + needs * .22f)
+            val glow = (1f - frozen) * (.16f - .08f * sleep + think * (.14f + .1f * sin(TAU * t / 1.6f)) + respond * .3f + needs * .22f + celebrate * .26f)
             if (glow > .01f) drawCircle(
                 Brush.radialGradient(listOf(avatar.glow.copy(alpha = glow), Color.Transparent), center = center, radius = w * .78f),
                 radius = w * .78f, center = center,
             )
             if (w > 30f) {
-                val lift = lift(t, think, respond, needs)
+                val lift = lift(t, think, respond, needs, celebrate, greet, sleep)
                 val shadowW = w * .5f * (1f - lift * 2.2f)
                 drawOval(
                     Brush.radialGradient(listOf(Color.Black.copy(alpha = .5f), Color.Transparent), center = Offset(center.x, w * .97f), radius = shadowW / 2),
@@ -140,23 +186,28 @@ internal fun DotFigure(
         }
         Image(
             painterResource(avatar.res), contentDescription = null,
-            colorFilter = if (frozen > .01f) ColorFilter.colorMatrix(saturation) else null,
+            colorFilter = if (desat > .01f) ColorFilter.colorMatrix(saturation) else null,
             modifier = Modifier.fillMaxSize().graphicsLayer {
                 val t = clock.floatValue
                 transformOrigin = TransformOrigin(.5f, .9f)
-                val breathe = .022f * sin(TAU * t / 4.2f) + think * .018f * sin(TAU * t / 2.2f)
+                val breathe = (1f - sleep) * .022f * sin(TAU * t / 4.2f) + think * .018f * sin(TAU * t / 2.2f) +
+                    sleep * .034f * sin(TAU * t / 6f)
                 val bounce = (t / .82f) % 1f
                 val squash = respond * .06f * kotlin.math.cos(TAU * bounce)
-                scaleX = 1f + breathe + squash + .12f * listen
-                scaleY = 1f + breathe - squash + .12f * listen
-                rotationZ = think * 7f * sin(TAU * t / 2.6f)
-                translationY = -lift(t, think, respond, needs) * size.height
+                // A quick blink-like squish every 4-6 s while calm.
+                val sq = calm * squish(t)
+                scaleX = 1f + breathe + squash + .12f * listen + .04f * sq
+                scaleY = 1f + breathe - squash + .12f * listen - .1f * sq
+                rotationZ = think * 7f * sin(TAU * t / 2.6f) + sleep * 4f + greet * greetWave(t)
+                translationY = (-lift(t, think, respond, needs, celebrate, greet, sleep) + sleep * .03f) * size.height
                 alpha = 1f - .3f * frozen
             },
         )
+        Canvas(Modifier.fillMaxSize()) { if (burst.value < .999f) drawConfetti(burst.value, avatar.glow) }
         // Only recomposes when the chosen expression changes, not every frame.
         val autoExpression by remember(mood) { androidx.compose.runtime.derivedStateOf { defaultDotExpression(mood, clock.floatValue) } }
         val shown = if (mood == DotMood.FROZEN) null else expression ?: autoExpression
+        LaunchedEffect(shown) { onExpression(shown) }
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             if (shown != null && maxWidth >= 36.dp) DotExpression(shown, clock, maxWidth)
             else if (think > .01f && maxWidth >= 20.dp) Canvas(Modifier.fillMaxSize()) {
@@ -199,8 +250,15 @@ private fun DotExpression(emoji: String, clock: androidx.compose.runtime.Mutable
             val glow = expressionGlow(shown)
             Box(Modifier.fillMaxSize().graphicsLayer {
                 val t = clock.floatValue
-                translationY = -size.height * (.1f + .1f * sin(TAU * t / 1.8f))
-                rotationZ = 6f * sin(TAU * t / 3.4f)
+                if (shown == "💤") {
+                    // Zzz: rises about a quarter of its size over 2.4 s, fading in and out, on loop.
+                    val u = (t % 2.4f) / 2.4f
+                    translationY = -size.height * .25f * u
+                    alpha = minOf(1f, u * 5f) * (1f - u)
+                } else {
+                    translationY = -size.height * (.1f + .1f * sin(TAU * t / 1.8f))
+                    rotationZ = 6f * sin(TAU * t / 3.4f)
+                }
             }, contentAlignment = androidx.compose.ui.Alignment.Center) {
                 Canvas(Modifier.fillMaxSize()) {
                     val pulse = .5f + .5f * sin(TAU * clock.floatValue / 1.8f)
@@ -216,13 +274,15 @@ private fun DotExpression(emoji: String, clock: androidx.compose.runtime.Mutable
 }
 
 /**
- * The live-call Dot: a steady spinner circles the small figure while connecting; on connect the
- * arc closes and the Dot pops out to full size. Listening grows with your voice, speaking bounces
- * with Lumen's, working shows the lamp and friends.
+ * The live-call Dot: a steady spinner circles a small cloud orb while connecting; on connect the
+ * arc closes, the orb swells and fades, and the Dot grows out of its centre with a burst of
+ * sparkles. Reconnecting reverses it. Listening grows with your voice, speaking bounces with
+ * Lumen's, working shows the lamp and friends.
  */
 @Composable
 internal fun DotCallFigure(
     avatar: DotAvatar,
+    palette: OrbPalette,
     mood: DotMood,
     connecting: Boolean,
     userLevel: Float,
@@ -239,14 +299,44 @@ internal fun DotCallFigure(
         var last = 0L
         while (true) withFrameNanos { now -> if (last != 0L) spin.floatValue = (spin.floatValue + (now - last) / 1_000_000_000f) % 1_000f; last = now }
     }
+    // Composition only changes when a layer appears or disappears; per-frame values stay in layers.
+    val orbVisible by remember { androidx.compose.runtime.derivedStateOf { reveal < .98f } }
+    val dotVisible by remember { androidx.compose.runtime.derivedStateOf { reveal > .01f } }
     Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
-        val grow = run {
-            val x = ((reveal - .15f) / .85f).coerceIn(0f, 1f); val k = 1.4f; val v = x - 1f
-            1f + (k + 1f) * v * v * v + k * v * v
-        }
-        DotFigure(avatar, if (connecting) DotMood.IDLE else mood,
-            Modifier.fillMaxSize(.78f).graphicsLayer { val sc = .55f + .45f * grow; scaleX = sc; scaleY = sc },
+        if (orbVisible) CloudOrb(
+            palette = palette, mode = OrbMode.Thinking, userLevel = 0f, agentLevel = 0f,
+            modifier = Modifier.fillMaxSize(.45f).graphicsLayer {
+                val k = smoothStep(reveal / .6f)
+                val sc = 1f + .25f * k
+                scaleX = sc; scaleY = sc
+                alpha = 1f - smoothStep((reveal - .08f) / .5f)
+            },
+        )
+        if (dotVisible) DotFigure(avatar, if (connecting) DotMood.IDLE else mood,
+            Modifier.fillMaxSize(.78f).graphicsLayer {
+                val x = ((reveal - .2f) / .8f).coerceIn(0f, 1f)
+                val sc = .3f + .7f * backOut(x)
+                scaleX = sc; scaleY = sc
+                alpha = smoothStep((reveal - .15f) / .45f)
+            },
             userLevel = userLevel, agentLevel = agentLevel)
+        // Sparkles: eight dots fly outward from the centre as the Dot emerges, then fade.
+        if (!reducedMotion) Canvas(Modifier.fillMaxSize()) {
+            val s = ((reveal - .25f) / .65f)
+            if (s <= 0f || s >= 1f) return@Canvas
+            val out = 1f - (1f - s) * (1f - s)
+            val r = size.minDimension / 2f
+            for (i in 0 until 8) {
+                val a = TAU * i / 8f + .3f
+                val dist = r * (.3f + .62f * out)
+                val color = if (i % 2 == 0) Color.White else avatar.glow
+                drawCircle(
+                    color.copy(alpha = (1f - s) * .9f),
+                    radius = (r * .045f).coerceAtLeast(1.5f) * (1f - .5f * s),
+                    center = Offset(center.x + kotlin.math.cos(a) * dist, center.y + sin(a) * dist),
+                )
+            }
+        }
         val ring = 1f - ((reveal - .5f) / .5f).coerceIn(0f, 1f)
         if (ring > .01f) Canvas(Modifier.fillMaxSize()) {
             val stroke = 2.5.dp.toPx()
@@ -266,10 +356,54 @@ internal fun DotCallFigure(
 }
 
 /** Upward offset as a fraction of the figure's height. */
-private fun lift(t: Float, think: Float, respond: Float, needs: Float): Float {
-    val float = .012f * (.5f + .5f * sin(TAU * t / 4.2f))
+private fun lift(t: Float, think: Float, respond: Float, needs: Float, celebrate: Float = 0f, greet: Float = 0f, sleep: Float = 0f): Float {
+    val float = .012f * (.5f + .5f * sin(TAU * t / 4.2f)) * (1f - sleep)
     val bob = respond * .07f * abs(sin(PI.toFloat() * ((t / .82f) % 1f)))
     val hopPhase = (t / 1.7f) % 1f
     val hop = needs * if (hopPhase < .36f) .1f * sin(PI.toFloat() * hopPhase / .36f) else 0f
-    return float + think * .015f + bob + hop
+    // Celebrating: two quick hops in the first half of every 1.6 s, then rest.
+    val cp = (t / 1.6f) % 1f
+    val party = celebrate * if (cp < .5f) .13f * abs(sin(PI.toFloat() * cp / .25f)) else 0f
+    // Greeting: two small hops while the wave plays, then a pause.
+    val gp = (t / 2f) % 1f
+    val wave = greet * if (gp < .7f) .05f * abs(sin(PI.toFloat() * gp / .35f)) else 0f
+    return float + think * .015f + bob + hop + party + wave
+}
+
+/** Degrees of tilt for a wave: two left-right swings of ±10° per 2 s, then rest. */
+private fun greetWave(t: Float): Float {
+    val gp = (t / 2f) % 1f
+    return if (gp < .7f) 10f * sin(TAU * 2f * gp / .7f) else 0f
+}
+
+/** 0..1 bump for a 120 ms squish, at a jittered moment every 4-6 s (5 s cycles, start in 1-2 s). */
+private fun squish(t: Float): Float {
+    val cycle = (t / 5f).toInt()
+    val jitter = (sin(cycle * 12.9898f) * 43758.547f).let { it - kotlin.math.floor(it) }
+    val u = ((t % 5f) - (1f + jitter)) / .12f
+    return if (u in 0f..1f) sin(PI.toFloat() * u) else 0f
+}
+
+private val CONFETTI_COLORS = listOf(Color.White, Color(0xFFFFC85A), Color(0xFFFF6F8E), Color(0xFF5AC8FA))
+
+/** 14 pieces fly radially from the figure's top, pulled down by gravity, fading out as [p] reaches 1. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawConfetti(p: Float, glow: Color) {
+    val w = size.minDimension
+    val origin = Offset(center.x, w * .22f)
+    val out = 1f - (1f - p) * (1f - p)
+    for (i in 0 until 14) {
+        val angle = -PI.toFloat() * (.1f + .8f * i / 13f) + .12f * ((i * 7) % 5 - 2)
+        val speed = w * (.5f + .35f * (((i * 0.618f) % 1f)))
+        val pos = Offset(
+            origin.x + kotlin.math.cos(angle) * speed * out,
+            origin.y + sin(angle) * speed * out + w * .55f * p * p,
+        )
+        val color = (if (i % 5 == 0) glow else CONFETTI_COLORS[i % CONFETTI_COLORS.size]).copy(alpha = (1f - p) * (1f - p * .3f))
+        val piece = (w * .045f).coerceAtLeast(1.5f)
+        if (i % 2 == 0) drawCircle(color, radius = piece * .6f, center = pos)
+        else rotate(p * 300f + i * 40f, pivot = pos) {
+            drawRoundRect(color, topLeft = Offset(pos.x - piece * .5f, pos.y - piece * .25f), size = Size(piece, piece * .5f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(piece * .2f))
+        }
+    }
 }

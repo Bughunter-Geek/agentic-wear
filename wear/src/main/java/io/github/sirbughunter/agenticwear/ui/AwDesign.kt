@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
@@ -133,12 +134,25 @@ internal object AwType {
     val Micro = TextStyle(fontSize = 10.sp, lineHeight = 13.sp, color = Aw.TextTertiary)
 }
 
-/** Scales a pressed control slightly, using a GPU layer so presses never relayout. */
+/**
+ * Scales a pressed control with a springy press and a small bounce on release, and lays a faint
+ * white highlight over it while held. Scale runs in a GPU layer and the highlight in the draw
+ * phase, so presses never recompose or relayout.
+ */
 @Composable
 internal fun Modifier.pressScale(interactions: MutableInteractionSource, pressedScale: Float = 0.96f): Modifier {
     val pressed by interactions.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) pressedScale else 1f, tween(140), label = "press")
+    val scale by animateFloatAsState(
+        if (pressed) pressedScale else 1f,
+        if (pressed) spring(dampingRatio = .6f, stiffness = 900f) else spring(dampingRatio = .45f, stiffness = 500f),
+        label = "press",
+    )
+    val highlight by animateFloatAsState(if (pressed) .06f else 0f, tween(120), label = "press highlight")
     return graphicsLayer { scaleX = scale; scaleY = scale }
+        .drawWithContent {
+            drawContent()
+            if (highlight > .001f) drawRect(Color.White.copy(alpha = highlight))
+        }
 }
 
 /** Fades scrolled content into the bezel at the top and bottom of the round screen. */
@@ -436,7 +450,7 @@ internal fun AwToggleRow(title: String, subtitle: String?, checked: Boolean, onT
         modifier = Modifier.semantics(mergeDescendants = true) { stateDescription = if (checked) "On" else "Off" },
     ) {
         AwRowText(title, subtitle, Modifier.weight(1f))
-        val knob by animateFloatAsState(if (checked) 1f else 0f, tween(200), label = "toggle")
+        val knob by animateFloatAsState(if (checked) 1f else 0f, spring(dampingRatio = .6f, stiffness = 500f), label = "toggle")
         Box(
             Modifier
                 .size(34.dp, 20.dp)

@@ -132,7 +132,8 @@ internal fun CloudOrb(
     val clock = remember { mutableFloatStateOf(0f) }
     val energyState by rememberUpdatedState(energy)
     val revealing = reveal < .999f
-    val ticking = loading || revealing || mode == OrbMode.Thinking
+    // Idle ticks for its breathing and Speaking for its ripples; frozen modes never tick.
+    val ticking = loading || revealing || mode == OrbMode.Thinking || mode == OrbMode.Speaking || mode == OrbMode.Idle
     // Idle drift is slow enough that ~20 fps looks identical and saves battery;
     // live and working states run on every frame.
     val lowPower = mode == OrbMode.Idle && !revealing
@@ -171,7 +172,13 @@ internal fun CloudOrb(
             Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    val breath = if (!reducedMotion && mode == OrbMode.Thinking) 1f + .03f * sin(2f * PI.toFloat() * clock.floatValue / 2.4f) else 1f
+                    val breath = when {
+                        reducedMotion -> 1f
+                        mode == OrbMode.Thinking -> 1f + .03f * sin(2f * PI.toFloat() * clock.floatValue / 2.4f)
+                        // Idle: a very gentle 5 s breath.
+                        mode == OrbMode.Idle -> 1f + .015f * sin(2f * PI.toFloat() * clock.floatValue / 5f)
+                        else -> 1f
+                    }
                     scaleX = scale * breath
                     scaleY = scale * breath
                     alpha = if (mode == OrbMode.Reconnecting) .8f else 1f
@@ -192,6 +199,18 @@ internal fun CloudOrb(
                     Brush.radialGradient(listOf(base.copy(alpha = ringVisible * (.2f + .1f * pulse)), Color.Transparent), center = c, radius = r),
                     radius = r, center = c,
                 )
+            }
+            if (mode == OrbMode.Speaking && !reducedMotion && reveal > .99f) {
+                // Soft rings ease outward from the rim behind the orb; agent speech sets their strength.
+                val strength = (agent * 1.6f).coerceAtMost(1f)
+                for (k in 0..1) {
+                    val u = ((t / 1.4f) + k * .5f) % 1f
+                    val fade = (1f - u) * (1f - u)
+                    drawCircle(
+                        light.copy(alpha = (.1f + .4f * strength) * fade),
+                        radius = r * (1f + .35f * u), center = c, style = Stroke(1.5.dp.toPx() * (1f - .5f * u)),
+                    )
+                }
             }
             scale(core, pivot = c) {
                 if (halo > 0.01f) {
@@ -219,10 +238,21 @@ internal fun CloudOrb(
                         fog(c, r, f, 1.15f, 3.1f, .26f, -.34f, .30f * travel, .62f, accent.copy(alpha = .9f))
                         fog(c, r, f, 0.8f, 4.4f, -.36f, .4f, .24f * travel, .7f, base)
                     }
+                    // The specular highlight drifts a little with the fog; it never sits still.
+                    val drift = 2f * PI.toFloat() * f * .6f
                     drawCircle(
                         Brush.radialGradient(listOf(Color.White.copy(alpha = .5f), Color.Transparent),
-                            center = Offset(c.x - r * .36f, c.y - r * .52f), radius = r * .72f),
+                            center = Offset(c.x - r * (.36f + .08f * sin(drift)), c.y - r * (.52f + .08f * cos(drift * .83f + 1f))), radius = r * .72f),
                         radius = r, center = c,
+                    )
+                    // Thin rim light just inside the edge, brightest toward the top left.
+                    val rim = 1.dp.toPx()
+                    drawCircle(
+                        Brush.sweepGradient(
+                            0f to light.copy(alpha = .1f), .45f to light.copy(alpha = .12f), .625f to light.copy(alpha = .42f),
+                            .8f to light.copy(alpha = .12f), 1f to light.copy(alpha = .1f), center = c,
+                        ),
+                        radius = r - rim / 2f, center = c, style = Stroke(rim),
                     )
                     drawCircle(
                         Brush.radialGradient(0f to Color.Transparent, .6f to Color.Transparent, 1f to Color.Black.copy(alpha = .16f), center = c, radius = r),
@@ -275,7 +305,7 @@ private fun DrawScope.fog(
 
 private fun mix(a: Float, b: Float, f: Float): Float = a + (b - a) * f
 
-private fun smoothStep(x: Float): Float { val v = x.coerceIn(0f, 1f); return v * v * (3f - 2f * v) }
+internal fun smoothStep(x: Float): Float { val v = x.coerceIn(0f, 1f); return v * v * (3f - 2f * v) }
 
 /** Ease-out with a gentle overshoot, so the orb blooms slightly past the ring and settles. */
-private fun backOut(x: Float): Float { val k = 1.25f; val v = x - 1f; return 1f + (k + 1f) * v * v * v + k * v * v }
+internal fun backOut(x: Float): Float { val k = 1.25f; val v = x - 1f; return 1f + (k + 1f) * v * v * v + k * v * v }

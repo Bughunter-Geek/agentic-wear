@@ -123,12 +123,45 @@ internal fun ChatScreen(
             dotResponding = false
         }
     }
+    // Greets once when the chat opens; celebrates a reply that took over 20 s to a watch message.
+    var dotGreeting by remember { mutableStateOf(false) }
+    val greeted = remember { booleanArrayOf(false) }
+    LaunchedEffect(isDot) {
+        if (isDot && !greeted[0]) {
+            greeted[0] = true
+            dotGreeting = true
+            delay(1800)
+            dotGreeting = false
+        }
+    }
+    var dotCelebrating by remember { mutableStateOf(false) }
+    val submittedAt = remember(state.selectedThreadId) { longArrayOf(0L) }
+    LaunchedEffect(submission != null) {
+        if (submission != null && submittedAt[0] == 0L) submittedAt[0] = System.currentTimeMillis()
+    }
+    LaunchedEffect(state.selectedThreadId, lastAnswerId) {
+        if (dotResponding && submittedAt[0] > 0L && System.currentTimeMillis() - submittedAt[0] > 20_000L) {
+            submittedAt[0] = 0L
+            dotCelebrating = true
+            delay(2200)
+            dotCelebrating = false
+        } else if (dotResponding) submittedAt[0] = 0L
+    }
+    // A Dot whose chat has been quiet for over half an hour dozes off.
+    val lastActiveMillis = state.selectedSession?.updatedAtMillis ?: 0L
+    val dotSleeping = remember(lastActiveMillis, state.selectedThreadId) {
+        lastActiveMillis > 0L && System.currentTimeMillis() - lastActiveMillis > 30 * 60_000L
+    } && submission == null && !state.pending
     val dotMood = when {
         hasPendingPermission -> DotMood.NEEDS
         dotThinking -> DotMood.THINKING
+        dotCelebrating -> DotMood.CELEBRATING
         dotResponding -> DotMood.RESPONDING
+        dotGreeting -> DotMood.GREETING
+        dotSleeping -> DotMood.SLEEPING
         else -> DotMood.IDLE
     }
+    var dotExpression by remember { mutableStateOf<String?>(null) }
     val followRevision = ChatFollowRevision(messages, agentThinking, state.error, state.sendNotice, submissionLabel)
     val lastContentIndex = (
         1 +
@@ -184,7 +217,7 @@ internal fun ChatScreen(
             item(key = "header") {
                 Column(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (isDot) {
-                        DotFigure(dotAvatar, dotMood, Modifier.padding(top = 6.dp, bottom = 4.dp).size(46.dp))
+                        DotFigure(dotAvatar, dotMood, Modifier.padding(top = 6.dp, bottom = 4.dp).size(46.dp), onExpression = { dotExpression = it })
                     }
                     Text(
                         chat?.title ?: state.selectedSession?.title ?: "Codex chat",
@@ -208,6 +241,12 @@ internal fun ChatScreen(
                             else -> Text("Waiting for the private bridge", style = AwType.Caption)
                         }
                     }
+                    if (isDot) AnimatedContent(
+                        targetState = dotExpression?.let(::dotReactionLabel).orEmpty(),
+                        transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
+                        modifier = Modifier.padding(top = 2.dp).heightIn(min = 12.dp),
+                        label = "dot reaction label",
+                    ) { label -> if (label.isNotEmpty()) Text(label, style = AwType.Micro, textAlign = TextAlign.Center) }
                 }
             }
             state.error?.let { message ->
