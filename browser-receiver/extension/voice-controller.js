@@ -74,7 +74,7 @@
       if (event.state === 'accepted') accepted?.resolve(true);
       if (event.state === 'failed' || event.state === 'closed') {
         accepted?.resolve(false);
-        if (event.state === 'failed') post({ action: 'stop', callId: owner.callId });
+        if (event.state === 'failed') { console.warn('Agentic Wear voice startup refused: native-reservation-failed'); post({ action: 'stop', callId: owner.callId }); }
         release();
       }
     }
@@ -95,9 +95,9 @@
       async command(command) {
         if (stopped || command.documentId !== documentId || command.url !== url || Date.now() >= command.expiresAt) return false;
         if (command.action === 'start') {
-          if (owner || !supported || !identity() || hangup()) return false;
+          if (owner || !supported || !identity() || hangup()) { console.warn('Agentic Wear voice startup refused: controller-precondition'); return false; }
           const startingGeneration = generation;
-          if (!startControl() && !await revealStart(command)) return false;
+          if (!startControl() && !await revealStart(command)) { console.warn('Agentic Wear voice startup refused: start-control-unavailable'); return false; }
           if (startingGeneration !== generation) return false;
           if (owner || stopped || !supported || !identity() || hangup()) return false;
           owner = { callId: command.callId, threadId: command.threadId, identity: identity() };

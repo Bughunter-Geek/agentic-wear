@@ -191,9 +191,17 @@
     if (command?.action === 'query') { emit({ state: 'available', available }); return; }
     if (!command || !/^[A-Za-z0-9_.:-]{1,128}$/.test(command.callId || '')) return;
     if (command.action === 'start') {
-      if (!available || !supportedUrl(location.href) || (command.url !== undefined && command.url !== location.href) || owner || [...peers].some(peer => peer.connectionState !== 'closed') ||
-          typeof command.sdp !== 'string' || !command.sdp.startsWith('v=0') || !command.sdp.includes('m=audio') || command.sdp.length > 65536 ||
-          Date.now() >= command.expiresAt || command.expiresAt > Date.now() + 60000) { emit({ callId: command.callId, state: 'failed' }); return; }
+      const refused = !available ? 'runtime-unavailable'
+        : !supportedUrl(location.href) || (command.url !== undefined && command.url !== location.href) ? 'page-changed'
+        : owner ? 'owned-call-present'
+        : [...peers].some(peer => peer.connectionState !== 'closed') ? 'browser-peer-present'
+        : typeof command.sdp !== 'string' || !command.sdp.startsWith('v=0') || !command.sdp.includes('m=audio') || command.sdp.length > 65536 ? 'offer-invalid'
+        : Date.now() >= command.expiresAt || command.expiresAt > Date.now() + 60000 ? 'command-expired' : null;
+      if (refused) {
+        // Fixed reason codes only: never log call IDs, SDP, account data or audio.
+        console.warn('Agentic Wear voice startup refused: ' + refused);
+        emit({ callId: command.callId, state: 'failed' }); return;
+      }
       const context = new Context({ sampleRate: 48000 });
       const call = { id: command.callId, url: location.href, isDot: location.href === 'https://chatgpt.com/dots/home', sdp: command.sdp, context, startedAt: Date.now(), setupTiming: {}, placeholder: context.createMediaStreamDestination(),
         clones: [], lastPing: Date.now(), seq: 0, connected: false, attached: false, attachStarted: false,

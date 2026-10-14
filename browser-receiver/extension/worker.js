@@ -36,17 +36,17 @@ async function restoreVoiceMute(callId){
 async function voiceCommand(message,port){
  const owner=owners.get(message.url),fail={version:1,kind:'native-voice-event',url:message.url,documentId:message.documentId,
   identity:owner?.identity,event:{callId:message.callId,threadId:message.threadId,state:'failed'}};
- if(!owner||owner.documentId!==message.documentId||!isTarget(message.url)||Date.now()>=message.expiresAt){port.postMessage(fail);return;}
+ if(!owner||owner.documentId!==message.documentId||!isTarget(message.url)||Date.now()>=message.expiresAt){if(message.action==='start')console.warn('Agentic Wear voice startup refused: routing-mismatch');port.postMessage(fail);return;}
  try{
   if(message.action==='start'){
    const check=await chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-check'},{frameId:0});
-   if(!check?.ready){port.postMessage(fail);return;}
+   if(!check?.ready){console.warn('Agentic Wear voice startup refused: page-not-ready');port.postMessage(fail);return;}
    await acquireVoiceMute(message.callId,owner);
   }
   const accepted=await chrome.tabs.sendMessage(owner.tabId,message,{frameId:0});
-  if(accepted!==true&&message.action==='start'){port.postMessage(fail);await restoreVoiceMute(message.callId);}
+  if(accepted!==true&&message.action==='start'){console.warn('Agentic Wear voice startup refused: page-declined');port.postMessage(fail);await restoreVoiceMute(message.callId);}
   if(message.action==='stop')await restoreVoiceMute(message.callId);
- }catch{port.postMessage(fail);await restoreVoiceMute(message.callId);}
+ }catch{if(message.action==='start')console.warn('Agentic Wear voice startup refused: content-message-failed');port.postMessage(fail);await restoreVoiceMute(message.callId);}
 }
 function voiceLost(){
  for(const owner of owners.values())chrome.tabs.sendMessage(owner.tabId,{kind:'native-voice-lost'},{frameId:0}).catch(()=>{});
