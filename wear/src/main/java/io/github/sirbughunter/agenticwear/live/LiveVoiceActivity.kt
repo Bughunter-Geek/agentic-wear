@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -347,7 +348,29 @@ private fun CallInProgress(
                 }
             }
         }
-        CloudOrb(
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val prefs = remember { AppPreferences(context) }
+        val dotAvatar = remember { if (prefs.dotCallVisual == "Orb") null else io.github.sirbughunter.agenticwear.ui.DotAvatar.fromLabel(prefs.dotAvatar) }
+        if (dotAvatar != null && state.taskId.startsWith("dot:")) {
+            val figure = orb * 1.45f
+            val mode = state.orbMode()
+            io.github.sirbughunter.agenticwear.ui.DotCallFigure(
+                avatar = dotAvatar,
+                mood = when (mode) {
+                    OrbMode.Listening -> io.github.sirbughunter.agenticwear.ui.DotMood.LISTENING
+                    OrbMode.Speaking -> io.github.sirbughunter.agenticwear.ui.DotMood.SPEAKING
+                    OrbMode.Thinking -> io.github.sirbughunter.agenticwear.ui.DotMood.THINKING
+                    OrbMode.Approval -> io.github.sirbughunter.agenticwear.ui.DotMood.NEEDS
+                    OrbMode.Muted, OrbMode.Reconnecting, OrbMode.Disabled -> io.github.sirbughunter.agenticwear.ui.DotMood.FROZEN
+                    else -> io.github.sirbughunter.agenticwear.ui.DotMood.IDLE
+                },
+                connecting = mode == OrbMode.Connecting || mode == OrbMode.Reconnecting,
+                userLevel = if (state.muted) 0f else state.inputLevel,
+                agentLevel = state.outputLevel,
+                modifier = Modifier.offset(x = (w - figure) / 2, y = orbCenterY - figure / 2).size(figure)
+                    .semantics { contentDescription = state.activityLabel() },
+            )
+        } else CloudOrb(
             palette = palette,
             mode = state.orbMode(),
             userLevel = if (state.muted) 0f else state.inputLevel,
@@ -417,7 +440,15 @@ private fun CallIdle(
         AwScrollColumn(topPadding = 30.dp, bottomPadding = 76.dp) {
             Text("Live voice", style = AwType.Title)
             Text(title, style = AwType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-            CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val prefs = remember { AppPreferences(context) }
+            if (state.taskId.startsWith("dot:") && prefs.dotCallVisual != "Orb") {
+                io.github.sirbughunter.agenticwear.ui.DotFigure(
+                    io.github.sirbughunter.agenticwear.ui.DotAvatar.fromLabel(prefs.dotAvatar),
+                    if (state.phase == "error") io.github.sirbughunter.agenticwear.ui.DotMood.FROZEN else io.github.sirbughunter.agenticwear.ui.DotMood.IDLE,
+                    Modifier.padding(vertical = 6.dp).size(58.dp),
+                )
+            } else CloudOrb(palette, if (state.phase == "error") OrbMode.Disabled else OrbMode.Idle, 0f, 0f, Modifier.padding(vertical = 4.dp).size(58.dp))
             val message = when {
                 cooldownSeconds > 0 -> "Lumen is finishing its previous call. Ready in ${cooldownSeconds}s."
                 !BuildConfig.LIVE_VOICE_RUNTIME -> "This build doesn’t include the live voice runtime."

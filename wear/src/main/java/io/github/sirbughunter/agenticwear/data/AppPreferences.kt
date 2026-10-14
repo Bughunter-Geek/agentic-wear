@@ -29,6 +29,11 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("dot_avatar", "Felipe") ?: "Felipe"
         set(value) = prefs.edit { putString("dot_avatar", value) }
 
+    /** "Avatar" (default) or "Orb": what a Dot live call shows. */
+    var dotCallVisual: String
+        get() = prefs.getString("dot_call_visual", "Avatar") ?: "Avatar"
+        set(value) = prefs.edit { putString("dot_call_visual", value) }
+
     var relayUrl: String
         get() = prefs.getString(KEY_RELAY_URL, null).orEmpty().ifEmpty { BuildConfig.DEFAULT_RELAY_URL }
         set(value) = prefs.edit { putString(KEY_RELAY_URL, RelayUrlPolicy.normalize(value)) }
