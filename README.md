@@ -6,10 +6,10 @@ Speak to Codex, follow a session, and receive completion or permission alerts fr
 
 Two packages, two versions:
 
-- **Watch 0.6.36 — build 118:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.36-alpha).
-- **Receiver / Mac companion 0.3.15:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.36-alpha/agentic-wear-mac-0.3.15.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
+- **Watch 0.6.38 — build 120:** [signed APK and update manifest](https://github.com/Bughunter-Geek/agentic-wear/releases/tag/v0.6.38-alpha).
+- **Receiver / Mac companion 0.3.17:** [matching Mac ZIP](https://github.com/Bughunter-Geek/agentic-wear/releases/download/v0.6.38-alpha/agentic-wear-mac-0.3.17.zip), containing the Chrome receiver, native messaging helper, compiled Mac bridge and production dependency notices.
 
-Use both matching packages. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.36-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.36-alpha); an unpinned default-branch checkout may predate this implementation.
+Use both matching packages. These are development builds, not production-stability claims. Local, Dot and ordinary-cloud voice have worked on the maintainer's physical setup; broader device/network acceptance remains incomplete. The release source is pinned at [v0.6.38-alpha](https://github.com/Bughunter-Geek/agentic-wear/tree/v0.6.38-alpha); an unpinned default-branch checkout may predate this implementation.
 
 The current source and receiver have explicit per-browser Dot selection and no maintainer Dot default. A packaging guard checks the committed source and staged receiver. Older source tags, downloads and caches are unchanged and may retain the former default; use this release rather than rebuilding an old receiver. Historical tags are not rewritten.
 
@@ -27,14 +27,14 @@ Use your own signed-in Chrome and Codex accounts, an awake/online compatible Mac
 
 Preserve the extension public key/ID, Chrome storage selection, native-host registration, helper bundle, watch pairing, signing identity and private configuration. Back up existing files privately. End calls before any approved extension reload or bridge restart. Never remove a working installation to apply a patch or load a lower-numbered receiver over it.
 
-Receiver/Mac companion **0.3.15** is newer than both formerly documented receiver series. Keep one matching release version for the bridge, helper and extension; do not mix older components. This update does not replace the deployed relay service. The [provenance checkpoint](docs/receiver-provenance.md) records the previous mismatch without prescribing another version series.
+Receiver/Mac companion **0.3.17** is newer than both formerly documented receiver series. Keep one matching release version for the bridge, helper and extension; do not mix older components. This update does not replace the deployed relay service. The [provenance checkpoint](docs/receiver-provenance.md) records the previous mismatch without prescribing another version series.
 
 Watch updates use **Settings → App updates**, verify checksum/package/version/signing identity, and require the owner's system-installer confirmation. Existing tester private updates do not publish a public Alpha or grant broad launch authority.
 
 ## Voice routes and limits
 
 - **Local:** native Codex WebRTC voice attached to the selected local task. Tool availability follows that task/runtime. Cross-chat tools have their own scope; voice does not grant unrestricted access.
-- **Dot:** Chrome owns account identity and native call creation/attachment; Watch WebRTC owns microphone/speaker media. Relay must be enabled and the same Dot selected/configured. Existing calls are not taken over.
+- **Dot:** Chrome owns account identity and native call creation/attachment; Watch WebRTC owns microphone/speaker media. Relay must be enabled and the same Dot selected/configured. Existing calls are not taken over. Opening the selected Dot prepares one connection for up to 45 seconds; microphone recording and speaker playback stay inactive until Call. Preparation cancels when leaving the Dot or on expiry. Physical startup-speed acceptance of this change remains pending.
 - **Ordinary cloud:** a private ephemeral Mac voice companion forwards substantive requests to one selected cloud chat and speaks only its matched final reply. The cloud chat retains its model, settings and tools. The companion disables inherited local tools. Greetings/clarifications remain in the call; the full spoken transcript is not automatically saved to the cloud thread. Uncertain sends are not automatically repeated.
 - **Dictation:** explicit record/review/send, separate from live voice; local Whisper is the default transcription route. See [privacy](PRIVACY.md) for external media and data flows.
 

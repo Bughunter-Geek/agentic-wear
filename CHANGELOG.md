@@ -2,6 +2,14 @@
 
 Every public build remains an Alpha GitHub Pre-release until the project is explicitly promoted.
 
+## 0.6.38-alpha — 2026-10-14
+
+- Matches Watch 0.6.38/build120 with Mac companion 0.3.17; bridge, Chrome receiver and native helper share the Mac version.
+- Prepares one Watch-owned Dot connection when the selected Dot opens, with a fixed 45-second lifetime. Audio remains inactive until explicit Call; the native signed-in client retains authentication, allocation and cleanup.
+- Transfers the same peer and offer into Call instead of allocating a second endpoint. Defers native attachment until Call, cancels stale preparation, and preserves personal-browser-call ownership checks.
+- Includes the selected-Dot reconnect/admission fixes, connected-call timer and bounded metadata-only diagnostics. Preserves build119's Dot readiness and calling artwork.
+- Signed minified release assembly, release lint,354 Watch unit tests,93 focused browser/bridge tests and privacy/archive/version checks pass. Physical preparation and startup-speed acceptance remain pending. OpenAI distribution permission remains pending.
+
 ## 0.6.65-cloud-model-private — 2026-10-11
 
 - Reads all cloud effort labels from the browser model control before any selection; labels are scoped to that model.
