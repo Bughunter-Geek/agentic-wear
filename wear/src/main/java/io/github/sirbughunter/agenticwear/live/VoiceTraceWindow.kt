@@ -9,6 +9,7 @@ internal enum class VoiceTraceStage {
     ICE_STATE, PEER_STATE, CHANNEL_STATE, POLL_FAILED, STARTUP_FAILED, STARTUP_TIMEOUT, END,
     NETWORK_REQUEST, NETWORK_READY, OFFER_RETRY, ANSWER_DUPLICATE,
     PEER_CREATED, DEFAULT_ROUTE_OFFER,
+    TONE_START, TONE_STOP, TONE_FAILED, TONE_VOLUME,
 }
 
 /** Metadata only: no message, SDP, URL, address, caption or audio input is accepted. */

@@ -6,7 +6,7 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.ToneGenerator
+import android.media.MediaPlayer
 import android.os.*
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -43,7 +43,7 @@ class LiveVoiceService : Service() {
     private var callId: String? = null
     private var ending = false
     private var nativeDotCall = false
-    private var toneGenerator: ToneGenerator? = null
+    private var callingPlayer: MediaPlayer? = null
     private var callingTone: CallingTone? = null
     private var pollJob: Job? = null
     private var eventsJob: Job? = null
@@ -91,12 +91,34 @@ class LiveVoiceService : Service() {
         nativeDotCall = false
         callingTone = CallingTone(
             startPlayback = {
-                // Media volume lets call feedback work with the Watch ringer silenced.
-                // Optional local feedback: unavailable audio must not fail the voice call.
+                // Use actual media playback, independent of the Watch's ringer setting.
+                // Playback is optional and never blocks a functioning voice call.
                 try {
-                    toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
-                    if (toneGenerator?.startTone(ToneGenerator.TONE_SUP_RINGTONE) != true) stopCallingTonePlayback()
-                } catch (_: RuntimeException) { stopCallingTonePlayback() }
+                    VoiceTrace.event(VoiceTraceStage.TONE_VOLUME, count = audio.getStreamVolume(AudioManager.STREAM_MUSIC))
+                    callingPlayer = MediaPlayer.create(this,
+                        R.raw.calling_tone,
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build(), 0)
+                    val player = callingPlayer
+                    if (player == null) {
+                        VoiceTrace.event(VoiceTraceStage.TONE_FAILED, "OTHER")
+                    } else {
+                        player.isLooping = true
+                        player.setVolume(0.5f, 0.5f)
+                        player.setOnErrorListener { _, _, _ ->
+                            if (callingPlayer === player) {
+                                VoiceTrace.event(VoiceTraceStage.TONE_FAILED, "OTHER")
+                                stopCallingTonePlayback()
+                            }
+                            true
+                        }
+                        player.start()
+                        VoiceTrace.event(VoiceTraceStage.TONE_START, "OPEN")
+                    }
+                } catch (error: RuntimeException) {
+                    VoiceTrace.error(VoiceTraceStage.TONE_FAILED, error)
+                    stopCallingTonePlayback()
+                }
             },
             stopPlayback = ::stopCallingTonePlayback,
         )
@@ -396,11 +418,11 @@ class LiveVoiceService : Service() {
         }
     }
     private fun stopCallingTonePlayback() {
-        val tone = toneGenerator ?: return
-        toneGenerator = null
-        // Tone cleanup is independent of mandatory call/audio cleanup.
-        try { tone.stopTone() } catch (_: RuntimeException) { /* Optional playback already unavailable. */ }
-        try { tone.release() } catch (_: RuntimeException) { /* Never retain the instance or block teardown. */ }
+        val player = callingPlayer ?: return
+        callingPlayer = null
+        // Release stops media immediately, including on error and service destruction.
+        try { player.release() } catch (_: RuntimeException) { /* Optional player is already unavailable. */ }
+        VoiceTrace.event(VoiceTraceStage.TONE_STOP, "CLOSED")
     }
     private fun releaseAudio() {
         callingTone?.stop()
