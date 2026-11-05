@@ -62,6 +62,8 @@ Opening the selected Dot on the Watch home or chat screen prepares one connectio
 
 ## In-place updates
 
+After a macOS update, new user account or new Mac broke a self-hosted setup, follow [Mac reinstatement](docs/mac-reinstatement.md).
+
 Preserve the extension public key/ID, Chrome storage selection, native-host registration, helper bundle, watch pairing, signing identity and private configuration. Back up existing files privately. End calls before any approved extension reload or bridge restart. Never remove a working installation to apply a patch or load a lower-numbered receiver over it.
 
 Receiver/Mac companion **0.3.17** is newer than both formerly documented receiver series. Keep one matching release version for the bridge, helper and extension; do not mix older components. This update does not replace the deployed relay service. The [provenance checkpoint](docs/receiver-provenance.md) records the previous mismatch without prescribing another version series.
