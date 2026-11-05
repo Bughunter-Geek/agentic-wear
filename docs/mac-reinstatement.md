@@ -82,7 +82,7 @@ and `AGENTIC_WEAR_CODEX_PATH` for the bridge.
 ```sh
 export AW_ZROK_NAME=agentic-wear-xxxxxxxx
 bash scripts/mac-reinstate/reinstate.sh                                   # services only
-bash scripts/mac-reinstate/reinstate.sh --migrate-from "/Volumes/Macintosh HD/Users/<old-user>"
+bash scripts/mac-reinstate/reinstate.sh --migrate-from "/Volumes/Macintosh HD/Users/<old-user>" --pair
 bash scripts/mac-reinstate/reinstate.sh --pair                            # new Watch pairing
 ```
 
@@ -91,6 +91,10 @@ The script can be run repeatedly. Anything it replaces is kept as
 (optional; this includes `.env.local`, and an existing one is never overwritten), fixes the Codex config, applies the bridge schema fix, writes the
 relay, zrok and bridge LaunchAgents, runs the health checks, pairs (optional)
 and registers the Chrome native host.
+
+Pairing is not migrated: its keys live in the old account's Keychain. On an account
+without a usable pairing the script stops before replacing any service and asks
+for `--pair`.
 
 After `--pair`, on the Watch: **Settings → Disconnect bridge**, enter the code,
 and type the relay URL exactly as `https://<reserved-name>.shares.zrok.io`.

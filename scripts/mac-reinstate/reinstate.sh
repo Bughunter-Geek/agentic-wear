@@ -103,19 +103,37 @@ step "Bridge voice-list schema (accept v3)"
   if(i>=0&&j>i&&j-i<600&&!s.slice(i,j).includes("passthrough")){fs.copyFileSync(p,p+".bak");s=s.slice(0,j)+"}).passthrough(),"+s.slice(j+12);fs.writeFileSync(p,s);console.log("  patched");}
   else console.log("  already fine");' "$BRIDGE/bridge/dist/schemas.js"
 
+# ---------------------------------------------------------------- pairing state
+# The bridge cannot start without ~/.agentic-wear/config.json and its Keychain
+# credentials. Neither is migrated (the keys live in the old account's Keychain),
+# so a fresh account must pair. Check before any running service is replaced.
+pairing_ok() {
+  local cfg="$HOME/.agentic-wear/config.json" id
+  [ -f "$cfg" ] || return 1
+  id="$("$NODE" -e 'const c=require(process.argv[1]);if(!c.pairId||!c.watchPublicKey)process.exit(1);process.stdout.write(c.pairId)' "$cfg" 2>/dev/null)" || return 1
+  security find-generic-password -s io.github.sirbughunter.agenticwear.bridge -a "$id:ecdh-private-key" >/dev/null 2>&1 &&
+  security find-generic-password -s io.github.sirbughunter.agenticwear.bridge -a "$id:relay-credential" >/dev/null 2>&1
+}
+if [ "$PAIR" = 0 ]; then
+  pairing_ok && ok "existing pairing found" ||
+    die "No usable pairing on this account (config.json or its Keychain credentials are missing). Re-run with --pair."
+fi
+
 # ---------------------------------------------------------------- LaunchAgents
 mkdir -p "$LA" "$LOGS" "$HOME/.agentic-wear"; chmod 700 "$HOME/.agentic-wear" "$LOGS"
+# sed, not ${s//…}: bash ≥5.2 treats & in a replacement as the match (patsub_replacement).
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"; }
 plist() { # label workdir stdout stderr env-pairs(k=v;…) -- args…
   local label="$1" wd="$2" out="$3" err="$4" envs="$5"; shift 6
   { echo '<?xml version="1.0" encoding="UTF-8"?>'
     echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-    echo "<plist version=\"1.0\"><dict><key>Label</key><string>$label</string><key>ProgramArguments</key><array>"
-    for a in "$@"; do printf '<string>%s</string>\n' "$a"; done
-    echo "</array><key>WorkingDirectory</key><string>$wd</string><key>EnvironmentVariables</key><dict>"
-    echo "<key>HOME</key><string>$HOME</string><key>PATH</key><string>$NODE_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>"
-    local IFS=';'; for kv in $envs; do [ -n "$kv" ] && printf '<key>%s</key><string>%s</string>\n' "${kv%%=*}" "${kv#*=}"; done
+    echo "<plist version=\"1.0\"><dict><key>Label</key><string>$(xml "$label")</string><key>ProgramArguments</key><array>"
+    for a in "$@"; do printf '<string>%s</string>\n' "$(xml "$a")"; done
+    echo "</array><key>WorkingDirectory</key><string>$(xml "$wd")</string><key>EnvironmentVariables</key><dict>"
+    echo "<key>HOME</key><string>$(xml "$HOME")</string><key>PATH</key><string>$(xml "$NODE_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin")</string>"
+    local IFS=';'; for kv in $envs; do [ -n "$kv" ] && printf '<key>%s</key><string>%s</string>\n' "$(xml "${kv%%=*}")" "$(xml "${kv#*=}")"; done
     echo "</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>"
-    echo "<key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>$out</string><key>StandardErrorPath</key><string>$err</string></dict></plist>"
+    echo "<key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>$(xml "$out")</string><key>StandardErrorPath</key><string>$(xml "$err")</string></dict></plist>"
   } > "$LA/$label.plist"; chmod 600 "$LA/$label.plist"
   launchctl bootout "$D/$label" 2>/dev/null || true
   launchctl bootstrap "$D" "$LA/$label.plist"
