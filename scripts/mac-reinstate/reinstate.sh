@@ -60,6 +60,21 @@ if [ -n "$OLD" ]; then
   done
   xattr -dr com.apple.quarantine "$HOME/$ZROK_REL" "$RELAY" "$BRIDGE" 2>/dev/null || true
   chmod 700 "$HOME/.zrok2" "$STATE" 2>/dev/null || true
+  # Bridge settings live next to (not inside) the bridge directory, so copy them separately.
+  case "$ENVF" in
+    "$HOME"/*)
+      ENV_REL="${ENVF#"$HOME"/}"
+      if [ -f "$ENVF" ]; then
+        ok "keeping existing ~/$ENV_REL"
+      elif sudo test -f "$OLD/$ENV_REL"; then
+        mkdir -p "$(dirname "$ENVF")"
+        (umask 077; sudo cat "$OLD/$ENV_REL" > "$ENVF")
+        ok "~/$ENV_REL"
+      else
+        warn "missing in old account: $ENV_REL (set AW_ENV_FILE or create it before continuing)"
+      fi;;
+    *) warn "AW_ENV_FILE is outside \$HOME; not migrated";;
+  esac
 fi
 for p in "$BRIDGE/bridge/dist/cli.js" "$RELAY/server.mjs" "$ZROK" "$STATE"; do [ -e "$p" ] || die "Missing $p (use --migrate-from)"; done
 [ -f "$ENVF" ] || die "Missing $ENVF (bridge settings: OPENAI_API_KEY, AGENTIC_WEAR_TRANSCRIPTION_PROVIDER=openai, …)"
@@ -89,7 +104,7 @@ step "Bridge voice-list schema (accept v3)"
   else console.log("  already fine");' "$BRIDGE/bridge/dist/schemas.js"
 
 # ---------------------------------------------------------------- LaunchAgents
-mkdir -p "$LOGS" "$HOME/.agentic-wear"; chmod 700 "$HOME/.agentic-wear" "$LOGS"
+mkdir -p "$LA" "$LOGS" "$HOME/.agentic-wear"; chmod 700 "$HOME/.agentic-wear" "$LOGS"
 plist() { # label workdir stdout stderr env-pairs(k=v;…) -- args…
   local label="$1" wd="$2" out="$3" err="$4" envs="$5"; shift 6
   { echo '<?xml version="1.0" encoding="UTF-8"?>'

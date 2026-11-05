@@ -88,7 +88,7 @@ bash scripts/mac-reinstate/reinstate.sh --pair                            # new 
 
 The script can be run repeatedly. Anything it replaces is kept as
 `*.before-reinstate-<time>`. In order, it sets up Node, copies from the old home
-(optional), fixes the Codex config, applies the bridge schema fix, writes the
+(optional; this includes `.env.local`, and an existing one is never overwritten), fixes the Codex config, applies the bridge schema fix, writes the
 relay, zrok and bridge LaunchAgents, runs the health checks, pairs (optional)
 and registers the Chrome native host.
 
