@@ -45,6 +45,8 @@ You need a compatible Mac with Node.js 22+, Codex/native voice access, your own 
 4. **Match the Dot:** the Mac's private target configuration must match the selected Dot. The popup stores selection locally in Chrome; it does not rewrite the Mac configuration. Missing or mismatched selection blocks Dot access. A new tester must finish both sides with their deployment owner.
 5. **Verify the connection:** from the matching Mac package/source root, run `node bridge/dist/cli.js doctor` and `node bridge/dist/cli.js service status`. Confirm the established bridge is running, then open the Watch and confirm its chat list refreshes. Open your Dot in Chrome and try **Talk** on the Watch. For an ordinary cloud chat, keep its supported `chatgpt.com/local/...` page open with Relay enabled. Local Codex tasks use their native route.
 
+Restoring after a macOS reinstall, beta upgrade or username change: run `bash scripts/restore-relay-macos.sh` — see [restore](docs/RESTORE.md).
+
 Keep credentials and private Dot targets outside source/downloads. See [update instructions](#in-place-updates) before replacing an existing installation, and [distribution](docs/distribution.md)/[testing](docs/testing.md) for developer details.
 
 ## Choose how to speak

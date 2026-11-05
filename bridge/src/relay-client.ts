@@ -17,12 +17,37 @@ const pairConfirmationSchema = z.object({ paired: z.literal(true) }).strict();
 
 export type PairStartResponse = z.infer<typeof pairStartResponseSchema>;
 
+export interface RelaySocketTiming {
+  /** Interval between application-level pings sent to the relay. */
+  heartbeatMs: number;
+  /**
+   * Close and reconnect when nothing (not even a pong) arrives for this long.
+   * Without it a half-open TCP connection — typical after macOS sleep/wake or
+   * a Wi-Fi change — leaves the bridge "connected" forever while the watch
+   * never receives anything.
+   */
+  livenessTimeoutMs: number;
+  initialReconnectMs: number;
+  maxReconnectMs: number;
+}
+
+const defaultSocketTiming: RelaySocketTiming = {
+  heartbeatMs: 25_000,
+  livenessTimeoutMs: 75_000,
+  initialReconnectMs: 500,
+  maxReconnectMs: 15_000,
+};
+
 export class RelayClient {
+  private readonly timing: RelaySocketTiming;
+
   constructor(
     private readonly relayUrl: string,
     private readonly pairId?: string,
     private readonly credential?: string,
+    timing: Partial<RelaySocketTiming> = {},
   ) {
+    this.timing = { ...defaultSocketTiming, ...timing };
     const parsed = new URL(relayUrl);
     if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname))) {
       throw new Error("Relay URLs must use HTTPS outside local development");
@@ -87,17 +112,18 @@ export class RelayClient {
     onWatchPublicKey: (publicKey: string) => Promise<void>,
   ): Promise<void> {
     this.requirePair();
-    let reconnectDelay = 500;
+    let reconnectDelay = this.timing.initialReconnectMs;
     while (!signal.aborted) {
       try {
         await this.connectOnce(signal, onEnvelope, onWatchPublicKey);
-        reconnectDelay = 500;
+        reconnectDelay = this.timing.initialReconnectMs;
       } catch (error) {
         if (signal.aborted) return;
         console.error(JSON.stringify({ level: "error", message: "relay socket disconnected", error: safeError(error) }));
       }
-      await delay(reconnectDelay, signal);
-      reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
+      // Stopping during the back-off is a normal shutdown, not an error.
+      if (!(await delay(reconnectDelay, signal).then(() => true, () => false))) return;
+      reconnectDelay = Math.min(reconnectDelay * 2, this.timing.maxReconnectMs);
     }
   }
 
@@ -114,16 +140,33 @@ export class RelayClient {
         headers: { Authorization: `Bearer ${this.credential}`, "User-Agent": userAgent },
       });
       let chain = Promise.resolve();
+      let settled = false;
+      let lastActivity = Date.now();
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
       const heartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping", at: Date.now() }));
-      }, 25_000);
+        if (socket.readyState !== WebSocket.OPEN) return;
+        if (Date.now() - lastActivity > this.timing.livenessTimeoutMs) {
+          // terminate() destroys the TCP socket immediately; close() would wait
+          // for a closing handshake the dead peer never answers.
+          fail(new Error("Relay WebSocket stopped responding"));
+          socket.terminate();
+          return;
+        }
+        socket.send(JSON.stringify({ type: "ping", at: Date.now() }));
+      }, Math.min(this.timing.heartbeatMs, this.timing.livenessTimeoutMs));
       heartbeat.unref();
       const abort = () => socket.close(1000, "Bridge stopping");
       signal.addEventListener("abort", abort, { once: true });
       socket.on("open", () => {
+        lastActivity = Date.now();
         console.log(JSON.stringify({ level: "info", message: "relay socket connected" }));
       });
       socket.on("message", (raw, binary) => {
+        lastActivity = Date.now();
         chain = chain.then(async () => {
           if (binary || rawLength(raw) > 800 * 1_024) throw new Error("Relay sent an invalid message");
           const parsed = relaySocketMessageSchema.parse(JSON.parse(raw.toString("utf8")));
@@ -134,10 +177,14 @@ export class RelayClient {
         });
         void chain.catch((error: unknown) => socket.close(1008, safeError(error)));
       });
-      socket.once("error", reject);
+      // `on`, not `once`: ws may emit more than one error for a failing
+      // socket, and an unhandled second "error" event would crash the bridge.
+      socket.on("error", (error) => fail(error));
       socket.once("close", (code) => {
         clearInterval(heartbeat);
         signal.removeEventListener("abort", abort);
+        if (settled) return;
+        settled = true;
         if (signal.aborted || code === 1000) resolve();
         else reject(new Error(`Relay WebSocket closed (${code})`));
       });
@@ -204,11 +251,22 @@ async function boundedText(response: Response, limit: number): Promise<string> {
 
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
+    if (signal?.aborted) {
       reject(signal.reason);
-    }, { once: true });
+      return;
+    }
+    // Remove the abort listener when the timer fires; otherwise every
+    // reconnect attempt during a long outage leaks one listener on the
+    // bridge-lifetime signal.
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

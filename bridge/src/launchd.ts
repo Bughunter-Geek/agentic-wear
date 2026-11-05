@@ -17,15 +17,16 @@ export async function installLaunchAgent(
   const directory = dirname(plistPath);
   const cliPath = resolve(repoRoot, "bridge", "dist", "cli.js");
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  await mkdir(logDirectory(), { recursive: true, mode: 0o700 });
   const temporary = `${plistPath}.${process.pid}.tmp`;
-  await writeFile(temporary, plist(nodePath, cliPath, repoRoot, codexPath), {
+  await writeFile(temporary, plist(nodePath, cliPath, repoRoot, codexPath, logDirectory()), {
     encoding: "utf8",
     mode: 0o600,
   });
   await rename(temporary, plistPath);
   await chmod(plistPath, 0o600);
   await bootout().catch(() => undefined);
-  await execFileAsync("launchctl", ["bootstrap", domain(), plistPath], { timeout: 15_000, maxBuffer: 64 * 1_024 });
+  await bootstrapWithRetry(plistPath);
   await execFileAsync("launchctl", ["kickstart", "-k", `${domain()}/${label}`], {
     timeout: 15_000,
     maxBuffer: 64 * 1_024,
@@ -51,7 +52,37 @@ export async function launchAgentStatus(): Promise<boolean> {
   }
 }
 
-function plist(nodePath: string, cliPath: string, repoRoot: string, codexPath: string): string {
+/**
+ * launchd starts agents with PATH=/usr/bin:/bin:/usr/sbin:/sbin. An npm- or
+ * Homebrew-installed `codex` is a `#!/usr/bin/env node` script, so without the
+ * Node and Codex directories on PATH the managed App Server cannot start from
+ * the LaunchAgent even though it works from an interactive shell.
+ */
+export function launchAgentPathVariable(nodePath: string, codexPath: string): string {
+  const entries = [
+    dirname(nodePath),
+    dirname(codexPath),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+  return [...new Set(entries)].join(":");
+}
+
+export function logDirectory(): string {
+  return join(homedir(), "Library", "Logs", "AgenticWear");
+}
+
+export function plist(
+  nodePath: string,
+  cliPath: string,
+  repoRoot: string,
+  codexPath: string,
+  logs: string,
+): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -70,7 +101,15 @@ function plist(nodePath: string, cliPath: string, repoRoot: string, codexPath: s
   <dict>
     <key>AGENTIC_WEAR_CODEX_PATH</key>
     <string>${escapeXml(codexPath)}</string>
+    <key>AGENTIC_WEAR_ENV_FILE</key>
+    <string>${escapeXml(join(repoRoot, ".env.local"))}</string>
+    <key>PATH</key>
+    <string>${escapeXml(launchAgentPathVariable(nodePath, codexPath))}</string>
   </dict>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(join(logs, "bridge.log"))}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(join(logs, "bridge.err.log"))}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -94,6 +133,25 @@ function launchAgentPath(): string {
 
 function domain(): string {
   return `gui/${process.getuid?.() ?? 0}`;
+}
+
+/**
+ * `launchctl bootout` returns before the old job is fully torn down, so an
+ * immediate `bootstrap` often fails with "Bootstrap failed: 5: Input/output
+ * error" (frequent on macOS betas). Retry briefly instead of failing install.
+ */
+async function bootstrapWithRetry(plistPath: string): Promise<void> {
+  let lastError: unknown;
+  for (const waitMs of [0, 500, 1_000, 2_000, 4_000]) {
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    try {
+      await execFileAsync("launchctl", ["bootstrap", domain(), plistPath], { timeout: 15_000, maxBuffer: 64 * 1_024 });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("launchctl bootstrap failed");
 }
 
 async function bootout(): Promise<void> {
